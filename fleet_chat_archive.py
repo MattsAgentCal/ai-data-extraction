@@ -129,6 +129,7 @@ REGEX_CASE_TRANSLATION = str.maketrans(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZİıſK", "abcdefghijklmnopqrstuvwxyziisk"
 )
 OBJECT_NAME_RE = re.compile(r"[0-9a-f]{64}\.json\Z")
+RECEIPT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.json\Z")
 APPROVED_HARNESSES = {"claude", "codex", "openclaw", "hermes"}
 HARNESS_SOURCES = {
     "claude": {"claude-code"},
@@ -1288,15 +1289,11 @@ def validate_object_file(path: Path) -> dict:
     return value
 
 
-def validate_index_file(
-    index_path: Path,
-    source_root: Path,
-    host_id: str,
-    harness: str,
-    *,
-    require_exact_object_set: bool = True,
-) -> dict:
+def validate_index_metadata(index_path: Path, host_id: str, harness: str) -> dict:
+    """Validate an index without opening any conversation object bodies."""
     index = read_json_nofollow(index_path)
+    if not isinstance(index, dict):
+        raise ValueError(f"invalid archive index identity: {index_path.name}")
     if (
         index.get("schema_version") != 1
         or index.get("host_id") != host_id
@@ -1325,6 +1322,22 @@ def validate_index_file(
             raise ValueError(f"duplicate archive index row: {digest}")
         if row.get("source") not in HARNESS_SOURCES[harness]:
             raise ValueError(f"unauthorized source in {harness} index")
+        referenced.add(digest)
+    return index
+
+
+def validate_index_file(
+    index_path: Path,
+    source_root: Path,
+    host_id: str,
+    harness: str,
+    *,
+    require_exact_object_set: bool = True,
+) -> dict:
+    index = validate_index_metadata(index_path, host_id, harness)
+    referenced: set[str] = set()
+    for row in index["conversations"]:
+        digest = row["object_sha256"]
         object_path = source_root / harness / "objects" / f"{digest}.json"
         if not object_path.is_file() or object_path.is_symlink():
             raise ValueError(f"archive index references missing object: {digest}")
@@ -1398,16 +1411,14 @@ def write_publish_manifest(
     return manifest
 
 
-def validate_publish_manifest(
-    source_root: Path,
-    host_id: str,
-    present_harnesses: set[str],
-    receipt_paths: list[Path],
-) -> dict:
+def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
+    """Validate the manifest fields needed to derive a transfer allowlist."""
     manifest_path = source_root / "publish-manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise ValueError(f"host shard has no publish manifest: {host_id}")
     manifest = read_json_nofollow(manifest_path)
+    if not isinstance(manifest, dict):
+        raise ValueError(f"invalid publish manifest identity: {host_id}")
     harnesses = manifest.get("harnesses")
     receipt_binding = manifest.get("receipt")
     digest_fields = (
@@ -1419,22 +1430,64 @@ def validate_publish_manifest(
         manifest.get("schema_version") != 1
         or manifest.get("host_id") != host_id
         or not isinstance(manifest.get("run_id"), str)
+        or not manifest["run_id"]
         or not isinstance(manifest.get("generated_at"), str)
-        or not all(re.fullmatch(r"[0-9a-f]{64}", str(value)) for value in digest_fields)
+        or not manifest["generated_at"]
+        or not all(
+            isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in digest_fields
+        )
         or not isinstance(harnesses, dict)
-        or not set(harnesses).issubset(present_harnesses)
-        or not present_harnesses.issubset(APPROVED_HARNESSES)
+        or not set(harnesses).issubset(APPROVED_HARNESSES)
         or not isinstance(receipt_binding, dict)
     ):
         raise ValueError(f"invalid publish manifest identity: {host_id}")
 
-    receipt_relative = Path(str(receipt_binding.get("path", "")))
+    receipt_value = receipt_binding.get("path")
+    receipt_relative = Path(receipt_value) if isinstance(receipt_value, str) else Path()
     if (
-        len(receipt_relative.parts) != 2
+        not isinstance(receipt_value, str)
+        or receipt_relative.as_posix() != receipt_value
+        or len(receipt_relative.parts) != 2
         or receipt_relative.parts[0] != "receipts"
-        or not receipt_relative.name.endswith(".json")
+        or not RECEIPT_NAME_RE.fullmatch(receipt_relative.name)
     ):
         raise ValueError(f"invalid manifest receipt path: {host_id}")
+    for harness, binding in harnesses.items():
+        object_digests = (
+            binding.get("object_sha256") if isinstance(binding, dict) else None
+        )
+        if (
+            not isinstance(binding, dict)
+            or not isinstance(binding.get("index_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", binding["index_sha256"])
+            or not isinstance(object_digests, list)
+            or any(
+                not isinstance(item, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", item)
+                for item in object_digests
+            )
+            or object_digests != sorted(set(object_digests))
+        ):
+            raise ValueError(f"invalid publish manifest binding for {harness}")
+    return manifest
+
+
+def validate_publish_manifest(
+    source_root: Path,
+    host_id: str,
+    present_harnesses: set[str],
+    receipt_paths: list[Path],
+    *,
+    require_objects: bool = True,
+) -> dict:
+    manifest = validate_publish_manifest_metadata(source_root, host_id)
+    harnesses = manifest["harnesses"]
+    receipt_binding = manifest["receipt"]
+    if set(harnesses) != present_harnesses:
+        raise ValueError(f"invalid publish manifest identity: {host_id}")
+
+    receipt_relative = Path(receipt_binding["path"])
     receipt_path = source_root / receipt_relative
     if receipt_path not in receipt_paths:
         raise ValueError(f"manifest receipt is missing: {host_id}")
@@ -1442,6 +1495,8 @@ def validate_publish_manifest(
     if hashlib.sha256(receipt_payload).hexdigest() != receipt_binding["sha256"]:
         raise ValueError(f"manifest receipt hash mismatch: {host_id}")
     receipt = json.loads(receipt_payload)
+    if not isinstance(receipt, dict):
+        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
     receipt_harnesses = receipt.get("harnesses")
     collection_status = receipt.get("collection_status", receipt.get("status"))
     if (
@@ -1466,23 +1521,24 @@ def validate_publish_manifest(
         }:
             raise ValueError(f"manifest receipt has incomplete {harness} extraction")
         binding = harnesses.get(harness)
-        object_digests = binding.get("object_sha256") if isinstance(binding, dict) else None
+        object_digests = (
+            binding.get("object_sha256") if isinstance(binding, dict) else None
+        )
         index_path = source_root / harness / "index.json"
-        index = validate_index_file(
-            index_path,
-            source_root,
-            host_id,
-            harness,
-            require_exact_object_set=False,
+        index = (
+            validate_index_file(
+                index_path,
+                source_root,
+                host_id,
+                harness,
+                require_exact_object_set=False,
+            )
+            if require_objects
+            else validate_index_metadata(index_path, host_id, harness)
         )
         actual_digests = sorted(row["object_sha256"] for row in index["conversations"])
         if (
-            not isinstance(binding, dict)
-            or not re.fullmatch(r"[0-9a-f]{64}", str(binding.get("index_sha256", "")))
-            or not isinstance(object_digests, list)
-            or any(not re.fullmatch(r"[0-9a-f]{64}", str(item)) for item in object_digests)
-            or len(object_digests) != len(set(object_digests))
-            or object_digests != actual_digests
+            object_digests != actual_digests
             or binding["index_sha256"] != file_sha256(index_path)
         ):
             raise ValueError(f"publish manifest snapshot mismatch for {harness}")
@@ -2065,6 +2121,133 @@ def publish_host_shard(
         }
 
 
+def manifest_transfer_paths(manifest: dict) -> tuple[set[str], set[str]]:
+    """Return exact metadata and object paths authorized by a valid manifest."""
+    metadata = {"publish-manifest.json", manifest["receipt"]["path"]}
+    objects: set[str] = set()
+    for harness, binding in manifest["harnesses"].items():
+        metadata.add(f"{harness}/index.json")
+        objects.update(
+            f"{harness}/objects/{digest}.json"
+            for digest in binding["object_sha256"]
+        )
+    return metadata, objects
+
+
+def validate_staged_allowlist(source_root: Path, allowed_paths: set[str]) -> None:
+    """Reject missing, extra, non-regular, or symlinked staged entries."""
+    source_root = assert_no_symlink_components(source_root)
+    allowed_directories = {
+        Path(*Path(relative).parts[:depth]).as_posix()
+        for relative in allowed_paths
+        for depth in range(1, len(Path(relative).parts))
+    }
+    actual_paths: set[str] = set()
+    actual_directories: set[str] = set()
+    for current_root, directories, names in os.walk(source_root, followlinks=False):
+        current = Path(current_root)
+        for name in directories:
+            candidate = current / name
+            if candidate.is_symlink():
+                raise ValueError(f"refusing symlink in staged remote shard: {candidate}")
+            actual_directories.add(candidate.relative_to(source_root).as_posix())
+        for name in names:
+            candidate = current / name
+            if candidate.is_symlink() or not candidate.is_file():
+                raise ValueError(f"refusing unsafe staged remote entry: {candidate}")
+            actual_paths.add(candidate.relative_to(source_root).as_posix())
+    unauthorized = actual_paths - allowed_paths
+    unauthorized_directories = actual_directories - allowed_directories
+    missing = allowed_paths - actual_paths
+    if unauthorized or unauthorized_directories:
+        raise ValueError("remote transfer produced a path outside the manifest allowlist")
+    if missing:
+        raise ValueError("remote transfer omitted a manifest-authorized path")
+
+
+def rsync_remote_allowlist(
+    source: str,
+    destination: Path,
+    relative_paths: set[str],
+    *,
+    timeout_seconds: int,
+    link_dest: Path | None,
+) -> None:
+    """Fetch only NUL-delimited relative paths; none reach a remote shell."""
+    command = [
+        "rsync",
+        "-rtz",
+        "--checksum",
+        "--no-links",
+        "--safe-links",
+        "--relative",
+        "--from0",
+        "--files-from=-",
+    ]
+    if link_dest is not None:
+        command.append(f"--link-dest={link_dest}")
+    command.extend(
+        [
+            "-e",
+            "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ControlMaster=no -o ControlPath=none",
+            source,
+            str(destination) + "/",
+        ]
+    )
+    subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        input="".join(f"{relative}\0" for relative in sorted(relative_paths)),
+        timeout=timeout_seconds,
+    )
+
+
+def assert_remote_transfer_paths_have_no_symlink_components(
+    ssh_options: list[str],
+    ssh_host: str,
+    remote_shard_path: str,
+    relative_paths: set[str],
+    *,
+    timeout_seconds: int,
+) -> None:
+    """Reject symlinked remote parent paths before each allowlisted transfer."""
+    remote_root = Path(remote_shard_path)
+    checked_paths = {
+        Path(*remote_root.parts[:depth]).as_posix()
+        for depth in range(2, len(remote_root.parts) + 1)
+    }
+    for relative in relative_paths:
+        candidate = remote_root / relative
+        checked_paths.update(
+            Path(*candidate.parts[:depth]).as_posix()
+            for depth in range(2, len(candidate.parts))
+        )
+    test_expression: list[str] = []
+    for path in sorted(checked_paths):
+        if test_expression:
+            test_expression.append("-a")
+        test_expression.extend(["!", "-L", path])
+    completed = subprocess.run(
+        [
+            "ssh",
+            *ssh_options,
+            ssh_host,
+            "test",
+            *test_expression,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+    if completed.returncode == 1:
+        raise ValueError("remote transfer path contains a symlink component")
+    if completed.returncode != 0:
+        raise subprocess.CalledProcessError(completed.returncode, completed.args)
+
+
 def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
     spool_root = validate_output_root(spool_root)
     statuses = {}
@@ -2113,10 +2296,10 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
             "-o",
             "ControlPath=none",
         ]
-        manifest_path = (
-            f"{remote_spool_root.rstrip('/')}/hosts/{remote_host_id}/"
-            "publish-manifest.json"
+        remote_shard_path = (
+            f"{remote_spool_root.rstrip('/')}/hosts/{remote_host_id}"
         )
+        manifest_path = f"{remote_shard_path}/publish-manifest.json"
         try:
             manifest_probe = subprocess.run(
                 ["ssh", *ssh_options, ssh_host, "test", "-f", manifest_path],
@@ -2164,40 +2347,88 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
             with tempfile.TemporaryDirectory(
                 dir=incoming_root, prefix=f"{remote_host_id}-"
             ) as incoming:
-                rsync_command = [
-                    "rsync",
-                    "-rtz",
-                    "--checksum",
-                    "--no-links",
-                    "--safe-links",
-                    "--exclude=.*",
-                    "--exclude=*.tmp",
-                    "--exclude=*.partial",
-                ]
-                if link_dest is not None:
-                    # Build every incoming shard as a complete snapshot while
-                    # hard-linking unchanged files from the last validated
-                    # local snapshot. This keeps validation fail-closed and
-                    # avoids retransferring a multi-gigabyte archive each run.
-                    rsync_command.append(f"--link-dest={link_dest}")
-                rsync_command.extend(
-                    [
-                        "-e",
-                        "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ControlMaster=no -o ControlPath=none",
-                        source,
-                        str(Path(incoming)) + "/",
-                    ]
+                incoming_path = Path(incoming)
+                timeout_seconds = int(remote.get("timeout_seconds", 300))
+
+                # Pin the authorization document before asking the remote for
+                # any receipt, index, or conversation body.
+                manifest_only = {"publish-manifest.json"}
+                assert_remote_transfer_paths_have_no_symlink_components(
+                    ssh_options,
+                    ssh_host,
+                    remote_shard_path,
+                    manifest_only,
+                    timeout_seconds=min(timeout_seconds, 30),
                 )
-                subprocess.run(
-                    rsync_command,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=int(remote.get("timeout_seconds", 300)),
+                rsync_remote_allowlist(
+                    source,
+                    incoming_path,
+                    manifest_only,
+                    timeout_seconds=timeout_seconds,
+                    link_dest=link_dest,
                 )
-                result = merge_host_shard(
-                    Path(incoming), spool_root, remote_host_id
+                validate_staged_allowlist(incoming_path, manifest_only)
+                manifest_payload = read_bytes_nofollow(
+                    incoming_path / "publish-manifest.json"
                 )
+                manifest = validate_publish_manifest_metadata(
+                    incoming_path, remote_host_id
+                )
+                metadata_paths, object_paths = manifest_transfer_paths(manifest)
+
+                # Re-fetch the manifest with its bound receipt and indexes.
+                # Exact byte equality detects a publish race before bodies move.
+                assert_remote_transfer_paths_have_no_symlink_components(
+                    ssh_options,
+                    ssh_host,
+                    remote_shard_path,
+                    metadata_paths,
+                    timeout_seconds=min(timeout_seconds, 30),
+                )
+                rsync_remote_allowlist(
+                    source,
+                    incoming_path,
+                    metadata_paths,
+                    timeout_seconds=timeout_seconds,
+                    link_dest=link_dest,
+                )
+                validate_staged_allowlist(incoming_path, metadata_paths)
+                if read_bytes_nofollow(
+                    incoming_path / "publish-manifest.json"
+                ) != manifest_payload:
+                    raise ValueError("remote publish manifest changed during pull")
+                validate_publish_manifest(
+                    incoming_path,
+                    remote_host_id,
+                    set(manifest["harnesses"]),
+                    [incoming_path / manifest["receipt"]["path"]],
+                    require_objects=False,
+                )
+
+                # The final request contains only content-addressed objects from
+                # the pinned manifest (plus the manifest race sentinel).
+                assert_remote_transfer_paths_have_no_symlink_components(
+                    ssh_options,
+                    ssh_host,
+                    remote_shard_path,
+                    object_paths | manifest_only,
+                    timeout_seconds=min(timeout_seconds, 30),
+                )
+                rsync_remote_allowlist(
+                    source,
+                    incoming_path,
+                    object_paths | manifest_only,
+                    timeout_seconds=timeout_seconds,
+                    link_dest=link_dest,
+                )
+                validate_staged_allowlist(
+                    incoming_path, metadata_paths | object_paths
+                )
+                if read_bytes_nofollow(
+                    incoming_path / "publish-manifest.json"
+                ) != manifest_payload:
+                    raise ValueError("remote publish manifest changed during pull")
+                result = merge_host_shard(incoming_path, spool_root, remote_host_id)
             statuses[remote_host_id] = {
                 "status": "pulled",
                 "files_copied": result["files_copied"],

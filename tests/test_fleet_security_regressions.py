@@ -93,6 +93,25 @@ def safe_temporary_directory():
     return tempfile.TemporaryDirectory(prefix="fleet-security-", dir=Path.home())
 
 
+def emulate_allowlisted_rsync(command: list[str], kwargs: dict, source: Path):
+    """Copy only the NUL-delimited paths a remote rsync was asked to send."""
+    destination = Path(command[-1].rstrip("/"))
+    destination.mkdir(parents=True, exist_ok=True)
+    relative_paths = [item for item in kwargs.get("input", "").split("\0") if item]
+    for relative in relative_paths:
+        source_path = source / relative
+        if source_path.is_symlink():
+            continue
+        if not source_path.is_file():
+            raise subprocess.CalledProcessError(23, command)
+        destination_path = destination / relative
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        if destination_path.exists() or destination_path.is_symlink():
+            destination_path.unlink()
+        shutil.copy2(source_path, destination_path)
+    return subprocess.CompletedProcess(command, 0)
+
+
 class FleetSecurityRegressionTests(unittest.TestCase):
     def test_manifest_receipt_hash_and_json_use_one_byte_snapshot(self):
         with safe_temporary_directory() as tmp:
@@ -1242,13 +1261,17 @@ class FleetSecurityRegressionTests(unittest.TestCase):
     def test_interrupted_remote_pull_never_leaves_a_partial_final_shard(self):
         with safe_temporary_directory() as tmp:
             spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            write_healthy_receipt(remote_shard)
 
-            def interrupted_rsync(command, **_kwargs):
+            def interrupted_rsync(command, **kwargs):
                 if command[0] == "ssh":
                     return subprocess.CompletedProcess(command, 0)
-                destination = Path(command[-1].rstrip("/"))
-                write_archive_object(destination)
-                raise subprocess.CalledProcessError(23, command)
+                result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
+                if "/objects/" in kwargs.get("input", ""):
+                    raise subprocess.CalledProcessError(23, command)
+                return result
 
             hub = {
                 "remotes": [
@@ -1298,6 +1321,199 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][0], "ssh")
 
+    def test_remote_pull_never_stages_an_unmanifested_object(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            write_healthy_receipt(remote_shard)
+            unmanifested_body = fleet.canonical_json(
+                {
+                    "schema_version": 1,
+                    "source": "claude-code",
+                    "session_id": "must-not-cross-hosts",
+                    "messages": [{"role": "user", "content": "private body"}],
+                }
+            )
+            unmanifested_digest = hashlib.sha256(unmanifested_body).hexdigest()
+            unmanifested_relative = (
+                f"claude/objects/{unmanifested_digest}.json"
+            )
+            (remote_shard / unmanifested_relative).write_bytes(
+                unmanifested_body + b"\n"
+            )
+            requested: list[str] = []
+
+            def allowlisted_pull(command, **kwargs):
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                requested.extend(
+                    item for item in kwargs["input"].split("\0") if item
+                )
+                result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
+                self.assertFalse(
+                    (Path(command[-1].rstrip("/")) / unmanifested_relative).exists()
+                )
+                return result
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess, "run", side_effect=allowlisted_pull
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertEqual(result["remotes"]["mini"]["status"], "pulled")
+            self.assertNotIn(unmanifested_relative, requested)
+            self.assertFalse(
+                any(
+                    path.name == f"{unmanifested_digest}.json"
+                    for path in (spool_root / ".incoming").rglob("*.json")
+                )
+            )
+
+    def test_remote_pull_rejects_manifest_mutation_before_copying_objects(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            write_healthy_receipt(remote_shard)
+            remote_manifest = remote_shard / "publish-manifest.json"
+            changed_manifest = json.loads(remote_manifest.read_text())
+            changed_manifest["generated_at"] = "2026-08-28T12:00:00+00:00"
+            rsync_calls = 0
+            requested: list[str] = []
+
+            def mutate_after_manifest(command, **kwargs):
+                nonlocal rsync_calls
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                rsync_calls += 1
+                requested.extend(
+                    item for item in kwargs["input"].split("\0") if item
+                )
+                result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
+                if rsync_calls == 1:
+                    remote_manifest.write_text(
+                        json.dumps(changed_manifest, sort_keys=True) + "\n"
+                    )
+                return result
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess, "run", side_effect=mutate_after_manifest
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertEqual(
+                result["remotes"]["mini"]["status"],
+                "blocked_integrity_failure",
+            )
+            self.assertIn("changed during pull", result["remotes"]["mini"]["error"])
+            self.assertFalse(any("/objects/" in path for path in requested))
+            self.assertFalse((spool_root / "hosts" / "mini").exists())
+
+    def test_remote_pull_rejects_unauthorized_manifest_paths(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            write_healthy_receipt(remote_shard)
+            manifest_path = remote_shard / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["receipt"]["path"] = "receipts/../claude/index.json"
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+            requested: list[str] = []
+
+            def record_allowlist(command, **kwargs):
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                requested.extend(
+                    item for item in kwargs["input"].split("\0") if item
+                )
+                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess, "run", side_effect=record_allowlist
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertEqual(
+                result["remotes"]["mini"]["status"],
+                "blocked_integrity_failure",
+            )
+            self.assertEqual(requested, ["publish-manifest.json"])
+            self.assertFalse((spool_root / "hosts" / "mini").exists())
+
+    def test_remote_pull_rejects_manifest_bound_symlinks_before_objects(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            receipt_path = write_healthy_receipt(remote_shard)
+            outside_receipts = Path(tmp) / "outside-receipts"
+            receipt_path.parent.rename(outside_receipts)
+            receipt_path.parent.symlink_to(outside_receipts, target_is_directory=True)
+            requested: list[str] = []
+
+            def nofollow_pull(command, **kwargs):
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(
+                        command,
+                        1
+                        if any(str(item).endswith("/receipts") for item in command)
+                        else 0,
+                    )
+                requested.extend(
+                    item for item in kwargs["input"].split("\0") if item
+                )
+                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess, "run", side_effect=nofollow_pull
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertEqual(
+                result["remotes"]["mini"]["status"],
+                "blocked_integrity_failure",
+            )
+            self.assertEqual(requested, ["publish-manifest.json"])
+            self.assertFalse((spool_root / "hosts" / "mini").exists())
+
     def test_remote_pull_reuses_only_a_validated_cached_shard(self):
         with safe_temporary_directory() as tmp:
             spool_root = Path(tmp) / "spool"
@@ -1306,18 +1522,11 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             write_healthy_receipt(cached_shard)
             commands = []
 
-            def completed_pull(command, **_kwargs):
+            def completed_pull(command, **kwargs):
                 commands.append(command)
                 if command[0] == "ssh":
                     return subprocess.CompletedProcess(command, 0)
-                destination = Path(command[-1].rstrip("/"))
-                shutil.copytree(
-                    cached_shard,
-                    destination,
-                    dirs_exist_ok=True,
-                    copy_function=os.link,
-                )
-                return subprocess.CompletedProcess(command, 0)
+                return emulate_allowlisted_rsync(command, kwargs, cached_shard)
 
             hub = {
                 "remotes": [
@@ -1334,10 +1543,14 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 result = fleet.pull_hub_remotes(hub, spool_root)
 
             self.assertEqual(result["remotes"]["mini"]["status"], "pulled")
-            rsync_command = commands[1]
-            self.assertEqual(rsync_command[0:2], ["rsync", "-rtz"])
-            self.assertIn("--checksum", rsync_command)
-            self.assertIn(f"--link-dest={cached_shard}", rsync_command)
+            rsync_commands = [
+                command for command in commands if command[0] == "rsync"
+            ]
+            self.assertEqual(len(rsync_commands), 3)
+            for rsync_command in rsync_commands:
+                self.assertEqual(rsync_command[0:2], ["rsync", "-rtz"])
+                self.assertIn("--checksum", rsync_command)
+                self.assertIn(f"--link-dest={cached_shard}", rsync_command)
 
     def test_cached_remote_pull_checksums_equal_size_equal_mtime_files(self):
         with safe_temporary_directory() as tmp:
@@ -1350,7 +1563,9 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             changed = original.replace(b"healthy-test", b"updated-test", 1)
             self.assertEqual(len(original), len(changed))
             original_times = manifest_path.stat()
-            remote_manifest = Path(tmp) / "remote-manifest.json"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            shutil.copytree(cached_shard, remote_shard)
+            remote_manifest = remote_shard / "publish-manifest.json"
             remote_manifest.write_bytes(changed)
             os.utime(
                 remote_manifest,
@@ -1359,22 +1574,11 @@ class FleetSecurityRegressionTests(unittest.TestCase):
 
             commands = []
 
-            def emulate_quick_check(command, **_kwargs):
+            def emulate_quick_check(command, **kwargs):
                 commands.append(command)
                 if command[0] == "ssh":
                     return subprocess.CompletedProcess(command, 0)
-                destination = Path(command[-1].rstrip("/"))
-                shutil.copytree(
-                    cached_shard,
-                    destination,
-                    dirs_exist_ok=True,
-                    copy_function=os.link,
-                )
-                destination_manifest = destination / "publish-manifest.json"
-                if "--checksum" in command:
-                    destination_manifest.unlink()
-                    shutil.copy2(remote_manifest, destination_manifest)
-                return subprocess.CompletedProcess(command, 0)
+                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
 
             hub = {
                 "remotes": [
@@ -1390,11 +1594,16 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             ):
                 result = fleet.pull_hub_remotes(hub, spool_root)
 
-            self.assertIn("--checksum", commands[1])
+            rsync_commands = [
+                command for command in commands if command[0] == "rsync"
+            ]
+            self.assertTrue(rsync_commands)
+            self.assertIn("--checksum", rsync_commands[0])
             self.assertEqual(
                 result["remotes"]["mini"]["status"],
                 "blocked_integrity_failure",
             )
+            self.assertEqual(manifest_path.read_bytes(), original)
 
     def test_remote_pull_rejects_corrupt_cache_before_rsync(self):
         with safe_temporary_directory() as tmp:
