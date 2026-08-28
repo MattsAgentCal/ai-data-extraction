@@ -4202,6 +4202,189 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 require_healthy_receipt=False,
             )
 
+    def test_local_merges_defer_unrelated_legacy_validation_until_replacement(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination_parent = root / "spool"
+            destination_shard = destination_parent / "hosts" / "test-mac"
+            write_archive_object(destination_shard, host_id="test-mac")
+            prior_receipt_path = write_healthy_receipt(destination_shard)
+            prior_manifest = (destination_shard / "publish-manifest.json").read_bytes()
+
+            poisoned_codex = {
+                "schema_version": 1,
+                "source": "codex",
+                "session_id": "legacy-codex-session",
+                "messages": [
+                    {"role": "user", "content": "Bearer abcdefghijklmnop"}
+                ],
+            }
+            poisoned_payload = fleet.canonical_json(poisoned_codex)
+            poisoned_digest = hashlib.sha256(poisoned_payload).hexdigest()
+            poisoned_object = (
+                destination_shard
+                / "codex"
+                / "objects"
+                / f"{poisoned_digest}.json"
+            )
+            poisoned_object.parent.mkdir(parents=True)
+            poisoned_object.write_bytes(poisoned_payload + b"\n")
+            write_canonical_json(
+                destination_shard / "codex" / "index.json",
+                {
+                    "schema_version": 1,
+                    "host_id": "test-mac",
+                    "harness": "codex",
+                    "conversations": [
+                        {
+                            "object_sha256": poisoned_digest,
+                            "session_id": "legacy-codex-session",
+                            "source": "codex",
+                        }
+                    ],
+                },
+            )
+
+            staged_claude = root / "staged-claude"
+            fleet.archive_conversations(
+                staged_claude,
+                "test-mac",
+                "claude",
+                [
+                    {
+                        "source": "claude-code",
+                        "session_id": "new-claude-session",
+                        "messages": [{"role": "user", "content": "clean Claude"}],
+                    }
+                ],
+            )
+            fleet.merge_host_shard(
+                staged_claude / "hosts" / "test-mac",
+                destination_parent,
+                "test-mac",
+                require_healthy_receipt=False,
+            )
+            self.assertEqual(
+                (destination_shard / "publish-manifest.json").read_bytes(),
+                prior_manifest,
+            )
+
+            staged_codex = root / "staged-codex"
+            fleet.archive_conversations(
+                staged_codex,
+                "test-mac",
+                "codex",
+                [
+                    {
+                        "source": "codex",
+                        "session_id": "legacy-codex-session",
+                        "installation": "/clean/codex",
+                        "_archive_source_sha256": "d" * 64,
+                        "messages": [{"role": "user", "content": "clean Codex"}],
+                    }
+                ],
+            )
+            fleet.merge_host_shard(
+                staged_codex / "hosts" / "test-mac",
+                destination_parent,
+                "test-mac",
+                require_healthy_receipt=False,
+            )
+            codex_index = json.loads(
+                (destination_shard / "codex" / "index.json").read_text()
+            )
+            self.assertEqual(len(codex_index["conversations"]), 1)
+            self.assertNotEqual(
+                codex_index["conversations"][0]["object_sha256"], poisoned_digest
+            )
+            self.assertTrue(poisoned_object.is_file())
+            self.assertEqual(
+                (destination_shard / "publish-manifest.json").read_bytes(),
+                prior_manifest,
+            )
+
+            final_run_id = "20260828T120000.000000Z-feedface"
+            final_receipt_path = (
+                destination_shard / "receipts" / f"{final_run_id}.json"
+            )
+            final_receipt = json.loads(prior_receipt_path.read_text())
+            final_receipt["run_id"] = final_run_id
+            final_receipt["receipt_path"] = str(final_receipt_path)
+            final_receipt["harnesses"]["codex"] = dict(
+                final_receipt["harnesses"]["claude"]
+            )
+            write_canonical_json(final_receipt_path, final_receipt)
+            fleet.write_publish_manifest(
+                destination_shard,
+                final_receipt_path,
+                final_receipt,
+                "c" * 64,
+            )
+            self.assertTrue(poisoned_object.is_file())
+            self.assertEqual(
+                fleet.quarantine_unindexed_objects(destination_parent, "test-mac"),
+                1,
+            )
+            self.assertFalse(poisoned_object.exists())
+            fleet.validated_shard_files(destination_shard, "test-mac")
+
+    def test_local_post_merge_validation_rejects_corruption_and_restores_index(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination_parent = root / "spool"
+            destination_shard = destination_parent / "hosts" / "test-mac"
+            write_archive_object(destination_shard, host_id="test-mac")
+            write_healthy_receipt(destination_shard)
+            index_path = destination_shard / "claude" / "index.json"
+            manifest_path = destination_shard / "publish-manifest.json"
+            prior_index = index_path.read_bytes()
+            prior_manifest = manifest_path.read_bytes()
+
+            staged = root / "staged"
+            fleet.archive_conversations(
+                staged,
+                "test-mac",
+                "claude",
+                [
+                    {
+                        "source": "claude-code",
+                        "session_id": "changed-claude-session",
+                        "messages": [{"role": "user", "content": "clean incoming"}],
+                    }
+                ],
+            )
+            staged_index = json.loads(
+                (staged / "hosts" / "test-mac" / "claude" / "index.json").read_text()
+            )
+            changed_digest = staged_index["conversations"][0]["object_sha256"]
+            changed_object = (
+                destination_shard / "claude" / "objects" / f"{changed_digest}.json"
+            )
+            real_merge_index = fleet.merge_index_file
+
+            def corrupt_after_index_merge(source, destination):
+                changed = real_merge_index(source, destination)
+                changed_object.write_bytes(b"{}\n")
+                return changed
+
+            with mock.patch.object(
+                fleet,
+                "merge_index_file",
+                side_effect=corrupt_after_index_merge,
+            ), self.assertRaisesRegex(ValueError, "hash mismatch"):
+                fleet.merge_host_shard(
+                    staged / "hosts" / "test-mac",
+                    destination_parent,
+                    "test-mac",
+                    require_healthy_receipt=False,
+                    validation_proofs={},
+                )
+
+            self.assertEqual(index_path.read_bytes(), prior_index)
+            self.assertEqual(manifest_path.read_bytes(), prior_manifest)
+            self.assertTrue(changed_object.is_file())
+            fleet.validated_shard_files(destination_shard, "test-mac")
+
     def test_local_object_link_parent_swap_cannot_escape_spool(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)

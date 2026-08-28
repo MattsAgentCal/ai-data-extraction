@@ -3632,6 +3632,20 @@ def merge_host_shard(
         require_healthy_receipt=require_healthy_receipt,
         validation_proofs=validation_proofs,
     )
+    local_harnesses: set[str] = set()
+    if not require_healthy_receipt:
+        for source in files:
+            relative = source.relative_to(source_root)
+            harness = relative.parts[0]
+            if harness not in APPROVED_HARNESSES:
+                raise ValueError(
+                    f"local staged shard contains non-harness file: {relative}"
+                )
+            local_harnesses.add(harness)
+        for harness in local_harnesses:
+            index_path = source_root / harness / "index.json"
+            if not index_path.is_file() or index_path.is_symlink():
+                raise ValueError(f"local staged shard is missing {harness} index")
     source_wins = True
     if (
         require_healthy_receipt
@@ -3762,13 +3776,27 @@ def merge_host_shard(
             if changed:
                 copied += 1
             verified += 1
-        validated_shard_files(
-            destination_root,
-            host_id,
-            require_healthy_receipt=require_healthy_receipt,
-            allow_unindexed_objects=not require_healthy_receipt,
-            validation_proofs=validation_proofs,
-        )
+        if require_healthy_receipt:
+            validated_shard_files(
+                destination_root,
+                host_id,
+                require_healthy_receipt=True,
+                validation_proofs=validation_proofs,
+            )
+        else:
+            # Each local staging shard is one collection harness. Validate the
+            # merged index and every object it now authorizes, but leave other
+            # harnesses for their own collection turn. The prior manifest stays
+            # unchanged until write_publish_manifest validates the whole host.
+            for harness in sorted(local_harnesses):
+                validate_index_file(
+                    destination_root / harness / "index.json",
+                    destination_root,
+                    host_id,
+                    harness,
+                    require_exact_object_set=False,
+                    validation_proofs=validation_proofs,
+                )
     except BaseException:
         for destination in touched_mutable_destinations:
             try:
