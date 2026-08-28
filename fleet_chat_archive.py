@@ -13,17 +13,25 @@ import os
 import plistlib
 import re
 import shlex
+import select
 import shutil
 import signal
+import struct
 import subprocess
 import stat
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+from archive_object_contract import (
+    ARCHIVE_OBJECT_SCHEMA_VERSION,
+    validate_archive_object,
+)
 
 from extract_claude_code import extract_claude_session, find_all_claude_sessions
 from extract_codex import extract_codex_session, find_all_codex_sessions
@@ -33,6 +41,9 @@ from extract_openclaw import extract_openclaw_session, find_all_openclaw_session
 
 class TerminationRequested(BaseException):
     """Cancellation signal that operational exception handlers must not swallow."""
+
+
+_RUN_CONFIG_TRANSACTION = object()
 
 
 HOST_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62})\Z")
@@ -145,6 +156,7 @@ HARNESS_SOURCES = {
 }
 EXTRACTOR_FILES = (
     "fleet_chat_archive.py",
+    "archive_object_contract.py",
     "extract_claude_code.py",
     "extract_codex.py",
     "extract_openclaw.py",
@@ -187,670 +199,45 @@ MAX_MANIFEST_OBJECTS_TOTAL = 50_000
 MAX_TRANSFER_ERROR_BYTES = 4096
 CODEX_PATH_PROVENANCE_FIELDS = frozenset({"session_file"})
 
-# The remote rsync sender runs this guard before entering the rsync protocol.
-# It holds the same spool lock used by run_config, so a publisher cannot swap
-# the manifest or a path component during one transfer phase. The manifest is
-# read through a bounded descriptor and must be canonical, duplicate-free JSON
-# before rsync can open any authorized file body.
-REMOTE_RSYNC_GUARD_ERROR = "fleet-unsafe-source"
-REMOTE_RSYNC_GUARD = r'''
-import fcntl
-import hashlib
-import json
-import os
-import re
-import stat
-import subprocess
-import sys
-from datetime import datetime
-
-ERROR = "fleet-unsafe-source"
-NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+# The SSH transport authenticates an owned source host through its pinned
+# known_hosts entry, then invokes this exact deployed helper.  The helper is the
+# trust boundary; shard files themselves do not need a second signing key.
+STREAM_MAGIC = b"FLEET-CHAT-SHARD\x00\x02"
+STREAM_FRAME_HEADER = struct.Struct(">IQ")
+MAX_STREAM_PATH_BYTES = 512
+MAX_STREAM_FILES = 1_000_000
+MAX_STREAM_METADATA_BYTES = 16 * 1024 * 1024
+MAX_STREAM_METADATA_TOTAL_BYTES = 32 * 1024 * 1024
+MAX_STREAM_TOTAL_BYTES = 4 * 1024 * 1024 * 1024 * 1024
+MAX_CACHE_HINT_BYTES = 65 * MAX_STREAM_FILES
+REMOTE_PROCESS_REAP_SECONDS = 2
+STREAM_EXIT_PENDING_MANIFEST = 3
+STREAM_EXIT_INTEGRITY_REJECTION = 4
+STREAM_EXIT_LEGACY_SCHEMA = 5
 
 
-def fail():
-    sys.stderr.write(ERROR + "\n")
-    raise SystemExit(42)
+class PendingManifestError(Exception):
+    """The source host has not committed a transferable manifest yet."""
 
 
-def unique_json_object(pairs):
-    value = {}
-    for key, member in pairs:
-        if key in value:
-            raise ValueError("duplicate JSON object key")
-        value[key] = member
-    return value
+class LegacyArchiveSchemaError(ValueError):
+    """The source shard predates the trusted v2 archive-object contract."""
 
 
-def reject_json_constant(_constant):
-    raise ValueError("non-finite JSON number")
+class RemoteUnreachableError(Exception):
+    """The authenticated SSH transport could not reach the source host."""
 
 
-def bounded_json_loads(payload):
-    return json.loads(
-        payload,
-        object_pairs_hook=unique_json_object,
-        parse_constant=reject_json_constant,
-    )
+class RemoteTimeoutError(Exception):
+    """The source exceeded its one end-to-end monotonic deadline."""
 
 
-def canonical_json_payload(payload):
-    value = bounded_json_loads(payload)
-    canonical = (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        + b"\n"
-    )
-    if payload != canonical:
-        fail()
-    return value
+class RemoteIntegrityError(Exception):
+    """The trusted source helper rejected its local shard."""
 
 
-def bounded_file_payload(root_descriptor, parts, limit):
-    descriptor = os.dup(root_descriptor)
-    try:
-        for part in parts[:-1]:
-            next_descriptor = os.open(
-                part,
-                os.O_RDONLY | DIRECTORY | NOFOLLOW,
-                dir_fd=descriptor,
-            )
-            os.close(descriptor)
-            descriptor = next_descriptor
-        file_descriptor = os.open(
-            parts[-1],
-            os.O_RDONLY | NOFOLLOW,
-            dir_fd=descriptor,
-        )
-    finally:
-        os.close(descriptor)
-    try:
-        initial = os.fstat(file_descriptor)
-        if not stat.S_ISREG(initial.st_mode) or initial.st_size > limit:
-            fail()
-        payload = bytearray()
-        while len(payload) <= limit:
-            chunk = os.read(
-                file_descriptor,
-                min(1024 * 1024, limit + 1 - len(payload)),
-            )
-            if not chunk:
-                break
-            payload.extend(chunk)
-        final = os.fstat(file_descriptor)
-        if (
-            len(payload) > limit
-            or file_identity(initial) != file_identity(final)
-            or len(payload) != final.st_size
-        ):
-            fail()
-        return bytes(payload)
-    finally:
-        os.close(file_descriptor)
-
-
-def bounded_string(value, allow_empty=False):
-    return (
-        isinstance(value, str)
-        and (allow_empty or bool(value))
-        and len(value) <= 4096
-        and not any(character in value for character in ("\0", "\r", "\n"))
-    )
-
-
-def nonnegative_int(value):
-    return type(value) is int and value >= 0
-
-
-def valid_run_id(value):
-    if not isinstance(value, str) or not re.fullmatch(
-        r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-[0-9a-f]{8}", value
-    ):
-        return False
-    try:
-        datetime.strptime(value[:22], "%Y%m%dT%H%M%S.%f")
-    except ValueError:
-        return False
-    return True
-
-
-def valid_utc_timestamp(value, require_microseconds):
-    fraction = r"\.[0-9]{6}" if require_microseconds else r"(?:\.[0-9]{6})?"
-    if not isinstance(value, str) or not re.fullmatch(
-        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
-        + fraction
-        + r"\+00:00",
-        value,
-    ):
-        return False
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return False
-    offset = parsed.utcoffset()
-    return offset is not None and offset.total_seconds() == 0
-
-
-def validate_publication(value):
-    if not isinstance(value, dict):
-        fail()
-    status = value.get("status")
-    fields = {"status", "files_copied"}
-    if status == "published":
-        fields.update({"files_verified", "quarantined_unindexed_objects"})
-    elif status == "blocked_integrity_failure":
-        fields.add("error_code")
-    if (
-        set(value) != fields
-        or status not in {
-            "not_attempted",
-            "pending_manifest",
-            "blocked_no_drive_root",
-            "blocked_drive_unavailable",
-            "blocked_ambiguous_drive_root",
-            "blocked_not_google_drive",
-            "blocked_source_missing",
-            "blocked_incomplete_collection",
-            "blocked_integrity_failure",
-            "published",
-            "failed",
-        }
-        or not nonnegative_int(value.get("files_copied"))
-        or (
-            "files_verified" in value
-            and not nonnegative_int(value["files_verified"])
-        )
-        or (
-            "quarantined_unindexed_objects" in value
-            and not nonnegative_int(value["quarantined_unindexed_objects"])
-        )
-        or (
-            "error_code" in value
-            and value["error_code"] != "IntegrityFailure"
-        )
-    ):
-        fail()
-
-
-def validate_harness_result(value):
-    if not isinstance(value, dict):
-        fail()
-    if value.get("status") == "not_present_on_host":
-        if (
-            set(value)
-            != {
-                "status",
-                "conversations",
-                "new_objects",
-                "publishable",
-                "inventory_only",
-            }
-            or value.get("conversations") != 0
-            or value.get("new_objects") != 0
-            or value.get("publishable") is not False
-            or value.get("inventory_only") is not True
-        ):
-            fail()
-        return
-    fields = {
-        "status",
-        "conversations",
-        "new_objects",
-        "redactions",
-        "index_conversations",
-        "publishable",
-        "quality",
-    }
-    quality_fields = {
-        "discovered_lines",
-        "parsed_lines",
-        "failed_lines",
-        "recognized_lines",
-        "discovered_files",
-        "processed_files",
-        "skipped_unchanged_files",
-        "status",
-    }
-    quality = value.get("quality")
-    if (
-        set(value) != fields
-        or value.get("status") not in {"collected", "no_conversations"}
-        or any(
-            not nonnegative_int(value.get(field))
-            for field in (
-                "conversations",
-                "new_objects",
-                "redactions",
-                "index_conversations",
-            )
-        )
-        or value.get("publishable") is not True
-        or not isinstance(quality, dict)
-        or set(quality) != quality_fields
-        or quality.get("status") != "complete"
-        or any(
-            not nonnegative_int(quality.get(field))
-            for field in quality_fields - {"status"}
-        )
-    ):
-        fail()
-
-
-def validate_remote_result(value):
-    if not isinstance(value, dict):
-        fail()
-    status = value.get("status")
-    fields = {"status", "files_copied"}
-    if status == "pulled":
-        fields.add("files_verified")
-    elif status == "blocked_integrity_failure":
-        fields.add("error_code")
-    if "publication" in value:
-        fields.add("publication")
-    if (
-        set(value) != fields
-        or status not in {
-            "pulled",
-            "cached",
-            "invalid_remote",
-            "unreachable",
-            "pending_manifest",
-            "blocked_integrity_failure",
-        }
-        or not nonnegative_int(value.get("files_copied"))
-        or (
-            "files_verified" in value
-            and not nonnegative_int(value["files_verified"])
-        )
-        or (
-            "error_code" in value
-            and value["error_code"] != "IntegrityFailure"
-        )
-    ):
-        fail()
-    if "publication" in value:
-        validate_publication(value["publication"])
-
-
-def validate_receipt(receipt, manifest, receipt_name):
-    required = {
-        "schema_version",
-        "extractor_sha256",
-        "config_sha256",
-        "run_id",
-        "collected_at",
-        "host_id",
-        "collection_status",
-        "status",
-        "harnesses",
-        "hub",
-        "publication",
-        "errors",
-        "receipt_path",
-    }
-    allowed = required | {"receipt_publication"}
-    if not isinstance(receipt, dict):
-        fail()
-    harnesses = receipt.get("harnesses")
-    errors = receipt.get("errors")
-    collection_status = receipt.get("collection_status")
-    receipt_path = receipt.get("receipt_path")
-    if (
-        not required.issubset(receipt)
-        or not set(receipt).issubset(allowed)
-        or type(receipt.get("schema_version")) is not int
-        or receipt.get("schema_version") != 1
-        or receipt.get("host_id") != host_id
-        or receipt.get("run_id") != manifest["run_id"]
-        or receipt.get("extractor_sha256") != manifest["extractor_sha256"]
-        or receipt.get("config_sha256") != manifest["config_sha256"]
-        or not valid_utc_timestamp(receipt.get("collected_at"), False)
-        or collection_status not in {"completed", "completed_with_absent_harnesses"}
-        or receipt.get("status") not in {collection_status, "failed"}
-        or not isinstance(harnesses, dict)
-        or not set(harnesses).issubset(APPROVED_HARNESSES)
-        or not isinstance(errors, list)
-        or len(errors) > 1024
-        or not bounded_string(receipt_path)
-        or not receipt_path.startswith("/")
-        or not receipt_path.endswith(
-            "/hosts/" + host_id + "/receipts/" + receipt_name
-        )
-    ):
-        fail()
-    for error in errors:
-        if (
-            not isinstance(error, dict)
-            or set(error) != {"component", "error_code"}
-            or error.get("component")
-            not in {"hub", "publication", "receipt_publication"}
-            or error.get("error_code")
-            != {
-                "hub": "HubFailure",
-                "publication": "PublicationBlocked",
-                "receipt_publication": "PublicationBlocked",
-            }[error["component"]]
-        ):
-            fail()
-    if bool(errors) != (receipt.get("status") == "failed"):
-        fail()
-    for result in harnesses.values():
-        validate_harness_result(result)
-    hub = receipt.get("hub")
-    if not isinstance(hub, dict) or not isinstance(hub.get("remotes"), dict):
-        fail()
-    if set(hub) == {"remotes"}:
-        pass
-    elif not (
-        set(hub) == {"remotes", "status", "error_code"}
-        and hub.get("status") == "failed"
-        and hub.get("error_code") == "HubFailure"
-    ):
-        fail()
-    if len(hub["remotes"]) > 1024:
-        fail()
-    for remote_host_id, remote in hub["remotes"].items():
-        if not isinstance(remote_host_id, str) or not re.fullmatch(
-            r"[a-z0-9](?:[a-z0-9-]{0,62})", remote_host_id
-        ):
-            fail()
-        validate_remote_result(remote)
-    validate_publication(receipt.get("publication"))
-    if "receipt_publication" in receipt:
-        validate_publication(receipt["receipt_publication"])
-    return harnesses
-
-
-APPROVED_HARNESSES = {"claude", "codex", "openclaw", "hermes"}
-HARNESS_SOURCES = {
-    "claude": {"claude-code"},
-    "codex": {"codex"},
-    "openclaw": {"openclaw"},
-    "hermes": {"hermes"},
-}
-
-
-def validate_manifest(manifest):
-    receipt = manifest.get("receipt") if isinstance(manifest, dict) else None
-    harnesses = manifest.get("harnesses") if isinstance(manifest, dict) else None
-    digest_values = (
-        manifest.get("extractor_sha256") if isinstance(manifest, dict) else None,
-        manifest.get("config_sha256") if isinstance(manifest, dict) else None,
-        receipt.get("sha256") if isinstance(receipt, dict) else None,
-    )
-    if (
-        not isinstance(manifest, dict)
-        or set(manifest)
-        != {
-            "schema_version",
-            "host_id",
-            "run_id",
-            "generated_at",
-            "extractor_sha256",
-            "config_sha256",
-            "receipt",
-            "harnesses",
-        }
-        or type(manifest.get("schema_version")) is not int
-        or manifest.get("schema_version") != 1
-        or manifest.get("host_id") != host_id
-        or not valid_run_id(manifest.get("run_id"))
-        or not valid_utc_timestamp(manifest.get("generated_at"), True)
-        or any(
-            not isinstance(value, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", value)
-            for value in digest_values
-        )
-        or not isinstance(receipt, dict)
-        or set(receipt) != {"path", "sha256"}
-        or not isinstance(harnesses, dict)
-        or not set(harnesses).issubset(APPROVED_HARNESSES)
-    ):
-        fail()
-    receipt_path = receipt.get("path")
-    if receipt_path not in {
-        "receipts/" + manifest["run_id"] + suffix + ".json"
-        for suffix in (
-            "",
-            "-published",
-            "-publication-blocked",
-            "-publication-failed",
-        )
-    }:
-        fail()
-    total = 0
-    for binding in harnesses.values():
-        digests = binding.get("object_sha256") if isinstance(binding, dict) else None
-        if (
-            not isinstance(binding, dict)
-            or set(binding) != {"index_sha256", "object_sha256"}
-            or not isinstance(binding.get("index_sha256"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", binding["index_sha256"])
-            or not isinstance(digests, list)
-            or len(digests) > 25000
-            or any(
-                not isinstance(digest, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", digest)
-                for digest in digests
-            )
-            or digests != sorted(set(digests))
-        ):
-            fail()
-        total += len(digests)
-        if total > 50000:
-            fail()
-    return receipt_path, harnesses
-
-
-def validate_index(index, harness, expected_digests):
-    if (
-        not isinstance(index, dict)
-        or set(index) != {"schema_version", "host_id", "harness", "conversations"}
-        or type(index.get("schema_version")) is not int
-        or index.get("schema_version") != 1
-        or index.get("host_id") != host_id
-        or index.get("harness") != harness
-        or not isinstance(index.get("conversations"), list)
-        or len(index["conversations"]) > 25000
-    ):
-        fail()
-    referenced = []
-    seen = set()
-    base_fields = frozenset({"object_sha256", "session_id", "source"})
-    codex_fields = frozenset(
-        {"object_sha256", "session_id", "source", "source_sha256", "installation"}
-    )
-    for row in index["conversations"]:
-        allowed = {base_fields, codex_fields} if harness == "codex" else {base_fields}
-        if not isinstance(row, dict) or frozenset(row) not in allowed:
-            fail()
-        digest = row.get("object_sha256")
-        if (
-            not isinstance(digest, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", digest)
-            or digest in seen
-            or not bounded_string(row.get("session_id"))
-            or row.get("source") not in HARNESS_SOURCES[harness]
-        ):
-            fail()
-        if frozenset(row) == codex_fields and (
-            not isinstance(row.get("source_sha256"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", row["source_sha256"])
-            or not bounded_string(row.get("installation"))
-        ):
-            fail()
-        seen.add(digest)
-        referenced.append(digest)
-    if sorted(referenced) != expected_digests:
-        fail()
-
-
-def file_identity(metadata):
-    return (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_size,
-        metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
-    )
-
-
-def open_absolute_directory(path):
-    if not path.startswith("/"):
-        fail()
-    descriptor = os.open("/", os.O_RDONLY | DIRECTORY)
-    try:
-        for part in path.split("/")[1:]:
-            if not part:
-                continue
-            next_descriptor = os.open(
-                part,
-                os.O_RDONLY | DIRECTORY | NOFOLLOW,
-                dir_fd=descriptor,
-            )
-            os.close(descriptor)
-            descriptor = next_descriptor
-        return descriptor
-    except Exception:
-        os.close(descriptor)
-        fail()
-
-
-def verify_tree(root_descriptor):
-    pending = [os.dup(root_descriptor)]
-    try:
-        while pending:
-            descriptor = pending.pop()
-            try:
-                with os.scandir(descriptor) as entries:
-                    for entry in entries:
-                        if entry.is_symlink():
-                            fail()
-                        if entry.is_dir(follow_symlinks=False):
-                            pending.append(
-                                os.open(
-                                    entry.name,
-                                    os.O_RDONLY | DIRECTORY | NOFOLLOW,
-                                    dir_fd=descriptor,
-                                )
-                            )
-                        elif not entry.is_file(follow_symlinks=False):
-                            fail()
-            finally:
-                os.close(descriptor)
-    finally:
-        for descriptor in pending:
-            os.close(descriptor)
-
-
-if len(sys.argv) < 5:
-    fail()
-spool_root, host_id, manifest_limit_text = sys.argv[1:4]
-if not host_id or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in host_id):
-    fail()
-if not manifest_limit_text.isdigit():
-    fail()
-manifest_limit = int(manifest_limit_text)
-
-spool_descriptor = open_absolute_directory(spool_root)
-try:
-    lock_descriptor = os.open(
-        ".run.lock",
-        os.O_RDONLY | NOFOLLOW,
-        dir_fd=spool_descriptor,
-    )
-    if not stat.S_ISREG(os.fstat(lock_descriptor).st_mode):
-        fail()
-    fcntl.flock(lock_descriptor, fcntl.LOCK_SH)
-    hosts_descriptor = os.open(
-        "hosts",
-        os.O_RDONLY | DIRECTORY | NOFOLLOW,
-        dir_fd=spool_descriptor,
-    )
-finally:
-    os.close(spool_descriptor)
-
-try:
-    shard_descriptor = os.open(
-        host_id,
-        os.O_RDONLY | DIRECTORY | NOFOLLOW,
-        dir_fd=hosts_descriptor,
-    )
-finally:
-    os.close(hosts_descriptor)
-
-try:
-    manifest_descriptor = os.open(
-        "publish-manifest.json",
-        os.O_RDONLY | NOFOLLOW,
-        dir_fd=shard_descriptor,
-    )
-    try:
-        initial_manifest_metadata = os.fstat(manifest_descriptor)
-        if (
-            not stat.S_ISREG(initial_manifest_metadata.st_mode)
-            or initial_manifest_metadata.st_size > manifest_limit
-        ):
-            fail()
-        manifest_payload = bytearray()
-        while len(manifest_payload) <= manifest_limit:
-            chunk = os.read(
-                manifest_descriptor,
-                min(1024 * 1024, manifest_limit + 1 - len(manifest_payload)),
-            )
-            if not chunk:
-                break
-            manifest_payload.extend(chunk)
-        final_manifest_metadata = os.fstat(manifest_descriptor)
-        if (
-            len(manifest_payload) > manifest_limit
-            or file_identity(initial_manifest_metadata)
-            != file_identity(final_manifest_metadata)
-            or len(manifest_payload) != final_manifest_metadata.st_size
-        ):
-            fail()
-        try:
-            manifest = canonical_json_payload(bytes(manifest_payload))
-            receipt_path, manifest_harnesses = validate_manifest(manifest)
-            receipt_name = receipt_path.split("/", 1)[1]
-            receipt_payload = bounded_file_payload(
-                shard_descriptor,
-                ("receipts", receipt_name),
-                manifest_limit,
-            )
-            if hashlib.sha256(receipt_payload).hexdigest() != manifest["receipt"]["sha256"]:
-                fail()
-            receipt = canonical_json_payload(receipt_payload)
-            receipt_harnesses = validate_receipt(receipt, manifest, receipt_name)
-            if not set(manifest_harnesses).issubset(receipt_harnesses):
-                fail()
-            for harness, binding in manifest_harnesses.items():
-                if receipt_harnesses[harness].get("status") == "not_present_on_host":
-                    fail()
-                index_payload = bounded_file_payload(
-                    shard_descriptor,
-                    (harness, "index.json"),
-                    manifest_limit,
-                )
-                if hashlib.sha256(index_payload).hexdigest() != binding["index_sha256"]:
-                    fail()
-                index = canonical_json_payload(index_payload)
-                validate_index(index, harness, binding["object_sha256"])
-        except (OSError, OverflowError, TypeError, UnicodeError, ValueError):
-            fail()
-    finally:
-        os.close(manifest_descriptor)
-    verify_tree(shard_descriptor)
-finally:
-    os.close(shard_descriptor)
-
-raise SystemExit(subprocess.call(["rsync", *sys.argv[4:]]))
-'''.strip()
+class LocalStreamIntegrityError(Exception):
+    """The receiver rejected framing or staged shard integrity."""
 
 
 @dataclass(frozen=True)
@@ -1119,6 +506,47 @@ def read_canonical_json_nofollow(
     return parse_canonical_json(payload, size_label=size_label)
 
 
+def read_bytes_snapshot_nofollow(
+    path: Path,
+    *,
+    max_bytes: int,
+    size_label: str,
+    _return_metadata: bool = False,
+) -> bytes | tuple[bytes, os.stat_result]:
+    """Read one stable regular-file snapshot through a no-follow descriptor."""
+    descriptor = open_regular_fd(path)
+    try:
+        initial = os.fstat(descriptor)
+        if initial.st_size > max_bytes:
+            raise ValueError(
+                f"{size_label} exceeds maximum of {max_bytes} bytes: {path.name}"
+            )
+        payload = bytearray()
+        while len(payload) <= max_bytes:
+            chunk = os.read(descriptor, min(1024 * 1024, max_bytes + 1 - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        final = os.fstat(descriptor)
+        identity = lambda metadata: (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+        if (
+            len(payload) > max_bytes
+            or len(payload) != initial.st_size
+            or identity(initial) != identity(final)
+        ):
+            raise ValueError(f"{size_label} changed while reading: {path.name}")
+        snapshot = bytes(payload)
+        return (snapshot, final) if _return_metadata else snapshot
+    finally:
+        os.close(descriptor)
+
+
 def secure_mkdir(path: Path) -> None:
     try:
         _, descriptor = open_directory_fd(path, create=True)
@@ -1378,10 +806,12 @@ def remove_file_if_present(path: Path) -> None:
 
 
 @contextlib.contextmanager
-def defer_sigterm_during_rollback():
+def defer_termination_signals_during_rollback():
     previous_mask = None
     if hasattr(signal, "pthread_sigmask"):
-        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        previous_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM}
+        )
     try:
         yield
     finally:
@@ -1402,7 +832,8 @@ def load_healthy_manifest_snapshot(
     harnesses = manifest.get("harnesses")
     receipt_binding = manifest.get("receipt")
     if (
-        not is_exact_schema_version_one(manifest.get("schema_version"))
+        type(manifest.get("schema_version")) is not int
+        or manifest.get("schema_version") != 1
         or manifest.get("host_id") != host_id
         or not isinstance(manifest.get("run_id"), str)
         or not isinstance(harnesses, dict)
@@ -1431,7 +862,8 @@ def load_healthy_manifest_snapshot(
     receipt_harnesses = receipt.get("harnesses")
     collection_status = receipt.get("collection_status", receipt.get("status"))
     if (
-        receipt.get("schema_version") != 1
+        type(receipt.get("schema_version")) is not int
+        or receipt.get("schema_version") != 1
         or receipt.get("host_id") != host_id
         or receipt.get("run_id") != manifest.get("run_id")
         or receipt.get("extractor_sha256") != manifest.get("extractor_sha256")
@@ -1466,7 +898,8 @@ def load_healthy_manifest_snapshot(
         index = json.loads(index_payload)
         rows = index.get("conversations")
         if (
-            index.get("schema_version") != 1
+            type(index.get("schema_version")) is not int
+            or index.get("schema_version") != 1
             or index.get("host_id") != host_id
             or index.get("harness") != harness
             or not isinstance(rows, list)
@@ -1495,6 +928,60 @@ def load_healthy_manifest_snapshot(
     return manifest_payload, index_payloads, index_values
 
 
+def validate_local_snapshot_index_value(
+    index: object,
+    host_id: str,
+    harness: str,
+) -> dict:
+    """Validate manifest-bound local metadata, including bounded v1 Codex rows.
+
+    The trusted-stream validator remains v2-only. This local-only seam permits
+    an exact legacy Codex row to be regenerated while its object body is still
+    treated as untrusted and fully revalidated before any reuse.
+    """
+    if not isinstance(index, dict):
+        raise ValueError("invalid local snapshot index identity")
+    if (
+        set(index) != {"schema_version", "host_id", "harness", "conversations"}
+        or not is_exact_schema_version_one(index.get("schema_version"))
+        or index.get("host_id") != host_id
+        or index.get("harness") != harness
+        or not isinstance(index.get("conversations"), list)
+        or len(index["conversations"]) > MAX_MANIFEST_OBJECTS_PER_HARNESS
+    ):
+        raise ValueError("invalid local snapshot index identity")
+    referenced: set[str] = set()
+    for row in index["conversations"]:
+        if not isinstance(row, dict):
+            raise ValueError("invalid local snapshot index row")
+        base_fields = {"object_sha256", "session_id", "source"}
+        current_codex_fields = base_fields | {"source_sha256", "installation"}
+        allowed_fields = {frozenset(base_fields)}
+        if harness == "codex":
+            allowed_fields.add(frozenset(current_codex_fields))
+        if frozenset(row) not in allowed_fields:
+            raise ValueError("invalid local snapshot index row")
+        if (
+            not isinstance(row.get("object_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", row["object_sha256"])
+            or not is_bounded_metadata_string(row.get("session_id"))
+            or row.get("source") not in HARNESS_SOURCES[harness]
+        ):
+            raise ValueError("invalid local snapshot index row")
+        if frozenset(row) == frozenset(current_codex_fields) and (
+            not isinstance(row.get("source_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", row["source_sha256"])
+            or not is_bounded_metadata_string(row.get("installation"))
+            or not Path(row["installation"]).is_absolute()
+        ):
+            raise ValueError("invalid local Codex snapshot source identity")
+        digest = row["object_sha256"]
+        if digest in referenced:
+            raise ValueError(f"duplicate local snapshot index row: {digest}")
+        referenced.add(digest)
+    return index
+
+
 def validated_manifest_snapshot_indexes(
     snapshot: object,
     source_root: Path,
@@ -1519,6 +1006,7 @@ def validated_manifest_snapshot_indexes(
     harnesses = manifest.get("harnesses") if isinstance(manifest, dict) else None
     if (
         not isinstance(manifest, dict)
+        or manifest_payload != canonical_json(manifest) + b"\n"
         or not is_exact_schema_version_one(manifest.get("schema_version"))
         or manifest.get("host_id") != host_id
         or not isinstance(harnesses, dict)
@@ -1540,7 +1028,9 @@ def validated_manifest_snapshot_indexes(
             binding.get("object_sha256") if isinstance(binding, dict) else None
         )
         if (
-            not isinstance(index_payload, bytes)
+            not isinstance(binding, dict)
+            or set(binding) != {"index_sha256", "object_sha256"}
+            or not isinstance(index_payload, bytes)
             or not isinstance(expected_index_hash, str)
             or not re.fullmatch(r"[0-9a-f]{64}", expected_index_hash)
             or hashlib.sha256(index_payload).hexdigest() != expected_index_hash
@@ -1558,10 +1048,12 @@ def validated_manifest_snapshot_indexes(
         except (TypeError, UnicodeError, ValueError) as error:
             raise ValueError("invalid supplied prior manifest snapshot") from error
         try:
-            index = validate_index_value(index, host_id, harness, index_path.name)
+            index = validate_local_snapshot_index_value(index, host_id, harness)
         except ValueError as error:
             raise ValueError("invalid supplied prior manifest snapshot") from error
         if index != index_values.get(harness):
+            raise ValueError("invalid supplied prior manifest snapshot")
+        if index_payload != canonical_json(index) + b"\n":
             raise ValueError("invalid supplied prior manifest snapshot")
         indexed_digests = []
         for row in index["conversations"]:
@@ -1583,6 +1075,23 @@ def stable_codex_conversation_sha256(conversation: dict) -> str:
         if key not in CODEX_PATH_PROVENANCE_FIELDS
     }
     return hashlib.sha256(canonical_json(stable)).hexdigest()
+
+
+def archive_row_identity(row: dict) -> tuple[object, ...]:
+    """Identify one current native session, scoped by Codex installation."""
+    if row.get("source") == "codex":
+        return (row.get("source"), row.get("installation"), row.get("session_id"))
+    return (row.get("source"), row.get("session_id"))
+
+
+def is_current_codex_index_row(row: object) -> bool:
+    return isinstance(row, dict) and set(row) == {
+        "object_sha256",
+        "session_id",
+        "source",
+        "source_sha256",
+        "installation",
+    }
 
 
 def archive_conversations(
@@ -1611,8 +1120,40 @@ def archive_conversations(
         assert_no_symlink_components(index_path)
         prior_index = read_json_nofollow(index_path)
         prior_rows = list(prior_index.get("conversations", []))
-    index_by_digest = {
-        row["object_sha256"]: row
+        if harness == "codex" and any(
+            not is_current_codex_index_row(row) for row in prior_rows
+        ):
+            # A v2 Codex collection cannot inherit a base-row projection. The
+            # next complete extraction regenerates the current index while the
+            # old manifest remains available to the run transaction rollback.
+            prior_rows = []
+        if any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("session_id"), str)
+            or not row["session_id"]
+            for row in prior_rows
+        ):
+            prior_rows = []
+        for row in prior_rows:
+            digest = row.get("object_sha256") if isinstance(row, dict) else None
+            candidate = objects_root / f"{digest}.json"
+            try:
+                prior_value = read_json_nofollow(candidate)
+            except (OSError, ValueError):
+                # Regeneration is replacement, not a migration of arbitrary v1
+                # bodies. A run transaction preserves the old manifested index
+                # until the new v2 manifest commits.
+                prior_rows = []
+                break
+            if (
+                type(prior_value.get("archive_schema_version")) is not int
+                or prior_value.get("archive_schema_version")
+                != ARCHIVE_OBJECT_SCHEMA_VERSION
+            ):
+                prior_rows = []
+                break
+    index_by_identity = {
+        archive_row_identity(row): row
         for row in prior_rows
         if isinstance(row, dict) and OBJECT_NAME_RE.fullmatch(f"{row.get('object_sha256', '')}.json")
     }
@@ -1638,6 +1179,7 @@ def archive_conversations(
     for conversation in conversations:
         conversation_count += 1
         source_sha256 = conversation.pop("_archive_source_sha256", None)
+        validate_archive_object(conversation, harness=harness)
         conversation, conversation_redactions = redact_value(conversation)
         redaction_count += conversation_redactions
         if conversation_redactions:
@@ -1648,6 +1190,7 @@ def archive_conversations(
                 "recognized credential remained after redaction at "
                 + ", ".join(residuals[:5])
             )
+        validate_archive_object(conversation, harness=harness)
         digest = None
         stable_sha256 = None
         if harness == "codex":
@@ -1676,11 +1219,9 @@ def archive_conversations(
                     if cached is None:
                         try:
                             archived = validate_object_file(candidate_path)
-                        except ValueError:
-                            # A manifest-bound object can predate stricter
-                            # validation. Never reuse or cache an invalid body;
-                            # archive the freshly extracted conversation and
-                            # leave the prior object rollback-safe until commit.
+                        except (FileNotFoundError, ValueError):
+                            # Extractor hash drift triggers regeneration. Legacy
+                            # v1 bodies are not migrated or trusted for reuse.
                             continue
                         cached = (
                             stable_codex_conversation_sha256(archived),
@@ -1734,9 +1275,9 @@ def archive_conversations(
                 digest,
                 stable_sha256,
             )
-        index_by_digest[digest] = index_row
+        index_by_identity[archive_row_identity(index_row)] = index_row
 
-    index_rows = list(index_by_digest.values())
+    index_rows = list(index_by_identity.values())
     index_rows.sort(key=lambda row: (str(row["session_id"]), row["object_sha256"]))
     atomic_write_json(
         harness_root / "index.json",
@@ -1832,7 +1373,13 @@ def collect_sources(
     hermes_exports=(),
     validation_proofs: ObjectValidationProofCache | None = None,
     prior_manifest_snapshot=_AUTO_LOAD_PRIOR_MANIFEST_SNAPSHOT,
+    _transaction_token: object | None = None,
 ) -> dict:
+    if (
+        _transaction_token is not None
+        and _transaction_token is not _RUN_CONFIG_TRANSACTION
+    ):
+        raise ValueError("invalid collection transaction token")
     archive_root = validate_output_root(archive_root)
     secure_mkdir(archive_root)
     harnesses = {}
@@ -1923,6 +1470,7 @@ def collect_sources(
                     host_id,
                     require_healthy_receipt=False,
                     validation_proofs=validation_proofs,
+                    _transaction_token=_transaction_token,
                 )
                 live_index = read_json_nofollow(
                     archive_root / "hosts" / host_id / harness / "index.json"
@@ -2006,6 +1554,7 @@ def collect_sources(
                         quality_out=quality,
                         expected_source_sha256=fingerprint["sha256"],
                         max_source_bytes=MAX_SOURCE_BYTES,
+                        installation_identity=codex_root,
                     )
                     qualities.append(quality)
                     if conversation:
@@ -2247,6 +1796,563 @@ def descriptor_sha256(descriptor: int) -> str:
     return digest.hexdigest()
 
 
+def exact_json_loads(payload: bytes, *, label: str):
+    """Parse UTF-8 JSON while rejecting duplicates and non-finite numbers."""
+
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key in {label}: {key}")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda constant: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON constant in {label}: {constant}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid JSON in {label}") from error
+
+
+def require_redaction_idempotence(value: object) -> None:
+    """Prove the current redactor would not change any part of an object."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            cleaned, count = redact_text(item)
+            if count or cleaned != item:
+                raise ValueError("archive object is not redaction-idempotent")
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                if isinstance(key, str):
+                    cleaned_key, key_count = redact_text(key)
+                    if key_count or cleaned_key != key:
+                        raise ValueError("archive object key is not redaction-idempotent")
+                if is_sensitive_key(key) and child not in (None, "", "[REDACTED]"):
+                    raise ValueError("archive object is not redaction-idempotent")
+                stack.append(child)
+
+
+def require_exact_keys(
+    value: object,
+    *,
+    required: set[str],
+    optional: set[str] = frozenset(),
+    label: str,
+) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    keys = set(value)
+    unknown = keys - required - optional
+    missing = required - keys
+    if unknown or missing:
+        raise ValueError(f"invalid {label} schema")
+    return value
+
+
+def require_bounded_string(
+    value: object,
+    *,
+    label: str,
+    maximum: int = 1024,
+    pattern: re.Pattern | None = None,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > maximum
+        or "\x00" in value
+        or (pattern is not None and not pattern.fullmatch(value))
+    ):
+        raise ValueError(f"invalid {label}")
+    return value
+
+
+def require_nonnegative_int(value: object, *, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"invalid {label}")
+    return value
+
+
+def reject_metadata_secrets(value: object, *, label: str) -> None:
+    residuals = residual_secret_paths(value)
+    if residuals:
+        raise ValueError(f"recognized credential in {label} metadata")
+
+
+def validate_manifest_value(manifest: object, host_id: str) -> dict:
+    manifest = require_exact_keys(
+        manifest,
+        required={
+            "schema_version",
+            "host_id",
+            "run_id",
+            "generated_at",
+            "extractor_sha256",
+            "config_sha256",
+            "receipt",
+            "harnesses",
+        },
+        label="publish manifest",
+    )
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
+        raise ValueError(f"invalid publish manifest identity: {host_id}")
+    if manifest["host_id"] != host_id:
+        raise ValueError(f"invalid publish manifest identity: {host_id}")
+    if not is_pipeline_run_id(manifest["run_id"]):
+        raise ValueError(f"invalid publish manifest identity: {host_id}")
+    if not is_canonical_utc_timestamp(manifest["generated_at"]):
+        raise ValueError(f"invalid publish manifest identity: {host_id}")
+    digest_pattern = re.compile(r"[0-9a-f]{64}\Z")
+    require_bounded_string(
+        manifest["extractor_sha256"],
+        label="manifest extractor digest",
+        maximum=64,
+        pattern=digest_pattern,
+    )
+    require_bounded_string(
+        manifest["config_sha256"],
+        label="manifest config digest",
+        maximum=64,
+        pattern=digest_pattern,
+    )
+    receipt = require_exact_keys(
+        manifest["receipt"],
+        required={"path", "sha256"},
+        label="manifest receipt binding",
+    )
+    receipt_path = require_bounded_string(
+        receipt["path"], label="manifest receipt path", maximum=MAX_STREAM_PATH_BYTES
+    )
+    relative = Path(receipt_path)
+    if (
+        relative.as_posix() != receipt_path
+        or len(relative.parts) != 2
+        or relative.parts[0] != "receipts"
+        or not is_pipeline_receipt_path(receipt_path, manifest["run_id"])
+    ):
+        raise ValueError(f"invalid manifest receipt path: {host_id}")
+    require_bounded_string(
+        receipt["sha256"],
+        label="manifest receipt digest",
+        maximum=64,
+        pattern=digest_pattern,
+    )
+    harnesses = manifest["harnesses"]
+    if not isinstance(harnesses, dict) or not set(harnesses).issubset(APPROVED_HARNESSES):
+        raise ValueError(f"invalid publish manifest identity: {host_id}")
+    total_objects = 0
+    for harness, raw_binding in harnesses.items():
+        binding = require_exact_keys(
+            raw_binding,
+            required={"index_sha256", "object_sha256"},
+            label=f"{harness} manifest binding",
+        )
+        require_bounded_string(
+            binding["index_sha256"],
+            label=f"{harness} index digest",
+            maximum=64,
+            pattern=digest_pattern,
+        )
+        digests = binding["object_sha256"]
+        if not isinstance(digests, list):
+            raise ValueError(f"invalid publish manifest binding for {harness}")
+        if len(digests) > MAX_MANIFEST_OBJECTS_PER_HARNESS:
+            raise ValueError(f"invalid publish manifest binding for {harness}")
+        total_objects += len(digests)
+        if (
+            total_objects > MAX_MANIFEST_OBJECTS_TOTAL
+            or total_objects + len(harnesses) + 2 > MAX_STREAM_FILES
+        ):
+            raise ValueError("publish manifest object count exceeds fleet limit")
+        for digest in digests:
+            require_bounded_string(
+                digest,
+                label=f"{harness} object digest",
+                maximum=64,
+                pattern=digest_pattern,
+            )
+        if digests != sorted(set(digests)):
+            raise ValueError(f"invalid publish manifest binding for {harness}")
+    reject_metadata_secrets(manifest, label="manifest")
+    return manifest
+
+
+def validate_index_value(index: object, host_id: str, harness: str) -> dict:
+    index = require_exact_keys(
+        index,
+        required={"schema_version", "host_id", "harness", "conversations"},
+        label=f"{harness} archive index",
+    )
+    if (
+        type(index["schema_version"]) is not int
+        or index["schema_version"] != 1
+        or index["host_id"] != host_id
+        or index["harness"] != harness
+        or not isinstance(index["conversations"], list)
+    ):
+        raise ValueError("invalid archive index identity: index.json")
+    if len(index["conversations"]) > MAX_STREAM_FILES:
+        raise ValueError(f"{harness} archive index has too many rows")
+    seen: set[str] = set()
+    seen_identities: set[tuple[object, ...]] = set()
+    expected_row_keys = {
+        "object_sha256",
+        "session_id",
+        "source",
+        *({"source_sha256", "installation"} if harness == "codex" else set()),
+    }
+    for row in index["conversations"]:
+        if harness == "codex" and isinstance(row, dict) and set(row) == {
+            "object_sha256",
+            "session_id",
+            "source",
+        }:
+            raise LegacyArchiveSchemaError(
+                "v2 Codex index requires source_sha256 and installation regeneration"
+            )
+        if not isinstance(row, dict) or set(row) != expected_row_keys:
+            raise ValueError(f"invalid archive index row schema for {harness}")
+        digest = row["object_sha256"]
+        if not isinstance(digest, str) or not OBJECT_NAME_RE.fullmatch(f"{digest}.json"):
+            raise ValueError("invalid archive index row: index.json")
+        if digest in seen:
+            raise ValueError(f"duplicate archive index row: {digest}")
+        seen.add(digest)
+        if (
+            not isinstance(row["session_id"], str)
+            or not row["session_id"]
+            or "\x00" in row["session_id"]
+            or len(row["session_id"].encode("utf-8")) > 4096
+        ):
+            raise LegacyArchiveSchemaError(
+                "archive index requires non-null session_id regeneration"
+            )
+        if row["source"] not in HARNESS_SOURCES[harness]:
+            raise ValueError(f"unauthorized source in {harness} index")
+        if harness == "codex":
+            require_bounded_string(
+                row["source_sha256"],
+                label="Codex source digest",
+                maximum=64,
+                pattern=re.compile(r"[0-9a-f]{64}\Z"),
+            )
+            installation = require_bounded_string(
+                row["installation"], label="Codex installation", maximum=4096
+            )
+            if not Path(installation).is_absolute():
+                raise ValueError("invalid Codex installation identity: index.json")
+        identity = archive_row_identity(row)
+        if identity in seen_identities:
+            raise ValueError(f"duplicate logical archive index row for {harness}")
+        seen_identities.add(identity)
+    if index["conversations"] != sorted(
+        index["conversations"],
+        key=lambda row: (str(row["session_id"]), row["object_sha256"]),
+    ):
+        raise ValueError(f"non-canonical archive index row order for {harness}")
+    return index
+
+
+def validate_quality_value(value: object, harness: str) -> None:
+    quality = require_exact_keys(
+        value,
+        required={
+            "status",
+            "discovered_lines",
+            "parsed_lines",
+            "failed_lines",
+            "recognized_lines",
+            "discovered_files",
+        },
+        optional={"processed_files", "skipped_unchanged_files"},
+        label=f"{harness} receipt quality",
+    )
+    if quality["status"] not in {"complete", "partial", "source_missing"}:
+        raise ValueError(f"invalid {harness} receipt quality status")
+    for key, item in quality.items():
+        if key != "status":
+            require_nonnegative_int(item, label=f"{harness} quality {key}")
+
+
+REMOTE_RECEIPT_STATUSES = {
+    "pulled",
+    "published",
+    "pending_validation",
+    "pending_manifest",
+    "legacy_schema",
+    "unreachable",
+    "timeout",
+    "remote_integrity_rejection",
+    "local_integrity_rejection",
+    "blocked_integrity_failure",
+    "blocked_source_missing",
+    "invalid_remote",
+    "cached",
+}
+PUBLICATION_RECEIPT_STATUSES = {
+    "not_attempted",
+    "pending_manifest",
+    "pending_validation",
+    "published",
+    "failed",
+    "blocked_incomplete_collection",
+    "blocked_no_drive_root",
+    "blocked_drive_unavailable",
+    "blocked_ambiguous_drive_root",
+    "blocked_not_google_drive",
+    "blocked_source_missing",
+    "blocked_integrity_failure",
+}
+
+
+def validate_status_record(
+    value: object,
+    *,
+    label: str,
+    allowed_statuses: set[str],
+) -> None:
+    record = require_exact_keys(
+        value,
+        required={"status", "files_copied"},
+        optional={
+            "files_verified",
+            "quarantined_unindexed_objects",
+            "publication",
+            "error_code",
+        },
+        label=label,
+    )
+    if record["status"] not in allowed_statuses:
+        raise ValueError(f"invalid {label} status")
+    require_nonnegative_int(record["files_copied"], label=f"{label} files_copied")
+    for key in ("files_verified", "quarantined_unindexed_objects"):
+        if key in record:
+            require_nonnegative_int(record[key], label=f"{label} {key}")
+    if "error_code" in record:
+        if (
+            record["status"] != "blocked_integrity_failure"
+            or record["error_code"] != INTEGRITY_ERROR_CODE
+        ):
+            raise ValueError(f"invalid {label} error_code")
+    if "publication" in record:
+        validate_status_record(
+            record["publication"],
+            label=f"{label} publication",
+            allowed_statuses=PUBLICATION_RECEIPT_STATUSES,
+        )
+
+
+def validate_receipt_value(
+    receipt: object,
+    host_id: str,
+    manifest: dict,
+    *,
+    expected_receipt_path: Path | None = None,
+) -> dict:
+    receipt = require_exact_keys(
+        receipt,
+        required={
+            "schema_version",
+            "extractor_sha256",
+            "config_sha256",
+            "run_id",
+            "host_id",
+            "harnesses",
+        },
+        optional={
+            "collected_at",
+            "collection_status",
+            "status",
+            "hub",
+            "publication",
+            "errors",
+            "receipt_path",
+            "receipt_publication",
+        },
+        label="manifest-bound receipt",
+    )
+    collection_status = receipt.get("collection_status", receipt.get("status"))
+    if (
+        type(receipt["schema_version"]) is not int
+        or receipt["schema_version"] != 1
+        or receipt["host_id"] != host_id
+        or receipt["run_id"] != manifest["run_id"]
+        or receipt["extractor_sha256"] != manifest["extractor_sha256"]
+        or receipt["config_sha256"] != manifest["config_sha256"]
+        or collection_status not in {"completed", "completed_with_absent_harnesses"}
+    ):
+        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    for key in ("collected_at", "status"):
+        if key in receipt:
+            require_bounded_string(
+                receipt[key],
+                label=f"receipt {key}",
+                maximum=128,
+                pattern=(
+                    re.compile(r"[0-9T:+.Z-]+\Z")
+                    if key == "collected_at"
+                    else re.compile(r"(?:completed|completed_with_absent_harnesses|failed)\Z")
+                ),
+            )
+    if "receipt_path" in receipt:
+        receipt_path = require_bounded_string(
+            receipt["receipt_path"], label="receipt_path", maximum=4096
+        )
+        if not Path(receipt_path).is_absolute():
+            raise ValueError("invalid receipt_path")
+        if expected_receipt_path is not None:
+            expected_suffix = (
+                "hosts",
+                host_id,
+                "receipts",
+                expected_receipt_path.name,
+            )
+            if tuple(Path(receipt_path).parts[-4:]) != expected_suffix:
+                raise ValueError("receipt_path does not match manifest binding")
+    harnesses = receipt["harnesses"]
+    if not isinstance(harnesses, dict) or not set(harnesses).issubset(APPROVED_HARNESSES):
+        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    if not set(manifest["harnesses"]).issubset(harnesses):
+        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    for harness, raw_result in harnesses.items():
+        result = require_exact_keys(
+            raw_result,
+            required={"status"},
+            optional={
+                "conversations",
+                "new_objects",
+                "publishable",
+                "redactions",
+                "index_conversations",
+                "quality",
+                "inventory_only",
+                "staged_objects_discarded",
+            },
+            label=f"{harness} receipt result",
+        )
+        if result["status"] not in {
+            "collected",
+            "no_conversations",
+            "not_present_on_host",
+        }:
+            raise ValueError(f"manifest-bound receipt has incomplete {harness} extraction")
+        for key in (
+            "conversations",
+            "new_objects",
+            "redactions",
+            "index_conversations",
+            "staged_objects_discarded",
+        ):
+            if key in result:
+                require_nonnegative_int(result[key], label=f"{harness} receipt {key}")
+        for key in ("publishable", "inventory_only"):
+            if key in result and type(result[key]) is not bool:
+                raise ValueError(f"invalid {harness} receipt {key}")
+        if "quality" in result:
+            validate_quality_value(result["quality"], harness)
+    if "hub" in receipt:
+        hub = receipt["hub"]
+        if not isinstance(hub, dict) or set(hub) not in (
+            {"remotes"},
+            {"remotes", "status", "error_code"},
+        ):
+            raise ValueError("invalid receipt hub schema")
+        if not isinstance(hub["remotes"], dict):
+            raise ValueError("invalid receipt hub remotes")
+        if set(hub) == {"remotes", "status", "error_code"}:
+            if (
+                hub["remotes"]
+                or hub["status"] != "failed"
+                or hub["error_code"] != HUB_ERROR_CODE
+            ):
+                raise ValueError("invalid receipt hub failure schema")
+        for remote_id, status in hub["remotes"].items():
+            validate_host_id(remote_id)
+            validate_status_record(
+                status,
+                label=f"receipt remote {remote_id}",
+                allowed_statuses=REMOTE_RECEIPT_STATUSES,
+            )
+    for key in ("publication", "receipt_publication"):
+        if key in receipt:
+            validate_status_record(
+                receipt[key],
+                label=f"receipt {key}",
+                allowed_statuses=PUBLICATION_RECEIPT_STATUSES,
+            )
+    if "errors" in receipt:
+        if not isinstance(receipt["errors"], list) or len(receipt["errors"]) > 1024:
+            raise ValueError("invalid body-free receipt errors")
+        allowed_components = APPROVED_HARNESSES | {
+            "hub",
+            "publication",
+            "receipt_publication",
+            "publish_manifest",
+            "run",
+        }
+        for raw_error in receipt["errors"]:
+            error = require_exact_keys(
+                raw_error,
+                required={"component", "error_code"},
+                label="body-free receipt error",
+            )
+            if error["component"] not in allowed_components:
+                raise ValueError("invalid body-free receipt error component")
+            if (
+                error["error_code"]
+                != RECEIPT_ERROR_CODE_BY_COMPONENT[error["component"]]
+            ):
+                raise ValueError("invalid body-free receipt error code")
+    reject_metadata_secrets(receipt, label="receipt")
+    return receipt
+
+
+def validate_object_payload(
+    payload: bytes,
+    *,
+    digest: str,
+    harness: str,
+    row: dict | None,
+) -> dict:
+    value = exact_json_loads(payload, label=f"archive object {digest}")
+    if (
+        not isinstance(value, dict)
+        or type(value.get("archive_schema_version")) is not int
+        or value.get("archive_schema_version") != ARCHIVE_OBJECT_SCHEMA_VERSION
+    ):
+        raise LegacyArchiveSchemaError("archive object requires v2 regeneration")
+    validate_archive_object(value, harness=harness)
+    if harness == "codex" and not isinstance(value.get("installation"), str):
+        raise ValueError("v2 Codex object is missing installation identity")
+    canonical_body = canonical_json(value)
+    if payload != canonical_body + b"\n" or hashlib.sha256(canonical_body).hexdigest() != digest:
+        raise ValueError(f"archive object hash/canonical JSON mismatch: {digest}.json")
+    if value.get("source") not in HARNESS_SOURCES[harness] or (
+        row is not None
+        and (
+            value.get("source") != row["source"]
+            or value.get("session_id") != row["session_id"]
+        )
+    ):
+        raise ValueError(f"archive object provenance mismatch for {harness}: {digest}")
+    residuals = residual_secret_paths(value)
+    if residuals:
+        raise ValueError(
+            "recognized credential in archive object at " + ", ".join(residuals[:5])
+        )
+    require_redaction_idempotence(value)
+    return value
+
+
 def object_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
     return (
         metadata.st_dev,
@@ -2257,47 +2363,29 @@ def object_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, 
     )
 
 
-def validate_object_file(
-    path: Path, *, _return_metadata: bool = False
-) -> dict | tuple[dict, os.stat_result]:
+def validate_object_file(path: Path) -> dict:
     assert_no_symlink_components(path)
     if not OBJECT_NAME_RE.fullmatch(path.name):
         raise ValueError(f"invalid archive object filename: {path.name}")
-    descriptor = open_regular_fd(path)
-    try:
-        initial_metadata = os.fstat(descriptor)
-        if initial_metadata.st_size > MAX_OBJECT_BYTES:
-            raise ValueError(
-                f"object exceeds maximum of {MAX_OBJECT_BYTES} bytes: {path}"
-            )
-        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-            descriptor = -1
-            value = json.load(handle)
-            final_metadata = os.fstat(handle.fileno())
-            if (
-                object_file_identity(initial_metadata)
-                != object_file_identity(final_metadata)
-                or final_metadata.st_size > MAX_OBJECT_BYTES
-                or os.lseek(handle.fileno(), 0, os.SEEK_CUR)
-                != final_metadata.st_size
-            ):
-                raise ValueError(f"object changed while parsing: {path}")
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+    payload = read_bytes_snapshot_nofollow(
+        path,
+        max_bytes=MAX_OBJECT_BYTES,
+        size_label="object",
+    )
+    value = exact_json_loads(payload, label=f"archive object {path.name}")
+    validate_archive_object(value)
     expected = path.stem
-    actual = hashlib.sha256(canonical_json(value)).hexdigest()
-    if actual != expected:
-        raise ValueError(f"archive object hash mismatch: {path.name}")
-    if not isinstance(value, dict):
-        raise ValueError(f"archive object must be a JSON object: {path.name}")
+    if (
+        payload != (canonical_body := canonical_json(value)) + b"\n"
+        or hashlib.sha256(canonical_body).hexdigest() != expected
+    ):
+        raise ValueError(f"archive object hash mismatch or noncanonical JSON: {path.name}")
     residuals = residual_secret_paths(value)
     if residuals:
         raise ValueError(
             "recognized credential in archive object at " + ", ".join(residuals[:5])
         )
-    if _return_metadata:
-        return value, final_metadata
+    require_redaction_idempotence(value)
     return value
 
 
@@ -2314,7 +2402,7 @@ def validated_object_provenance(
     digest = path.stem
     proof = validation_proofs.get(digest) if validation_proofs is not None else None
     metadata = None
-    if proof is not None:
+    if proof is not None and harness != "codex":
         descriptor = open_regular_fd(path)
         try:
             metadata = os.fstat(descriptor)
@@ -2338,11 +2426,21 @@ def validated_object_provenance(
             validation_proofs.pop(digest, None)
             proof = None
 
-    if proof is None:
-        archived, metadata = validate_object_file(path, _return_metadata=True)
+    if proof is None or harness == "codex":
+        archived = validate_object_file(path)
+        proof_payload, metadata = read_bytes_snapshot_nofollow(
+            path,
+            max_bytes=MAX_OBJECT_BYTES,
+            size_label="object proof",
+            _return_metadata=True,
+        )
+        if proof_payload != canonical_json(archived) + b"\n":
+            raise ValueError(f"archive object changed after validation: {digest}")
         archived_source = archived.get("source")
         archived_session_id = archived.get("session_id")
         fully_validated = True
+        if harness == "codex" and archived.get("installation") != row.get("installation"):
+            raise ValueError(f"archive object provenance mismatch for {harness}: {digest}")
 
     if (
         not isinstance(archived_source, str)
@@ -2368,66 +2466,18 @@ def validated_object_provenance(
     return archived_source, archived_session_id
 
 
-def validate_index_value(
-    index: object,
-    host_id: str,
-    harness: str,
-    index_name: str,
-) -> dict:
-    """Validate one parsed index value without reading paths or object bodies."""
-    if not isinstance(index, dict):
-        raise ValueError(f"invalid archive index identity: {index_name}")
-    if (
-        set(index) != {"schema_version", "host_id", "harness", "conversations"}
-        or not is_exact_schema_version_one(index.get("schema_version"))
-        or index.get("host_id") != host_id
-        or index.get("harness") != harness
-        or not isinstance(index.get("conversations"), list)
-        or len(index["conversations"]) > MAX_MANIFEST_OBJECTS_PER_HARNESS
-    ):
-        raise ValueError(f"invalid archive index identity: {index_name}")
-    referenced: set[str] = set()
-    for row in index["conversations"]:
-        if not isinstance(row, dict):
-            raise ValueError(f"invalid archive index row: {index_name}")
-        base_fields = {"object_sha256", "session_id", "source"}
-        codex_fields = base_fields | {"source_sha256", "installation"}
-        allowed_fields = {frozenset(base_fields)}
-        if harness == "codex":
-            # The base shape is the bounded legacy Codex variant. New Codex
-            # rows carry both provenance fields or neither; other harnesses
-            # may never acquire those path-derived fields.
-            allowed_fields.add(frozenset(codex_fields))
-        if frozenset(row) not in allowed_fields:
-            raise ValueError(f"invalid archive index row: {index_name}")
-        if (
-            not isinstance(row.get("object_sha256"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", row["object_sha256"])
-            or not is_bounded_metadata_string(row.get("session_id"))
-            or row.get("source") not in HARNESS_SOURCES[harness]
-        ):
-            raise ValueError(f"invalid archive index row: {index_name}")
-        if frozenset(row) == frozenset(codex_fields) and (
-            not isinstance(row.get("source_sha256"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", row["source_sha256"])
-            or not is_bounded_metadata_string(row.get("installation"))
-        ):
-            raise ValueError(f"invalid Codex source identity: {index_name}")
-        digest = row["object_sha256"]
-        if digest in referenced:
-            raise ValueError(f"duplicate archive index row: {digest}")
-        referenced.add(digest)
-    return index
-
-
 def validate_index_metadata(index_path: Path, host_id: str, harness: str) -> dict:
     """Validate an index without opening any conversation object bodies."""
-    index = read_canonical_json_nofollow(
+    payload = read_bytes_snapshot_nofollow(
         index_path,
-        max_bytes=MAX_INDEX_METADATA_BYTES,
-        size_label="archive index",
+        max_bytes=MAX_STREAM_METADATA_BYTES,
+        size_label="index",
     )
-    return validate_index_value(index, host_id, harness, index_path.name)
+    return validate_index_value(
+        exact_json_loads(payload, label=f"{harness} archive index"),
+        host_id,
+        harness,
+    )
 
 
 def validate_index_file(
@@ -2564,9 +2614,7 @@ def write_publish_manifest(
         "schema_version": 1,
         "host_id": receipt["host_id"],
         "run_id": run_id,
-        "generated_at": datetime.now(timezone.utc).isoformat(
-            timespec="microseconds"
-        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
         "extractor_sha256": receipt["extractor_sha256"],
         "config_sha256": config_sha256,
         "receipt": {
@@ -2575,113 +2623,36 @@ def write_publish_manifest(
         },
         "harnesses": manifest_harnesses,
     }
-    manifest_object_counts = [
-        len(binding["object_sha256"])
-        for binding in manifest_harnesses.values()
-    ]
-    if (
-        any(
-            count > MAX_MANIFEST_OBJECTS_PER_HARNESS
-            for count in manifest_object_counts
-        )
-        or sum(manifest_object_counts) > MAX_MANIFEST_OBJECTS_TOTAL
-    ):
-        raise ValueError("refusing to write an oversized publish manifest object set")
-    manifest_payload = canonical_json(manifest) + b"\n"
-    if len(manifest_payload) > MAX_PUBLISH_MANIFEST_BYTES:
-        raise ValueError("refusing to write an oversized publish manifest")
-    if residual_secret_paths(manifest):
-        raise ValueError("refusing to write a publish manifest with a credential")
-    atomic_write_bytes(source_root / "publish-manifest.json", manifest_payload)
+    validate_manifest_value(manifest, receipt["host_id"])
+    receipt_payload = read_bytes_snapshot_nofollow(
+        receipt_path,
+        max_bytes=MAX_STREAM_METADATA_BYTES,
+        size_label="candidate receipt",
+    )
+    if hashlib.sha256(receipt_payload).hexdigest() != manifest["receipt"]["sha256"]:
+        raise ValueError("candidate receipt changed before manifest commit")
+    validate_receipt_value(
+        exact_json_loads(receipt_payload, label="candidate receipt"),
+        receipt["host_id"],
+        manifest,
+        expected_receipt_path=receipt_path,
+    )
+    atomic_write_json(source_root / "publish-manifest.json", manifest)
     return manifest
 
 
 def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
-    """Validate the manifest fields needed to derive a transfer allowlist."""
+    """Validate one canonical, bounded manifest before deriving any path."""
     manifest_path = source_root / "publish-manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise ValueError(f"host shard has no publish manifest: {host_id}")
-    manifest = read_canonical_json_nofollow(
+    payload = read_bytes_snapshot_nofollow(
         manifest_path,
-        max_bytes=MAX_PUBLISH_MANIFEST_BYTES,
+        max_bytes=min(MAX_PUBLISH_MANIFEST_BYTES, MAX_STREAM_METADATA_BYTES),
         size_label="publish manifest",
     )
-    if not isinstance(manifest, dict):
-        raise ValueError(f"invalid publish manifest identity: {host_id}")
-    harnesses = manifest.get("harnesses")
-    receipt_binding = manifest.get("receipt")
-    digest_fields = (
-        manifest.get("extractor_sha256"),
-        manifest.get("config_sha256"),
-        receipt_binding.get("sha256") if isinstance(receipt_binding, dict) else None,
-    )
-    if (
-        set(manifest)
-        != {
-            "schema_version",
-            "host_id",
-            "run_id",
-            "generated_at",
-            "extractor_sha256",
-            "config_sha256",
-            "receipt",
-            "harnesses",
-        }
-        or not is_exact_schema_version_one(manifest.get("schema_version"))
-        or manifest.get("host_id") != host_id
-        or not is_pipeline_run_id(manifest.get("run_id"))
-        or not is_canonical_utc_timestamp(manifest.get("generated_at"))
-        or not all(
-            isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
-            for value in digest_fields
-        )
-        or not isinstance(harnesses, dict)
-        or not set(harnesses).issubset(APPROVED_HARNESSES)
-        or not isinstance(receipt_binding, dict)
-        or set(receipt_binding) != {"path", "sha256"}
-    ):
-        raise ValueError(f"invalid publish manifest identity: {host_id}")
-
-    receipt_value = receipt_binding.get("path")
-    receipt_relative = Path(receipt_value) if isinstance(receipt_value, str) else Path()
-    if (
-        not isinstance(receipt_value, str)
-        or receipt_relative.as_posix() != receipt_value
-        or not is_pipeline_receipt_path(receipt_value, manifest["run_id"])
-        or len(receipt_relative.parts) != 2
-        or receipt_relative.parts[0] != "receipts"
-        or not RECEIPT_NAME_RE.fullmatch(receipt_relative.name)
-    ):
-        raise ValueError(f"invalid manifest receipt path: {host_id}")
-    total_objects = 0
-    for harness, binding in harnesses.items():
-        object_digests = (
-            binding.get("object_sha256") if isinstance(binding, dict) else None
-        )
-        if (
-            not isinstance(binding, dict)
-            or set(binding) != {"index_sha256", "object_sha256"}
-            or not isinstance(binding.get("index_sha256"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", binding["index_sha256"])
-            or not isinstance(object_digests, list)
-        ):
-            raise ValueError(f"invalid publish manifest binding for {harness}")
-        if (
-            len(object_digests) > MAX_MANIFEST_OBJECTS_PER_HARNESS
-            or any(
-                not isinstance(item, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", item)
-                for item in object_digests
-            )
-            or object_digests != sorted(set(object_digests))
-        ):
-            raise ValueError(f"invalid publish manifest binding for {harness}")
-        total_objects += len(object_digests)
-        if total_objects > MAX_MANIFEST_OBJECTS_TOTAL:
-            raise ValueError("publish manifest object count exceeds fleet limit")
-    if residual_secret_paths(manifest):
-        raise ValueError("publish manifest contains a recognized credential")
-    return manifest
+    manifest = parse_canonical_json(payload, size_label="publish manifest")
+    return validate_manifest_value(manifest, host_id)
 
 
 def project_publication_receipt_metadata(value: object) -> dict:
@@ -2737,6 +2708,10 @@ def project_remote_receipt_metadata(value: object) -> dict:
         "invalid_remote",
         "unreachable",
         "pending_manifest",
+        "legacy_schema",
+        "timeout",
+        "remote_integrity_rejection",
+        "local_integrity_rejection",
         "blocked_integrity_failure",
     }
     if status not in allowed_statuses:
@@ -3049,6 +3024,10 @@ def validate_remote_receipt_metadata(value: object) -> None:
             "invalid_remote",
             "unreachable",
             "pending_manifest",
+            "legacy_schema",
+            "timeout",
+            "remote_integrity_rejection",
+            "local_integrity_rejection",
             "blocked_integrity_failure",
         }
         or not is_nonnegative_int(value.get("files_copied"))
@@ -3182,54 +3161,60 @@ def validate_publish_manifest(
     receipt_path = source_root / receipt_relative
     if receipt_path not in receipt_paths:
         raise ValueError(f"manifest receipt is missing: {host_id}")
-    receipt_payload = read_bytes_nofollow(
+    receipt_payload = read_bytes_snapshot_nofollow(
         receipt_path,
-        max_bytes=MAX_RECEIPT_METADATA_BYTES,
-        size_label="manifest-bound receipt",
+        max_bytes=MAX_STREAM_METADATA_BYTES,
+        size_label="receipt",
     )
     if hashlib.sha256(receipt_payload).hexdigest() != receipt_binding["sha256"]:
         raise ValueError(f"manifest receipt hash mismatch: {host_id}")
-    receipt = parse_canonical_json(
-        receipt_payload,
-        size_label="manifest-bound receipt",
-    )
-    validate_manifest_bound_receipt_metadata(
-        receipt,
-        manifest,
+    receipt = validate_receipt_value(
+        exact_json_loads(receipt_payload, label="manifest-bound receipt"),
         host_id,
-        receipt_relative,
+        manifest,
     )
-    receipt_harnesses = receipt.get("harnesses")
-    if (
-        not present_harnesses.issubset(receipt_harnesses)
-        or any(
-            receipt_harnesses[harness].get("status") == "not_present_on_host"
-            for harness in present_harnesses
-        )
-    ):
-        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    receipt_harnesses = receipt["harnesses"]
     for harness in present_harnesses:
+        result = receipt_harnesses[harness]
+        if result.get("status") == "not_present_on_host":
+            raise ValueError(f"manifest receipt has incomplete {harness} extraction")
         binding = harnesses.get(harness)
         object_digests = (
             binding.get("object_sha256") if isinstance(binding, dict) else None
         )
         index_path = source_root / harness / "index.json"
-        index = (
-            validate_index_file(
-                index_path,
-                source_root,
-                host_id,
-                harness,
-                require_exact_object_set=False,
-                validation_proofs=validation_proofs,
-            )
-            if require_objects
-            else validate_index_metadata(index_path, host_id, harness)
+        index_payload = read_bytes_snapshot_nofollow(
+            index_path,
+            max_bytes=MAX_STREAM_METADATA_BYTES,
+            size_label="index",
         )
+        index = validate_index_value(
+            exact_json_loads(index_payload, label=f"{harness} archive index"),
+            host_id,
+            harness,
+        )
+        if require_objects:
+            for row in index["conversations"]:
+                object_path = (
+                    source_root
+                    / harness
+                    / "objects"
+                    / f"{row['object_sha256']}.json"
+                )
+                if not object_path.is_file() or object_path.is_symlink():
+                    raise ValueError(
+                        f"archive index references missing object: {row['object_sha256']}"
+                    )
+                validated_object_provenance(
+                    object_path,
+                    harness,
+                    row,
+                    validation_proofs,
+                )
         actual_digests = sorted(row["object_sha256"] for row in index["conversations"])
         if (
             object_digests != actual_digests
-            or binding["index_sha256"] != file_sha256(index_path)
+            or binding["index_sha256"] != hashlib.sha256(index_payload).hexdigest()
         ):
             raise ValueError(f"publish manifest snapshot mismatch for {harness}")
     return manifest
@@ -3323,6 +3308,9 @@ def validated_shard_files(
         index_path = source_root / harness / "index.json"
         if not index_path.is_file() or index_path.is_symlink():
             raise ValueError(f"host shard is missing {harness} index")
+        # Only the live destination of an in-progress local merge may retain a
+        # previous body for transaction rollback. Staged inputs remain exact;
+        # a healthy manifest commit is followed by quarantine and exact proof.
         validate_index_file(
             index_path,
             source_root,
@@ -3477,22 +3465,8 @@ def link_verified_local_object(source: Path, destination: Path) -> bool:
     return True
 
 
-def merge_index_file(source: Path, destination: Path) -> bool:
-    source_index = read_json_nofollow(source)
-    destination_index = (
-        read_json_nofollow(destination) if destination.exists() else None
-    )
-    merged_index = merge_index_values(source_index, destination_index)
-    before = (
-        canonical_json(destination_index) if destination_index is not None else None
-    )
-    if before == canonical_json(merged_index):
-        return False
-    atomic_write_json(destination, merged_index)
-    return True
-
-
 def merge_index_values(source_index: dict, destination_index: dict | None) -> dict:
+    """Return the installation-scoped logical replacement of two v2 indexes."""
     if destination_index is None:
         return source_index
     if (
@@ -3501,44 +3475,26 @@ def merge_index_values(source_index: dict, destination_index: dict | None) -> di
     ):
         raise ValueError("refusing to merge indexes with different identities")
     harness = source_index["harness"]
-    incoming_rows = source_index.get("conversations", [])
-
-    def base_identity(row: dict) -> tuple[object, str, object]:
-        return (row.get("source"), harness, row.get("session_id"))
-
-    incoming_base_identities = {base_identity(row) for row in incoming_rows}
-    incoming_codex_identities = {
-        (*base_identity(row), row.get("installation"))
-        for row in incoming_rows
-        if harness == "codex" and row.get("installation") is not None
-    }
-    incoming_legacy_codex_identities = {
-        base_identity(row)
-        for row in incoming_rows
-        if harness == "codex" and row.get("installation") is None
-    }
-
-    def is_replaced(row: dict) -> bool:
-        identity = base_identity(row)
-        if harness != "codex":
-            return identity in incoming_base_identities
-        installation = row.get("installation")
-        # Current Codex rows are installation-scoped. A legacy row lacks that
-        # discriminator and is replaced by a newly processed matching session;
-        # likewise a legacy incoming row must act as a compatibility wildcard.
-        return (
-            installation is None and identity in incoming_base_identities
-        ) or (
-            (*identity, installation) in incoming_codex_identities
-        ) or identity in incoming_legacy_codex_identities
-
-    merged = {
-        row["object_sha256"]: row
+    if harness == "codex" and any(
+        not is_current_codex_index_row(row)
         for row in destination_index.get("conversations", [])
-        if not is_replaced(row)
+    ):
+        return source_index
+    if any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("session_id"), str)
+        or not row["session_id"]
+        for row in destination_index.get("conversations", [])
+    ):
+        return source_index
+    validate_index_value(source_index, source_index["host_id"], harness)
+    validate_index_value(destination_index, source_index["host_id"], harness)
+    merged = {
+        archive_row_identity(row): row
+        for row in destination_index.get("conversations", [])
     }
-    for row in incoming_rows:
-        merged[row["object_sha256"]] = row
+    for row in source_index.get("conversations", []):
+        merged[archive_row_identity(row)] = row
     return {
         **destination_index,
         "conversations": sorted(
@@ -3546,6 +3502,65 @@ def merge_index_values(source_index: dict, destination_index: dict | None) -> di
             key=lambda row: (str(row.get("session_id")), row["object_sha256"]),
         ),
     }
+
+
+def merge_index_file(source: Path, destination: Path) -> bool:
+    source_index = read_json_nofollow(source)
+    source_host_id = source_index.get("host_id")
+    source_harness = source_index.get("harness")
+    if not isinstance(source_host_id, str) or source_harness not in APPROVED_HARNESSES:
+        raise ValueError("invalid source archive index identity")
+    source_index = validate_index_value(source_index, source_host_id, source_harness)
+    if not destination.exists():
+        atomic_write_json(destination, source_index)
+        return True
+    destination_index = read_json_nofollow(destination)
+    if (
+        source_index.get("host_id") != destination_index.get("host_id")
+        or source_index.get("harness") != destination_index.get("harness")
+    ):
+        raise ValueError("refusing to merge indexes with different identities")
+    harness = source_index["harness"]
+    legacy_destination = (
+        harness == "codex"
+        and any(
+            not is_current_codex_index_row(row)
+            for row in destination_index.get("conversations", [])
+        )
+    ) or any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("session_id"), str)
+        or not row["session_id"]
+        for row in destination_index.get("conversations", [])
+    )
+    if not legacy_destination:
+        validate_index_value(destination_index, source_index["host_id"], harness)
+        destination_objects = destination.parent / "objects"
+        for row in destination_index.get("conversations", []):
+            digest = row.get("object_sha256")
+            try:
+                destination_value = read_json_nofollow(
+                    destination_objects / f"{digest}.json"
+                )
+            except (FileNotFoundError, ValueError):
+                legacy_destination = True
+                break
+            if (
+                type(destination_value.get("archive_schema_version")) is not int
+                or destination_value.get("archive_schema_version")
+                != ARCHIVE_OBJECT_SCHEMA_VERSION
+            ):
+                legacy_destination = True
+                break
+    merged_index = (
+        source_index
+        if legacy_destination
+        else merge_index_values(source_index, destination_index)
+    )
+    if canonical_json(destination_index) == canonical_json(merged_index):
+        return False
+    atomic_write_json(destination, merged_index)
+    return True
 
 
 def quarantine_unindexed_objects(destination_parent: Path, host_id: str) -> int:
@@ -3561,7 +3576,8 @@ def quarantine_unindexed_objects(destination_parent: Path, host_id: str) -> int:
     if manifest_path.is_file():
         manifest = read_json_nofollow(manifest_path)
         if (
-            not is_exact_schema_version_one(manifest.get("schema_version"))
+            type(manifest.get("schema_version")) is not int
+            or manifest.get("schema_version") != 1
             or manifest.get("host_id") != host_id
             or not isinstance(manifest.get("harnesses"), dict)
         ):
@@ -3591,7 +3607,8 @@ def quarantine_unindexed_objects(destination_parent: Path, host_id: str) -> int:
         if index_path.is_file():
             index = read_json_nofollow(index_path)
             if (
-                index.get("schema_version") != 1
+                type(index.get("schema_version")) is not int
+                or index.get("schema_version") != 1
                 or index.get("host_id") != host_id
                 or index.get("harness") != harness
                 or not isinstance(index.get("conversations"), list)
@@ -3669,6 +3686,27 @@ def quarantine_unindexed_objects(destination_parent: Path, host_id: str) -> int:
     return len(orphans)
 
 
+def finalize_manifested_object_set(destination_parent: Path, host_id: str) -> int:
+    """Quarantine stale bodies only after a healthy manifest is authoritative."""
+    host_root = destination_parent / "hosts" / validate_host_id(host_id)
+    moved = quarantine_unindexed_objects(destination_parent, host_id)
+    manifest = validate_publish_manifest_metadata(host_root, host_id)
+    for harness, binding in manifest["harnesses"].items():
+        index = validate_index_metadata(
+            host_root / harness / "index.json", host_id, harness
+        )
+        indexed = sorted(row["object_sha256"] for row in index["conversations"])
+        object_root = host_root / harness / "objects"
+        live = sorted(
+            path.stem
+            for path in object_root.iterdir()
+            if path.is_file() and not path.is_symlink()
+        )
+        if indexed != binding["object_sha256"] or live != indexed:
+            raise ValueError(f"manifest exact-object proof failed for {harness}")
+    return moved
+
+
 def restore_indexes_to_manifest(source_root: Path, host_id: str) -> bool:
     """Recover an old manifested snapshot after an interrupted additive merge."""
     manifest_path = source_root / "publish-manifest.json"
@@ -3676,7 +3714,8 @@ def restore_indexes_to_manifest(source_root: Path, host_id: str) -> bool:
         return False
     manifest = read_json_nofollow(manifest_path)
     if (
-        not is_exact_schema_version_one(manifest.get("schema_version"))
+        type(manifest.get("schema_version")) is not int
+        or manifest.get("schema_version") != 1
         or manifest.get("host_id") != host_id
         or not isinstance(manifest.get("harnesses"), dict)
     ):
@@ -3693,7 +3732,11 @@ def restore_indexes_to_manifest(source_root: Path, host_id: str) -> bool:
         if not index_path.is_file() or index_path.is_symlink():
             return False
         current = read_json_nofollow(index_path)
-        if not isinstance(current.get("conversations"), list):
+        if (
+            type(current.get("schema_version")) is not int
+            or current.get("schema_version") != 1
+            or not isinstance(current.get("conversations"), list)
+        ):
             return False
         expected_set = set(expected_objects)
         candidate = dict(current)
@@ -3712,6 +3755,29 @@ def restore_indexes_to_manifest(source_root: Path, host_id: str) -> bool:
     return bool(repairs)
 
 
+def quarantine_replaced_snapshot(
+    snapshot_root: Path,
+    destination_parent: Path,
+    host_id: str,
+) -> Path:
+    """Move a superseded last-good tree out of the live host namespace."""
+    snapshot_root = assert_no_symlink_components(snapshot_root)
+    quarantine_parent = destination_parent / "quarantine" / validate_host_id(host_id)
+    secure_mkdir(quarantine_parent)
+    target = quarantine_parent / (
+        "replaced-snapshot-"
+        + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        + f"-{uuid.uuid4().hex[:8]}"
+    )
+    os.replace(snapshot_root, target)
+    _, directory_fd = open_directory_fd(quarantine_parent)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return target
+
+
 def merge_host_shard(
     source_root: Path,
     destination_parent: Path,
@@ -3719,7 +3785,14 @@ def merge_host_shard(
     *,
     require_healthy_receipt: bool = True,
     validation_proofs: ObjectValidationProofCache | None = None,
+    _transaction_token: object | None = None,
 ) -> dict:
+    if (
+        _transaction_token is not None
+        and _transaction_token is not _RUN_CONFIG_TRANSACTION
+    ):
+        raise ValueError("invalid merge transaction token")
+    defer_destination_validation = _transaction_token is _RUN_CONFIG_TRANSACTION
     source_root = assert_no_symlink_components(source_root)
     destination_root = destination_parent / "hosts" / host_id
     # Local collection is a manifest transaction. Unindexed immutable objects
@@ -3746,6 +3819,7 @@ def merge_host_shard(
             if not index_path.is_file() or index_path.is_symlink():
                 raise ValueError(f"local staged shard is missing {harness} index")
     source_wins = True
+    stale_destination_objects = 0
     if (
         require_healthy_receipt
         and destination_root.exists()
@@ -3772,16 +3846,41 @@ def merge_host_shard(
             destination_root / "publish-manifest.json"
         )
 
-        def snapshot_sets(manifest: dict) -> dict[str, set[str]]:
+        def snapshot_sets(
+            root: Path, manifest: dict
+        ) -> dict[str, set[tuple[object, object]]]:
             return {
-                harness: set(binding["object_sha256"])
-                for harness, binding in manifest["harnesses"].items()
+                harness: {
+                    archive_row_identity(row)
+                    for row in read_json_nofollow(root / harness / "index.json")[
+                        "conversations"
+                    ]
+                }
+                for harness in manifest["harnesses"]
             }
 
-        source_sets = snapshot_sets(source_manifest)
-        destination_sets = snapshot_sets(destination_manifest)
+        source_sets = snapshot_sets(source_root, source_manifest)
+        destination_sets = snapshot_sets(destination_root, destination_manifest)
+        stale_destination_objects = sum(
+            len(
+                set(
+                    destination_manifest["harnesses"]
+                    .get(harness, {})
+                    .get("object_sha256", [])
+                )
+                - set(
+                    source_manifest["harnesses"]
+                    .get(harness, {})
+                    .get("object_sha256", [])
+                )
+            )
+            for harness in destination_manifest["harnesses"]
+        )
 
-        def snapshot_subset(left: dict[str, set[str]], right: dict[str, set[str]]) -> bool:
+        def snapshot_subset(
+            left: dict[str, set[tuple[object, object]]],
+            right: dict[str, set[tuple[object, object]]],
+        ) -> bool:
             return all(
                 harness in right and digests.issubset(right[harness])
                 for harness, digests in left.items()
@@ -3797,6 +3896,90 @@ def merge_host_shard(
             source_wins = str(source_manifest["generated_at"]) >= str(
                 destination_manifest["generated_at"]
             )
+
+    if require_healthy_receipt:
+        if not source_wins:
+            return {
+                "status": "published",
+                "files_copied": 0,
+                "files_verified": len(files),
+                "quarantined_unindexed_objects": quarantined_unindexed,
+            }
+        merge_parent = destination_parent / ".merge"
+        secure_mkdir(merge_parent)
+        backup_root = destination_parent / "hosts" / (
+            f".{host_id}.last-good-{uuid.uuid4().hex}"
+        )
+        backup_created = False
+        published_candidate = False
+        with tempfile.TemporaryDirectory(
+            dir=merge_parent, prefix=f"{host_id}-"
+        ) as staged_directory:
+            candidate_root = Path(staged_directory) / host_id
+            copied = 0
+            verified = 0
+            for source in files:
+                relative = source.relative_to(source_root)
+                immutable = "objects" in relative.parts or "receipts" in relative.parts
+                if copy_verified_file(
+                    source,
+                    candidate_root / relative,
+                    immutable=immutable,
+                ):
+                    copied += 1
+                verified += 1
+            validated_shard_files(
+                candidate_root, host_id, require_healthy_receipt=True
+            )
+            secure_mkdir(destination_root.parent)
+            try:
+                if destination_root.exists():
+                    os.replace(destination_root, backup_root)
+                    backup_created = True
+                os.replace(candidate_root, destination_root)
+                published_candidate = True
+                validated_shard_files(
+                    destination_root, host_id, require_healthy_receipt=True
+                )
+            except BaseException:
+                try:
+                    with defer_termination_signals_during_rollback():
+                        if published_candidate and destination_root.exists():
+                            try:
+                                shutil.rmtree(destination_root)
+                            except BaseException:
+                                pass
+                        if (
+                            backup_created
+                            and backup_root.exists()
+                            and not destination_root.exists()
+                        ):
+                            try:
+                                os.replace(backup_root, destination_root)
+                                validated_shard_files(
+                                    destination_root,
+                                    host_id,
+                                    require_healthy_receipt=True,
+                                )
+                            except BaseException:
+                                pass
+                except BaseException:
+                    pass
+                raise
+            if backup_created:
+                if stale_destination_objects:
+                    quarantine_replaced_snapshot(
+                        backup_root, destination_parent, host_id
+                    )
+                    quarantined_unindexed += stale_destination_objects
+                else:
+                    shutil.rmtree(backup_root)
+            return {
+                "status": "published",
+                "files_copied": copied,
+                "files_verified": verified,
+                "quarantined_unindexed_objects": quarantined_unindexed,
+            }
 
     copied = 0
     verified = 0
@@ -3818,6 +4001,8 @@ def merge_host_shard(
     rollback_payloads: dict[Path, bytes | None] = {}
     attempted_payloads: dict[Path, bytes] = {}
     touched_mutable_destinations: list[Path] = []
+    newly_created_paths: dict[Path, str] = {}
+    newly_created_directories: set[Path] = set()
 
     def mutable_destination_payload(destination: Path) -> bytes | None:
         if not destination.exists() and not destination.is_symlink():
@@ -3852,6 +4037,17 @@ def merge_host_shard(
             if not source_wins and "receipts" not in relative.parts:
                 continue
             destination = destination_root / relative
+            if not destination.exists() and not destination.is_symlink():
+                newly_created_paths[destination] = file_sha256(source)
+                directory = destination.parent
+                while (
+                    directory == destination_root
+                    or destination_root in directory.parents
+                ):
+                    if directory.exists() or directory.is_symlink():
+                        break
+                    newly_created_directories.add(directory)
+                    directory = directory.parent
             immutable = "objects" in relative.parts or "receipts" in relative.parts
             if destination in rollback_payloads:
                 if (
@@ -3882,7 +4078,7 @@ def merge_host_shard(
                 require_healthy_receipt=True,
                 validation_proofs=validation_proofs,
             )
-        else:
+        elif not defer_destination_validation:
             # Each local staging shard is one collection harness. Validate the
             # merged index and every object it now authorizes, but leave other
             # harnesses for their own collection turn. The prior manifest stays
@@ -3897,25 +4093,73 @@ def merge_host_shard(
                     validation_proofs=validation_proofs,
                 )
     except BaseException:
-        for destination in touched_mutable_destinations:
-            try:
-                current_payload = mutable_destination_payload(destination)
-            except (OSError, ValueError):
-                # A path we wrote was replaced with unrelated or unsafe data.
-                # Do not let rollback turn that race into a destructive unlink.
-                continue
-            previous_payload = rollback_payloads[destination]
-            if current_payload == previous_payload:
-                continue
-            if current_payload != attempted_payloads[destination]:
-                continue
-            if previous_payload is None:
-                remove_file_if_present(destination)
-            else:
-                atomic_write_bytes(destination, previous_payload)
+        try:
+            with defer_termination_signals_during_rollback():
+                for destination in touched_mutable_destinations:
+                    try:
+                        current_payload = mutable_destination_payload(destination)
+                    except (OSError, ValueError):
+                        # A path we wrote was replaced with unrelated or unsafe data.
+                        # Do not let rollback turn that race into a destructive unlink.
+                        continue
+                    previous_payload = rollback_payloads[destination]
+                    if current_payload == previous_payload:
+                        continue
+                    if current_payload != attempted_payloads[destination]:
+                        continue
+                    try:
+                        if previous_payload is None:
+                            remove_file_if_present(destination)
+                        else:
+                            atomic_write_bytes(destination, previous_payload)
+                    except BaseException:
+                        pass
+
+                mutable_metadata_restored = True
+                for destination, previous_payload in rollback_payloads.items():
+                    try:
+                        current_payload = mutable_destination_payload(destination)
+                    except BaseException:
+                        mutable_metadata_restored = False
+                        continue
+                    mutable_metadata_restored = (
+                        mutable_metadata_restored
+                        and current_payload == previous_payload
+                    )
+
+                if mutable_metadata_restored:
+                    for destination, expected_digest in sorted(
+                        newly_created_paths.items(),
+                        key=lambda item: len(item[0].parts),
+                        reverse=True,
+                    ):
+                        try:
+                            if (
+                                destination.is_file()
+                                and not destination.is_symlink()
+                                and file_sha256(destination) == expected_digest
+                            ):
+                                remove_file_if_present(destination)
+                        except BaseException:
+                            pass
+                    for directory in sorted(
+                        newly_created_directories,
+                        key=lambda path: len(path.parts),
+                        reverse=True,
+                    ):
+                        try:
+                            directory.rmdir()
+                        except OSError:
+                            pass
+        except BaseException:
+            pass
         raise
     return {
-        "status": "published",
+        "status": (
+            "pending_validation"
+            if defer_destination_validation
+            else "published"
+        ),
         "files_copied": copied,
         "files_verified": verified,
         "quarantined_unindexed_objects": quarantined_unindexed,
@@ -3938,11 +4182,10 @@ def publish_host_shard(
         return {"status": "blocked_not_google_drive", "files_copied": 0}
     try:
         validate_output_root(drive_root)
-    except ValueError as error:
+    except ValueError:
         return {
             "status": "blocked_integrity_failure",
             "files_copied": 0,
-            "error": str(error),
         }
 
     source_root = spool_root / "hosts" / host_id
@@ -3957,25 +4200,703 @@ def publish_host_shard(
         )
     except FileNotFoundError:
         return {"status": "blocked_source_missing", "files_copied": 0}
-    except ValueError as error:
+    except ValueError:
         return {
             "status": "blocked_integrity_failure",
             "files_copied": 0,
-            "error": str(error),
         }
 
 
-def manifest_transfer_paths(manifest: dict) -> tuple[set[str], set[str]]:
-    """Return exact metadata and object paths authorized by a valid manifest."""
-    metadata = {"publish-manifest.json", manifest["receipt"]["path"]}
-    objects: set[str] = set()
-    for harness, binding in manifest["harnesses"].items():
-        metadata.add(f"{harness}/index.json")
-        objects.update(
-            f"{harness}/objects/{digest}.json"
-            for digest in binding["object_sha256"]
+def transport_identity_sha256(value: object) -> str:
+    return hashlib.sha256(canonical_json(value)).hexdigest()
+
+
+def transport_projection_path(harness: str) -> str:
+    return f"transport-index/{harness}.json"
+
+
+def build_transport_projection(index: dict, harness: str) -> dict:
+    rows = []
+    for row in index["conversations"]:
+        if not isinstance(row.get("session_id"), str) or not row["session_id"]:
+            raise LegacyArchiveSchemaError(
+                "transport projection requires non-null session_id regeneration"
+            )
+        if harness == "codex":
+            if not is_current_codex_index_row(row):
+                raise LegacyArchiveSchemaError(
+                    "v2 Codex index requires current source and installation identity"
+                )
+            projected = {
+                "transport_schema": "codex-current-v1",
+                "object_sha256": row["object_sha256"],
+                "source": row["source"],
+                "session_id_sha256": transport_identity_sha256(row["session_id"]),
+                "source_sha256": row["source_sha256"],
+                "installation_sha256": transport_identity_sha256(
+                    row["installation"]
+                ),
+            }
+        else:
+            projected = {
+                "transport_schema": "base-v1",
+                "object_sha256": row["object_sha256"],
+                "source": row["source"],
+                "session_id_sha256": transport_identity_sha256(row["session_id"]),
+            }
+        rows.append(projected)
+    rows.sort(key=lambda row: row["object_sha256"])
+    return {
+        "schema_version": 1,
+        "host_id": index["host_id"],
+        "harness": harness,
+        "conversations": rows,
+    }
+
+
+def validate_transport_projection_value(
+    projection: object, host_id: str, harness: str
+) -> dict:
+    projection = require_exact_keys(
+        projection,
+        required={"schema_version", "host_id", "harness", "conversations"},
+        label=f"{harness} transport projection",
+    )
+    if (
+        type(projection["schema_version"]) is not int
+        or projection["schema_version"] != 1
+        or projection["host_id"] != host_id
+        or projection["harness"] != harness
+        or not isinstance(projection["conversations"], list)
+    ):
+        raise ValueError(f"invalid {harness} transport projection identity")
+    digest_pattern = re.compile(r"[0-9a-f]{64}\Z")
+    seen = set()
+    for raw_row in projection["conversations"]:
+        if not isinstance(raw_row, dict):
+            raise ValueError(f"invalid {harness} transport projection row")
+        schema = raw_row.get("transport_schema")
+        required = {
+            "transport_schema",
+            "object_sha256",
+            "source",
+            "session_id_sha256",
+        }
+        if schema == "codex-current-v1" and harness == "codex":
+            required |= {"source_sha256", "installation_sha256"}
+        elif schema != "base-v1" or harness == "codex":
+            raise ValueError(f"invalid {harness} transport projection schema")
+        row = require_exact_keys(
+            raw_row,
+            required=required,
+            label=f"{harness} transport projection row",
         )
-    return metadata, objects
+        digest = row["object_sha256"]
+        for key in (
+            "object_sha256",
+            "session_id_sha256",
+            "source_sha256",
+            "installation_sha256",
+        ):
+            if key in row:
+                require_bounded_string(
+                    row[key],
+                    label=f"projection {key}",
+                    maximum=64,
+                    pattern=digest_pattern,
+                )
+        if digest in seen or row["source"] not in HARNESS_SOURCES[harness]:
+            raise ValueError(f"invalid {harness} transport projection provenance")
+        seen.add(digest)
+    if [row["object_sha256"] for row in projection["conversations"]] != sorted(seen):
+        raise ValueError(f"invalid {harness} transport projection order")
+    reject_metadata_secrets(projection, label=f"{harness} transport projection")
+    return projection
+
+
+def load_stream_metadata(
+    spool_root: Path,
+    host_id: str,
+) -> tuple[
+    Path,
+    dict,
+    list[tuple[str, bytes]],
+    dict[str, dict[str, dict]],
+    dict[str, dict[str, dict]],
+]:
+    """Load and validate all body-free authorization metadata as byte snapshots."""
+    source_root = spool_root / "hosts" / host_id
+    manifest_path = source_root / "publish-manifest.json"
+    if not manifest_path.exists() and not manifest_path.is_symlink():
+        raise PendingManifestError("publish manifest is pending")
+    manifest_payload = read_bytes_snapshot_nofollow(
+        manifest_path,
+        max_bytes=MAX_STREAM_METADATA_BYTES,
+        size_label="publish manifest",
+    )
+    manifest = validate_manifest_value(
+        exact_json_loads(manifest_payload, label="publish manifest"), host_id
+    )
+    frames: list[tuple[str, bytes]] = [("publish-manifest.json", manifest_payload)]
+
+    receipt_relative = manifest["receipt"]["path"]
+    receipt_path = source_root / receipt_relative
+    receipt_payload = read_bytes_snapshot_nofollow(
+        receipt_path,
+        max_bytes=MAX_STREAM_METADATA_BYTES,
+        size_label="manifest-bound receipt",
+    )
+    if hashlib.sha256(receipt_payload).hexdigest() != manifest["receipt"]["sha256"]:
+        raise ValueError("manifest-bound receipt hash mismatch")
+    receipt = validate_receipt_value(
+        exact_json_loads(receipt_payload, label="manifest-bound receipt"),
+        host_id,
+        manifest,
+        expected_receipt_path=receipt_path,
+    )
+    if "receipt_path" not in receipt:
+        raise ValueError("stream receipt is missing its bound receipt_path")
+    frames.append((receipt_relative, receipt_payload))
+
+    rows_by_harness: dict[str, dict[str, dict]] = {}
+    projections_by_harness: dict[str, dict[str, dict]] = {}
+    for harness in sorted(manifest["harnesses"]):
+        if receipt["harnesses"][harness]["status"] == "not_present_on_host":
+            raise ValueError(f"manifest receipt has incomplete {harness} extraction")
+        index_relative = f"{harness}/index.json"
+        index_payload = read_bytes_snapshot_nofollow(
+            source_root / index_relative,
+            max_bytes=MAX_STREAM_METADATA_BYTES,
+            size_label=f"{harness} index",
+        )
+        binding = manifest["harnesses"][harness]
+        if hashlib.sha256(index_payload).hexdigest() != binding["index_sha256"]:
+            raise ValueError(f"manifest-bound index hash mismatch for {harness}")
+        index = validate_index_value(
+            exact_json_loads(index_payload, label=f"{harness} archive index"),
+            host_id,
+            harness,
+        )
+        if index_payload != canonical_json(index) + b"\n":
+            raise ValueError(f"manifest-bound index is not canonical for {harness}")
+        rows = {row["object_sha256"]: row for row in index["conversations"]}
+        if sorted(rows) != binding["object_sha256"]:
+            raise ValueError(f"manifest-bound object set mismatch for {harness}")
+        rows_by_harness[harness] = rows
+        projection = build_transport_projection(index, harness)
+        validate_transport_projection_value(projection, host_id, harness)
+        projections_by_harness[harness] = {
+            row["object_sha256"]: row for row in projection["conversations"]
+        }
+        frames.append(
+            (transport_projection_path(harness), canonical_json(projection) + b"\n")
+        )
+    return source_root, manifest, frames, rows_by_harness, projections_by_harness
+
+
+def write_stream_frame(output, relative_path: str, payload: bytes) -> None:
+    path_payload = relative_path.encode("utf-8")
+    if not 0 < len(path_payload) <= MAX_STREAM_PATH_BYTES:
+        raise ValueError("stream path length is out of bounds")
+    output.write(STREAM_FRAME_HEADER.pack(len(path_payload), len(payload)))
+    output.write(path_payload)
+    view = memoryview(payload)
+    for offset in range(0, len(view), 1024 * 1024):
+        output.write(view[offset : offset + 1024 * 1024])
+
+
+def parse_cache_hints(stream) -> set[str]:
+    payload = stream.read(MAX_CACHE_HINT_BYTES + 1)
+    if len(payload) > MAX_CACHE_HINT_BYTES:
+        raise ValueError("cache hints exceed maximum size")
+    if not payload:
+        return set()
+    if not payload.endswith(b"\n"):
+        raise ValueError("cache hints must be newline terminated")
+    try:
+        lines = payload.decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        raise ValueError("cache hints must be ASCII") from error
+    if (
+        len(lines) > MAX_STREAM_FILES
+        or lines != sorted(lines)
+        or len(lines) != len(set(lines))
+        or any(not re.fullmatch(r"[0-9a-f]{64}", line) for line in lines)
+    ):
+        raise ValueError("invalid cache hint set")
+    return set(lines)
+
+
+def encode_cache_hints(digests: set[str]) -> bytes:
+    if len(digests) > MAX_STREAM_FILES or any(
+        not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests
+    ):
+        raise ValueError("invalid local cache hint set")
+    return b"" if not digests else ("\n".join(sorted(digests)) + "\n").encode("ascii")
+
+
+def stream_shard_to(
+    output,
+    spool_root: Path,
+    host_id: str,
+    *,
+    after_validate=None,
+    skip_object_digests: set[str] | None = None,
+) -> None:
+    """Emit only validated, manifest-authorized snapshots while holding the run lock."""
+    if not spool_root.is_absolute():
+        raise ValueError("stream spool_root must be absolute")
+    spool_root = validate_output_root(spool_root)
+    host_id = validate_host_id(host_id)
+    skip_object_digests = set() if skip_object_digests is None else skip_object_digests
+    encode_cache_hints(skip_object_digests)
+    with archive_run_lock(spool_root):
+        (
+            source_root,
+            manifest,
+            metadata_frames,
+            rows_by_harness,
+            projections_by_harness,
+        ) = load_stream_metadata(spool_root, host_id)
+        file_count = len(metadata_frames)
+        metadata_bytes = sum(len(payload) for _, payload in metadata_frames)
+        total_bytes = metadata_bytes
+        if (
+            file_count > MAX_STREAM_FILES
+            or metadata_bytes > MAX_STREAM_METADATA_TOTAL_BYTES
+            or total_bytes > MAX_STREAM_TOTAL_BYTES
+        ):
+            raise ValueError("stream metadata exceeds transfer bounds")
+
+        # Whole-snapshot preflight. This intentionally retains no parsed object
+        # tree and emits no stdout byte, including magic, until every authorized
+        # object (including cache-hinted objects) has passed the v2 contract.
+        for harness in sorted(manifest["harnesses"]):
+            reconstructed_rows = []
+            for digest in manifest["harnesses"][harness]["object_sha256"]:
+                relative = f"{harness}/objects/{digest}.json"
+                payload = read_bytes_snapshot_nofollow(
+                    source_root / relative,
+                    max_bytes=MAX_OBJECT_BYTES,
+                    size_label="manifest-bound object",
+                )
+                value = validate_object_payload(
+                    payload,
+                    digest=digest,
+                    harness=harness,
+                    row=rows_by_harness[harness][digest],
+                )
+                reconstructed_rows.append(
+                    reconstruct_transport_row(
+                        projections_by_harness[harness][digest],
+                        value,
+                        harness,
+                    )
+                )
+                file_count += 1
+                total_bytes += len(payload)
+                if file_count > MAX_STREAM_FILES or total_bytes > MAX_STREAM_TOTAL_BYTES:
+                    raise ValueError("stream shard exceeds transfer bounds")
+                if after_validate is not None:
+                    after_validate(source_root / relative, relative, payload)
+                del value
+                del payload
+            reconstructed_index_payload(
+                reconstructed_rows,
+                host_id,
+                harness,
+                manifest["harnesses"][harness]["index_sha256"],
+            )
+
+        output.write(STREAM_MAGIC)
+        for relative, payload in metadata_frames:
+            if after_validate is not None:
+                after_validate(source_root / relative, relative, payload)
+            write_stream_frame(output, relative, payload)
+
+        for harness in sorted(manifest["harnesses"]):
+            for digest in manifest["harnesses"][harness]["object_sha256"]:
+                relative = f"{harness}/objects/{digest}.json"
+                payload = read_bytes_snapshot_nofollow(
+                    source_root / relative,
+                    max_bytes=MAX_OBJECT_BYTES,
+                    size_label="manifest-bound object",
+                )
+                validate_object_payload(
+                    payload,
+                    digest=digest,
+                    harness=harness,
+                    row=rows_by_harness[harness][digest],
+                )
+                if digest in skip_object_digests:
+                    continue
+                # Re-read and revalidate immediately before emitting this exact
+                # snapshot. A post-preflight replacement cannot cross stdout.
+                write_stream_frame(output, relative, payload)
+        output.write(STREAM_FRAME_HEADER.pack(0, 0))
+        output.flush()
+
+
+def stream_shard_command(args: argparse.Namespace) -> int:
+    try:
+        cache_hints = parse_cache_hints(sys.stdin.buffer) if args.cache_hints_stdin else set()
+        stream_shard_to(
+            sys.stdout.buffer,
+            Path(args.spool_root),
+            args.host_id,
+            skip_object_digests=cache_hints,
+        )
+        return 0
+    except PendingManifestError:
+        print("pending_manifest", file=sys.stderr)
+        return STREAM_EXIT_PENDING_MANIFEST
+    except LegacyArchiveSchemaError:
+        print("legacy_schema", file=sys.stderr)
+        return STREAM_EXIT_LEGACY_SCHEMA
+    except (FileNotFoundError, OSError, ValueError):
+        # Do not echo exception text: paths and parser details are not part of
+        # the protocol and stdout must remain binary-only.
+        print("remote_integrity_rejection", file=sys.stderr)
+        return STREAM_EXIT_INTEGRITY_REJECTION
+
+
+def validate_stream_relative_path(value: str) -> None:
+    if (
+        not value
+        or len(value.encode("utf-8")) > MAX_STREAM_PATH_BYTES
+        or "\x00" in value
+    ):
+        raise LocalStreamIntegrityError("invalid stream path")
+    path = Path(value)
+    if (
+        path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise LocalStreamIntegrityError("stream path traversal rejected")
+
+
+def read_exact_before_deadline(stream, length: int, deadline: float) -> bytes:
+    payload = bytearray()
+    while len(payload) < length:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RemoteTimeoutError("remote stream timed out")
+        try:
+            descriptor = stream.fileno()
+        except (AttributeError, OSError):
+            chunk = stream.read(length - len(payload))
+        else:
+            readable, _, _ = select.select([descriptor], [], [], remaining)
+            if not readable:
+                raise RemoteTimeoutError("remote stream timed out")
+            chunk = os.read(descriptor, min(1024 * 1024, length - len(payload)))
+        if not chunk:
+            raise EOFError("remote stream ended before its terminal frame")
+        payload.extend(chunk)
+    return bytes(payload)
+
+
+def read_one_or_eof_before_deadline(stream, deadline: float) -> bytes:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RemoteTimeoutError("remote stream timed out")
+    try:
+        descriptor = stream.fileno()
+    except (AttributeError, OSError):
+        return stream.read(1)
+    readable, _, _ = select.select([descriptor], [], [], remaining)
+    if not readable:
+        raise RemoteTimeoutError("remote stream timed out")
+    return os.read(descriptor, 1)
+
+
+def receive_payload_to_file(
+    stream,
+    destination: Path,
+    length: int,
+    deadline: float,
+) -> None:
+    secure_mkdir(destination.parent)
+    _, directory_fd = open_directory_fd(destination.parent)
+    descriptor = os.open(
+        destination.name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        remaining_length = length
+        while remaining_length:
+            chunk = read_exact_before_deadline(
+                stream, min(1024 * 1024, remaining_length), deadline
+            )
+            view = memoryview(chunk)
+            written = 0
+            while written < len(view):
+                count = os.write(descriptor, view[written:])
+                if count <= 0:
+                    raise OSError("short write while staging remote stream")
+                written += count
+            remaining_length -= len(chunk)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+        os.close(directory_fd)
+
+
+def reconstruct_transport_row(projected: dict, value: dict, harness: str) -> dict:
+    digest = projected["object_sha256"]
+    session_id = value.get("session_id")
+    if transport_identity_sha256(session_id) != projected["session_id_sha256"]:
+        raise ValueError("transport session identity mismatch")
+    if value.get("source") != projected["source"]:
+        raise ValueError("transport source identity mismatch")
+    row = {
+        "object_sha256": digest,
+        "session_id": session_id,
+        "source": projected["source"],
+    }
+    if harness == "codex":
+        if projected["transport_schema"] != "codex-current-v1":
+            raise LegacyArchiveSchemaError(
+                "v2 Codex transport requires current identity projection"
+            )
+        installation = value.get("installation")
+        if (
+            not isinstance(installation, str)
+            or transport_identity_sha256(installation)
+            != projected["installation_sha256"]
+        ):
+            raise ValueError("Codex installation identity mismatch")
+        row["source_sha256"] = projected["source_sha256"]
+        row["installation"] = installation
+    elif projected["transport_schema"] != "base-v1":
+        raise ValueError(f"invalid {harness} transport projection schema")
+    return row
+
+
+def reconstructed_index_payload(
+    rows: list[dict],
+    host_id: str,
+    harness: str,
+    expected_sha256: str,
+) -> bytes:
+    rows.sort(key=lambda row: (str(row["session_id"]), row["object_sha256"]))
+    index = {
+        "schema_version": 1,
+        "host_id": host_id,
+        "harness": harness,
+        "conversations": rows,
+    }
+    validate_index_value(index, host_id, harness)
+    payload = canonical_json(index) + b"\n"
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise ValueError("reconstructed index hash mismatch")
+    return payload
+
+
+def reconstruct_indexes_from_transport(
+    incoming_root: Path,
+    manifest: dict,
+    host_id: str,
+) -> None:
+    for harness in sorted(manifest["harnesses"]):
+        projection_relative = transport_projection_path(harness)
+        projection_payload = read_bytes_snapshot_nofollow(
+            incoming_root / projection_relative,
+            max_bytes=MAX_STREAM_METADATA_BYTES,
+            size_label=f"{harness} transport projection",
+        )
+        try:
+            projection = validate_transport_projection_value(
+                exact_json_loads(
+                    projection_payload, label=f"{harness} transport projection"
+                ),
+                host_id,
+                harness,
+            )
+        except (LegacyArchiveSchemaError, ValueError) as error:
+            raise LocalStreamIntegrityError(str(error)) from error
+        expected_digests = manifest["harnesses"][harness]["object_sha256"]
+        if [row["object_sha256"] for row in projection["conversations"]] != sorted(
+            expected_digests
+        ):
+            raise LocalStreamIntegrityError("transport projection object set mismatch")
+        reconstructed_rows = []
+        for projected in projection["conversations"]:
+            digest = projected["object_sha256"]
+            object_payload = read_bytes_snapshot_nofollow(
+                incoming_root / harness / "objects" / f"{digest}.json",
+                max_bytes=MAX_OBJECT_BYTES,
+                size_label="received archive object",
+            )
+            value = validate_object_payload(
+                object_payload,
+                digest=digest,
+                harness=harness,
+                row=None,
+            )
+            try:
+                reconstructed_rows.append(
+                    reconstruct_transport_row(projected, value, harness)
+                )
+            except (LegacyArchiveSchemaError, ValueError) as error:
+                raise LocalStreamIntegrityError(str(error)) from error
+        try:
+            index_payload = reconstructed_index_payload(
+                reconstructed_rows,
+                host_id,
+                harness,
+                manifest["harnesses"][harness]["index_sha256"],
+            )
+        except (LegacyArchiveSchemaError, ValueError) as error:
+            raise LocalStreamIntegrityError(str(error)) from error
+        atomic_write_bytes(incoming_root / harness / "index.json", index_payload)
+
+    transport_root = incoming_root / "transport-index"
+    for harness in sorted(manifest["harnesses"]):
+        (transport_root / f"{harness}.json").unlink()
+    transport_root.rmdir()
+
+
+def receive_stream_to_directory(
+    stream,
+    incoming_root: Path,
+    host_id: str,
+    remote_spool_root: str,
+    deadline: float,
+    *,
+    cached_shard: Path | None = None,
+    cache_hints: set[str] | None = None,
+) -> dict:
+    if read_exact_before_deadline(stream, len(STREAM_MAGIC), deadline) != STREAM_MAGIC:
+        raise LocalStreamIntegrityError("invalid remote stream magic")
+    expected_paths: list[str] | None = None
+    authorized_paths: set[str] | None = None
+    cache_hints = set() if cache_hints is None else cache_hints
+    received_paths: set[str] = set()
+    total_bytes = 0
+    metadata_bytes = 0
+    file_count = 0
+    object_count = 0
+    while True:
+        header = read_exact_before_deadline(stream, STREAM_FRAME_HEADER.size, deadline)
+        path_length, payload_length = STREAM_FRAME_HEADER.unpack(header)
+        if path_length == 0:
+            if payload_length != 0:
+                raise LocalStreamIntegrityError("invalid terminal stream frame")
+            break
+        if path_length > MAX_STREAM_PATH_BYTES:
+            raise LocalStreamIntegrityError("stream path is oversized")
+        raw_path = read_exact_before_deadline(stream, path_length, deadline)
+        try:
+            relative = raw_path.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise LocalStreamIntegrityError("stream path is not UTF-8") from error
+        validate_stream_relative_path(relative)
+        if relative in received_paths:
+            raise LocalStreamIntegrityError("duplicate stream path")
+        if expected_paths is None:
+            if relative != "publish-manifest.json":
+                raise LocalStreamIntegrityError("manifest is not the first stream frame")
+            maximum = MAX_STREAM_METADATA_BYTES
+        else:
+            if file_count >= len(expected_paths) or relative != expected_paths[file_count]:
+                raise LocalStreamIntegrityError("stream path is outside the exact manifest allowlist")
+            maximum = (
+                MAX_OBJECT_BYTES if "/objects/" in relative else MAX_STREAM_METADATA_BYTES
+            )
+        if payload_length > maximum:
+            raise LocalStreamIntegrityError("stream payload is oversized")
+        file_count += 1
+        total_bytes += payload_length
+        if "/objects/" in relative:
+            object_count += 1
+        else:
+            metadata_bytes += payload_length
+        if file_count > MAX_STREAM_FILES or total_bytes > MAX_STREAM_TOTAL_BYTES:
+            raise LocalStreamIntegrityError("stream exceeds aggregate bounds")
+        if metadata_bytes > MAX_STREAM_METADATA_TOTAL_BYTES:
+            raise LocalStreamIntegrityError("stream metadata exceeds aggregate bounds")
+        receive_payload_to_file(
+            stream,
+            incoming_root / relative,
+            payload_length,
+            deadline,
+        )
+        received_paths.add(relative)
+        if expected_paths is None:
+            manifest = validate_publish_manifest_metadata(incoming_root, host_id)
+            all_paths = [
+                "publish-manifest.json",
+                manifest["receipt"]["path"],
+                *(
+                    transport_projection_path(harness)
+                    for harness in sorted(manifest["harnesses"])
+                ),
+                *(
+                    f"{harness}/objects/{digest}.json"
+                    for harness in sorted(manifest["harnesses"])
+                    for digest in manifest["harnesses"][harness]["object_sha256"]
+                ),
+            ]
+            authorized_paths = set(all_paths)
+            expected_paths = [
+                relative_path
+                for relative_path in all_paths
+                if not (
+                    "/objects/" in relative_path
+                    and Path(relative_path).stem in cache_hints
+                )
+            ]
+            if cached_shard is not None:
+                for relative_path in all_paths:
+                    if (
+                        "/objects/" in relative_path
+                        and Path(relative_path).stem in cache_hints
+                    ):
+                        cached_object = cached_shard / relative_path
+                        if not cached_object.is_file() or cached_object.is_symlink():
+                            raise LocalStreamIntegrityError(
+                                "cache hint does not name a validated cached object"
+                            )
+                        link_verified_local_object(
+                            cached_object, incoming_root / relative_path
+                        )
+    if expected_paths is None or file_count != len(expected_paths):
+        raise LocalStreamIntegrityError("stream omitted a manifest-authorized path")
+    if read_one_or_eof_before_deadline(stream, deadline):
+        raise LocalStreamIntegrityError("bytes followed the terminal stream frame")
+
+    if authorized_paths is None:
+        raise LocalStreamIntegrityError("stream omitted its authorization manifest")
+    validate_staged_allowlist(incoming_root, authorized_paths)
+    manifest = validate_publish_manifest_metadata(incoming_root, host_id)
+    remote_receipt_path = (
+        Path(remote_spool_root)
+        / "hosts"
+        / host_id
+        / manifest["receipt"]["path"]
+    )
+    receipt_payload = read_bytes_snapshot_nofollow(
+        incoming_root / manifest["receipt"]["path"],
+        max_bytes=MAX_STREAM_METADATA_BYTES,
+        size_label="received receipt",
+    )
+    validate_receipt_value(
+        exact_json_loads(receipt_payload, label="received receipt"),
+        host_id,
+        manifest,
+        expected_receipt_path=remote_receipt_path,
+    )
+    reconstruct_indexes_from_transport(incoming_root, manifest, host_id)
+    validated_shard_files(incoming_root, host_id, require_healthy_receipt=True)
+    return {
+        "stream_files_received": file_count,
+        "stream_objects_received": object_count,
+        "stream_bytes_received": total_bytes,
+    }
 
 
 def validate_staged_allowlist(source_root: Path, allowed_paths: set[str]) -> None:
@@ -4009,158 +4930,292 @@ def validate_staged_allowlist(source_root: Path, allowed_paths: set[str]) -> Non
         raise ValueError("remote transfer omitted a manifest-authorized path")
 
 
-def rsync_remote_allowlist(
-    source: str,
-    destination: Path,
-    relative_paths: set[str],
-    *,
-    timeout_seconds: int,
-    link_dest: Path | None,
-    max_file_bytes: int,
-    remote_spool_root: str,
-    remote_host_id: str,
-) -> None:
-    """Fetch only NUL-delimited relative paths; none reach a remote shell."""
-    command = [
-        "rsync",
-        "-rtz",
-        "--checksum",
-        "--no-links",
-        "--safe-links",
-        "--relative",
-        "--from0",
-        "--files-from=-",
-        f"--max-size={max_file_bytes}",
-    ]
-    if link_dest is not None:
-        command.append(f"--link-dest={link_dest}")
-    remote_guard = " ".join(
-        (
-            "python3",
-            "-c",
-            shlex.quote(REMOTE_RSYNC_GUARD),
-            shlex.quote(remote_spool_root),
-            shlex.quote(remote_host_id),
-            str(MAX_PUBLISH_MANIFEST_BYTES),
-        )
-    )
-    command.append(f"--rsync-path={remote_guard}")
-    command.extend(
-        [
-            "-e",
-            "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ControlMaster=no -o ControlPath=none",
-            source,
-            str(destination) + "/",
-        ]
-    )
-    error_read_fd, error_write_fd = os.pipe()
-    error_sample = bytearray()
+def validate_remote_absolute_path_token(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not REMOTE_SPOOL_ROOT_RE.fullmatch(value)
+        or any(part in {"", ".", ".."} for part in value.split("/")[1:])
+    ):
+        raise ValueError(f"invalid {label}")
+    return value
 
-    def drain_errors() -> None:
-        while True:
-            chunk = os.read(error_read_fd, 8192)
-            if not chunk:
-                return
-            remaining = MAX_TRANSFER_ERROR_BYTES - len(error_sample)
-            if remaining > 0:
-                error_sample.extend(chunk[:remaining])
 
-    error_thread = threading.Thread(target=drain_errors, daemon=True)
-    error_thread.start()
-    caught_error: subprocess.CalledProcessError | None = None
+def quarantine_invalid_cached_shard(
+    spool_root: Path, host_id: str, *, incomplete: bool
+) -> Path:
+    """Atomically remove an unusable cache from the live host namespace."""
+    spool_root = assert_no_symlink_components(spool_root)
+    host_id = validate_host_id(host_id)
+    source = assert_no_symlink_components(spool_root / "hosts" / host_id)
+    if not source.is_dir():
+        raise ValueError("invalid cached shard")
+    quarantine_parent = spool_root / "quarantine" / host_id
+    secure_mkdir(quarantine_parent)
+    label = "incomplete-cache" if incomplete else "invalid-cache"
+    target = quarantine_parent / (
+        f"{label}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}"
+        f"-{uuid.uuid4().hex[:8]}"
+    )
+    _, source_parent_fd = open_directory_fd(source.parent)
+    _, target_parent_fd = open_directory_fd(target.parent)
     try:
-        subprocess.run(
-            command,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=error_write_fd,
-            text=True,
-            input="".join(f"{relative}\0" for relative in sorted(relative_paths)),
-            timeout=timeout_seconds,
+        os.rename(
+            source.name,
+            target.name,
+            src_dir_fd=source_parent_fd,
+            dst_dir_fd=target_parent_fd,
         )
-    except subprocess.CalledProcessError as error:
-        caught_error = error
+        os.fsync(source_parent_fd)
+        os.fsync(target_parent_fd)
     finally:
-        os.close(error_write_fd)
-        error_thread.join()
-        os.close(error_read_fd)
-    if caught_error is not None:
-        supplied_error = caught_error.stderr or ""
-        if isinstance(supplied_error, bytes):
-            supplied_error = supplied_error.decode("utf-8", errors="replace")
-        bounded_error = supplied_error[:MAX_TRANSFER_ERROR_BYTES] + error_sample.decode(
-            "utf-8", errors="replace"
-        )
-        if REMOTE_RSYNC_GUARD_ERROR in bounded_error:
-            raise ValueError(
-                "remote shard contains a symlink or unsafe entry"
-            ) from caught_error
-        raise caught_error
+        os.close(source_parent_fd)
+        os.close(target_parent_fd)
+    return target
 
 
-def assert_remote_transfer_paths_have_no_symlink_components(
-    ssh_options: list[str],
-    ssh_host: str,
-    remote_shard_path: str,
-    relative_paths: set[str],
-    *,
-    timeout_seconds: int,
-) -> None:
-    """Reject symlinked remote parent paths before each allowlisted transfer."""
-    remote_root = Path(remote_shard_path)
-    checked_paths = {
-        Path(*remote_root.parts[:depth]).as_posix()
-        for depth in range(2, len(remote_root.parts) + 1)
-    }
-    for relative in relative_paths:
-        candidate = remote_root / relative
-        checked_paths.update(
-            Path(*candidate.parts[:depth]).as_posix()
-            for depth in range(2, len(candidate.parts))
+def write_before_deadline(stream, payload: bytes, deadline: float) -> None:
+    view = memoryview(payload)
+    offset = 0
+    while offset < len(view):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RemoteTimeoutError("remote stream timed out")
+        descriptor = stream.fileno()
+        _, writable, _ = select.select([], [descriptor], [], remaining)
+        if not writable:
+            raise RemoteTimeoutError("remote stream timed out")
+        written = os.write(descriptor, view[offset : offset + 1024 * 1024])
+        if written <= 0:
+            raise BrokenPipeError("remote helper closed cache-hint input")
+        offset += written
+
+
+def bounded_remote_process_wait(process, deadline: float) -> int:
+    remaining = max(0.0, deadline - time.monotonic())
+    return process.wait(timeout=remaining)
+
+
+def terminate_remote_process(process, deadline: float) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (AttributeError, OSError):
+        try:
+            process.kill()
+        except (AttributeError, OSError):
+            pass
+    try:
+        now = time.monotonic()
+        reap_deadline = min(
+            deadline + REMOTE_PROCESS_REAP_SECONDS,
+            now + REMOTE_PROCESS_REAP_SECONDS,
         )
-    test_expression: list[str] = []
-    for path in sorted(checked_paths):
-        if test_expression:
-            test_expression.append("-a")
-        test_expression.extend(["!", "-L", path])
-    completed = subprocess.run(
-        [
-            "ssh",
-            *ssh_options,
-            ssh_host,
-            "test",
-            *test_expression,
-        ],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=timeout_seconds,
-    )
-    if completed.returncode == 1:
-        raise ValueError("remote transfer path contains a symlink component")
-    if completed.returncode != 0:
-        raise subprocess.CalledProcessError(completed.returncode, completed.args)
+        bounded_remote_process_wait(process, reap_deadline)
+    except BaseException:
+        pass
+
+
+def cleanup_failed_remote_process(process, deadline: float) -> None:
+    """Close pipes and reap a failed SSH helper without masking its exception."""
+    try:
+        if process.stdin is not None:
+            process.stdin.close()
+    except BaseException:
+        pass
+    try:
+        try:
+            live = process.poll() is None
+        except BaseException:
+            live = True
+        if live:
+            terminate_remote_process(process, deadline)
+        else:
+            bounded_remote_process_wait(process, deadline)
+    except BaseException:
+        pass
+    try:
+        if process.stdout is not None:
+            process.stdout.close()
+    except BaseException:
+        pass
+
+
+def wait_remote_process(process, deadline: float) -> int:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        terminate_remote_process(process, deadline)
+        raise RemoteTimeoutError("remote stream timed out")
+    try:
+        return process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as error:
+        terminate_remote_process(process, deadline)
+        raise RemoteTimeoutError("remote stream timed out") from error
+
+
+def raise_for_remote_exit(returncode: int, *, stream_complete: bool) -> None:
+    if returncode == 0:
+        if not stream_complete:
+            raise LocalStreamIntegrityError("remote stream ended before completion")
+        return
+    if returncode == STREAM_EXIT_PENDING_MANIFEST:
+        raise PendingManifestError("remote manifest is pending")
+    if returncode == STREAM_EXIT_LEGACY_SCHEMA:
+        raise LegacyArchiveSchemaError("remote shard requires v2 regeneration")
+    if returncode == 255:
+        raise RemoteUnreachableError("SSH transport was unreachable")
+    raise RemoteIntegrityError("trusted remote helper rejected the shard")
+
+
+def pull_remote_stream(
+    remote: dict,
+    spool_root: Path,
+    remote_host_id: str,
+    cached_shard: Path | None,
+    cache_hints: set[str],
+) -> dict:
+    ssh_host = remote["ssh_host"]
+    remote_spool_root = remote["remote_spool_root"]
+    remote_pipeline_path = remote["remote_pipeline_path"]
+    timeout_seconds = remote.get("timeout_seconds", 300)
+    if (
+        type(timeout_seconds) is not int
+        or not 1 <= timeout_seconds <= MAX_REMOTE_TIMEOUT_SECONDS
+    ):
+        raise ValueError("invalid remote timeout_seconds")
+    command = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "UpdateHostKeys=no",
+        ssh_host,
+        "python3",
+        remote_pipeline_path,
+        "stream-shard",
+        "--spool-root",
+        remote_spool_root,
+        "--host-id",
+        remote_host_id,
+        "--cache-hints-stdin",
+    ]
+    deadline = time.monotonic() + timeout_seconds
+    incoming_parent = spool_root / ".incoming"
+    secure_mkdir(incoming_parent)
+    with tempfile.TemporaryDirectory(
+        dir=incoming_parent, prefix=f"{remote_host_id}-"
+    ) as incoming, tempfile.TemporaryFile(mode="w+b", dir=incoming_parent) as stderr_file:
+        os.fchmod(stderr_file.fileno(), 0o600)
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+                start_new_session=True,
+            )
+        except OSError as error:
+            raise RemoteUnreachableError("could not start SSH transport") from error
+        stream_complete = False
+        failure_cleaned_up = False
+        try:
+            assert process.stdin is not None and process.stdout is not None
+            try:
+                write_before_deadline(
+                    process.stdin, encode_cache_hints(cache_hints), deadline
+                )
+                process.stdin.close()
+            except (BrokenPipeError, OSError):
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+                returncode = wait_remote_process(process, deadline)
+                raise_for_remote_exit(returncode, stream_complete=False)
+            try:
+                transfer = receive_stream_to_directory(
+                    process.stdout,
+                    Path(incoming),
+                    remote_host_id,
+                    remote_spool_root,
+                    deadline,
+                    cached_shard=cached_shard,
+                    cache_hints=cache_hints,
+                )
+                stream_complete = True
+            except EOFError:
+                returncode = wait_remote_process(process, deadline)
+                raise_for_remote_exit(returncode, stream_complete=False)
+            returncode = wait_remote_process(process, deadline)
+            raise_for_remote_exit(returncode, stream_complete=stream_complete)
+            result = merge_host_shard(Path(incoming), spool_root, remote_host_id)
+            result.update(transfer)
+            return result
+        except BaseException:
+            failure_cleaned_up = True
+            cleanup_failed_remote_process(process, deadline)
+            raise
+        finally:
+            if not failure_cleaned_up and process.stdout is not None:
+                try:
+                    process.stdout.close()
+                except (OSError, ValueError):
+                    pass
 
 
 def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
     spool_root = validate_output_root(spool_root)
+    if not isinstance(hub, dict) or set(hub) != {"remotes"} or not isinstance(
+        hub["remotes"], list
+    ):
+        raise ValueError("invalid hub config schema")
     statuses = {}
-    for remote in hub.get("remotes", []):
+    for remote in hub["remotes"]:
+        if not isinstance(remote, dict) or "host_id" not in remote:
+            raise ValueError("invalid remote config schema")
         remote_host_id = validate_host_id(remote["host_id"])
         if remote.get("source_spool_root"):
-            source_spool = assert_no_symlink_components(Path(remote["source_spool_root"]))
+            if set(remote) != {"host_id", "source_spool_root"}:
+                statuses[remote_host_id] = {
+                    "status": "invalid_remote",
+                    "files_copied": 0,
+                }
+                continue
+            if (
+                not isinstance(remote["source_spool_root"], str)
+                or not Path(remote["source_spool_root"]).is_absolute()
+            ):
+                statuses[remote_host_id] = {
+                    "status": "invalid_remote",
+                    "files_copied": 0,
+                }
+                continue
             try:
+                source_spool = assert_no_symlink_components(
+                    Path(remote["source_spool_root"])
+                )
                 result = merge_host_shard(
                     source_spool / "hosts" / remote_host_id,
                     spool_root,
                     remote_host_id,
                     validation_proofs=None,
                 )
-            except (FileNotFoundError, ValueError) as error:
+            except LegacyArchiveSchemaError:
                 statuses[remote_host_id] = {
-                    "status": "blocked_integrity_failure",
+                    "status": "legacy_schema",
                     "files_copied": 0,
-                    "error": str(error),
+                }
+                continue
+            except (FileNotFoundError, ValueError):
+                statuses[remote_host_id] = {
+                    "status": "local_integrity_rejection",
+                    "files_copied": 0,
                 }
                 continue
             statuses[remote_host_id] = {
@@ -4170,224 +5225,130 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
             }
             continue
 
+        if set(remote) - {"timeout_seconds"} != {
+            "host_id",
+            "ssh_host",
+            "remote_spool_root",
+            "remote_pipeline_path",
+        }:
+            statuses[remote_host_id] = {"status": "invalid_remote", "files_copied": 0}
+            continue
         ssh_host = remote.get("ssh_host")
-        remote_spool_root = remote.get("remote_spool_root")
-        timeout_value = remote.get("timeout_seconds", 300)
         if (
             not isinstance(ssh_host, str)
             or not SSH_HOST_RE.fullmatch(ssh_host)
-            or not isinstance(remote_spool_root, str)
-            or not REMOTE_SPOOL_ROOT_RE.fullmatch(remote_spool_root)
-            or any(part in {".", ".."} for part in remote_spool_root.split("/"))
-            or isinstance(timeout_value, bool)
-            or not isinstance(timeout_value, int)
-            or not 1 <= timeout_value <= MAX_REMOTE_TIMEOUT_SECONDS
         ):
             statuses[remote_host_id] = {"status": "invalid_remote", "files_copied": 0}
             continue
-        ssh_options = [
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            "-o",
-            "ControlMaster=no",
-            "-o",
-            "ControlPath=none",
-        ]
-        remote_shard_path = (
-            f"{remote_spool_root.rstrip('/')}/hosts/{remote_host_id}"
-        )
-        manifest_path = f"{remote_shard_path}/publish-manifest.json"
-        try:
-            manifest_probe = subprocess.run(
-                ["ssh", *ssh_options, ssh_host, "test", "-f", manifest_path],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=min(timeout_value, 30),
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            statuses[remote_host_id] = {"status": "unreachable", "files_copied": 0}
-            continue
-        if manifest_probe.returncode != 0:
+        timeout_seconds = remote.get("timeout_seconds", 300)
+        if (
+            type(timeout_seconds) is not int
+            or not 1 <= timeout_seconds <= MAX_REMOTE_TIMEOUT_SECONDS
+        ):
             statuses[remote_host_id] = {
-                "status": (
-                    "pending_manifest"
-                    if manifest_probe.returncode == 1
-                    else "unreachable"
-                ),
+                "status": "invalid_remote",
                 "files_copied": 0,
             }
             continue
-        source = (
-            f"{ssh_host}:{remote_spool_root.rstrip('/')}/hosts/{remote_host_id}/"
-        )
-        cached_shard = spool_root / "hosts" / remote_host_id
-        link_dest: Path | None = None
-        if cached_shard.exists():
-            try:
-                validated_shard_files(
-                    cached_shard,
-                    remote_host_id,
-                    require_healthy_receipt=True,
-                    validation_proofs=None,
-                )
-            except (FileNotFoundError, ValueError) as error:
-                statuses[remote_host_id] = {
-                    "status": "blocked_integrity_failure",
-                    "files_copied": 0,
-                    "error": str(error),
-                }
-                continue
-            link_dest = assert_no_symlink_components(cached_shard)
-        incoming_root = spool_root / ".incoming"
-        secure_mkdir(incoming_root)
         try:
-            with tempfile.TemporaryDirectory(
-                dir=incoming_root, prefix=f"{remote_host_id}-"
-            ) as incoming:
-                incoming_path = Path(incoming)
-                timeout_seconds = timeout_value
-
-                # Pin the authorization document before asking the remote for
-                # any receipt, index, or conversation body.
-                manifest_only = {"publish-manifest.json"}
-                assert_remote_transfer_paths_have_no_symlink_components(
-                    ssh_options,
-                    ssh_host,
-                    remote_shard_path,
-                    manifest_only,
-                    timeout_seconds=min(timeout_seconds, 30),
+            remote_spool_root = validate_remote_absolute_path_token(
+                remote.get("remote_spool_root"), label="remote_spool_root"
+            )
+            remote_pipeline_path = validate_remote_absolute_path_token(
+                remote.get("remote_pipeline_path"), label="remote_pipeline_path"
+            )
+        except ValueError:
+            statuses[remote_host_id] = {"status": "invalid_remote", "files_copied": 0}
+            continue
+        cached_shard = spool_root / "hosts" / remote_host_id
+        validated_cache: Path | None = None
+        cache_hints: set[str] = set()
+        if cached_shard.exists() or cached_shard.is_symlink():
+            try:
+                cached_shard = assert_no_symlink_components(cached_shard)
+                manifest_path = cached_shard / "publish-manifest.json"
+                manifest_absent = (
+                    not manifest_path.is_file() or manifest_path.is_symlink()
                 )
-                rsync_remote_allowlist(
-                    source,
-                    incoming_path,
-                    manifest_only,
-                    timeout_seconds=timeout_seconds,
-                    link_dest=link_dest,
-                    max_file_bytes=MAX_PUBLISH_MANIFEST_BYTES,
-                    remote_spool_root=remote_spool_root,
-                    remote_host_id=remote_host_id,
-                )
-                validate_staged_allowlist(incoming_path, manifest_only)
-                manifest_payload = read_bytes_nofollow(
-                    incoming_path / "publish-manifest.json",
-                    max_bytes=MAX_PUBLISH_MANIFEST_BYTES,
-                    size_label="publish manifest",
-                )
-                manifest = validate_publish_manifest_metadata(
-                    incoming_path, remote_host_id
-                )
-                metadata_paths, object_paths = manifest_transfer_paths(manifest)
-
-                # Re-fetch the manifest with its bound receipt and indexes.
-                # Exact byte equality detects a publish race before bodies move.
-                assert_remote_transfer_paths_have_no_symlink_components(
-                    ssh_options,
-                    ssh_host,
-                    remote_shard_path,
-                    metadata_paths,
-                    timeout_seconds=min(timeout_seconds, 30),
-                )
-                rsync_remote_allowlist(
-                    source,
-                    incoming_path,
-                    metadata_paths,
-                    timeout_seconds=timeout_seconds,
-                    link_dest=link_dest,
-                    max_file_bytes=MAX_PUBLISH_MANIFEST_BYTES,
-                    remote_spool_root=remote_spool_root,
-                    remote_host_id=remote_host_id,
-                )
-                validate_staged_allowlist(incoming_path, metadata_paths)
-                if read_bytes_nofollow(
-                    incoming_path / "publish-manifest.json",
-                    max_bytes=MAX_PUBLISH_MANIFEST_BYTES,
-                    size_label="publish manifest",
-                ) != manifest_payload:
-                    raise ValueError("remote publish manifest changed during pull")
-                validate_publish_manifest(
-                    incoming_path,
-                    remote_host_id,
-                    set(manifest["harnesses"]),
-                    [incoming_path / manifest["receipt"]["path"]],
-                    require_objects=False,
-                )
-
-                # Fetch only content-addressed objects from the pinned manifest.
-                # The sender lock prevents a conforming publisher from changing
-                # the shard during this body transfer.
-                if object_paths:
-                    assert_remote_transfer_paths_have_no_symlink_components(
-                        ssh_options,
-                        ssh_host,
-                        remote_shard_path,
-                        object_paths,
-                        timeout_seconds=min(timeout_seconds, 30),
+                if manifest_absent:
+                    quarantine_invalid_cached_shard(
+                        spool_root, remote_host_id, incomplete=True
                     )
-                    rsync_remote_allowlist(
-                        source,
-                        incoming_path,
-                        object_paths,
-                        timeout_seconds=timeout_seconds,
-                        link_dest=link_dest,
-                        max_file_bytes=MAX_OBJECT_BYTES,
-                        remote_spool_root=remote_spool_root,
-                        remote_host_id=remote_host_id,
+                    cached_shard = spool_root / "hosts" / remote_host_id
+                    cached_files = []
+                else:
+                    try:
+                        cached_files = validated_shard_files(
+                            cached_shard,
+                            remote_host_id,
+                            require_healthy_receipt=True,
+                            validation_proofs=None,
+                        )
+                    except (OSError, ValueError):
+                        try:
+                            restored = restore_indexes_to_manifest(
+                                cached_shard, remote_host_id
+                            )
+                        except (OSError, ValueError):
+                            restored = False
+                        if not restored:
+                            raise ValueError("invalid cached shard")
+                        cached_files = validated_shard_files(
+                            cached_shard,
+                            remote_host_id,
+                            require_healthy_receipt=True,
+                            validation_proofs=None,
+                        )
+            except (OSError, ValueError):
+                try:
+                    quarantine_invalid_cached_shard(
+                        spool_root, remote_host_id, incomplete=False
                     )
-                validate_staged_allowlist(
-                    incoming_path, metadata_paths | object_paths
-                )
-
-                # Re-fetch only the size-bounded manifest after all bodies. This
-                # is the final race sentinel and cannot inherit the object size
-                # allowance from the preceding transfer.
-                assert_remote_transfer_paths_have_no_symlink_components(
-                    ssh_options,
-                    ssh_host,
-                    remote_shard_path,
-                    manifest_only,
-                    timeout_seconds=min(timeout_seconds, 30),
-                )
-                rsync_remote_allowlist(
-                    source,
-                    incoming_path,
-                    manifest_only,
-                    timeout_seconds=timeout_seconds,
-                    link_dest=link_dest,
-                    max_file_bytes=MAX_PUBLISH_MANIFEST_BYTES,
-                    remote_spool_root=remote_spool_root,
-                    remote_host_id=remote_host_id,
-                )
-                validate_staged_allowlist(
-                    incoming_path, metadata_paths | object_paths
-                )
-                validate_publish_manifest_metadata(incoming_path, remote_host_id)
-                if read_bytes_nofollow(
-                    incoming_path / "publish-manifest.json",
-                    max_bytes=MAX_PUBLISH_MANIFEST_BYTES,
-                    size_label="publish manifest",
-                ) != manifest_payload:
-                    raise ValueError("remote publish manifest changed during pull")
-                result = merge_host_shard(
-                    incoming_path,
-                    spool_root,
-                    remote_host_id,
-                    validation_proofs=None,
-                )
+                except (OSError, ValueError):
+                    statuses[remote_host_id] = {
+                        "status": "local_integrity_rejection",
+                        "files_copied": 0,
+                    }
+                    continue
+                cached_shard = spool_root / "hosts" / remote_host_id
+                cached_files = []
+            if cached_files:
+                validated_cache = cached_shard
+                cache_hints = {
+                    path.stem
+                    for path in cached_files
+                    if path.parent.name == "objects"
+                }
+        try:
+            result = pull_remote_stream(
+                remote,
+                spool_root,
+                remote_host_id,
+                validated_cache,
+                cache_hints,
+            )
             statuses[remote_host_id] = {
                 "status": "pulled",
                 "files_copied": result["files_copied"],
                 "files_verified": result["files_verified"],
             }
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except PendingManifestError:
+            statuses[remote_host_id] = {"status": "pending_manifest", "files_copied": 0}
+        except LegacyArchiveSchemaError:
+            statuses[remote_host_id] = {"status": "legacy_schema", "files_copied": 0}
+        except RemoteTimeoutError:
+            statuses[remote_host_id] = {"status": "timeout", "files_copied": 0}
+        except RemoteUnreachableError:
             statuses[remote_host_id] = {"status": "unreachable", "files_copied": 0}
-        except (FileNotFoundError, ValueError) as error:
+        except RemoteIntegrityError:
             statuses[remote_host_id] = {
-                "status": "blocked_integrity_failure",
+                "status": "remote_integrity_rejection",
                 "files_copied": 0,
-                "error": str(error),
+            }
+        except (LocalStreamIntegrityError, FileNotFoundError, ValueError):
+            statuses[remote_host_id] = {
+                "status": "local_integrity_rejection",
+                "files_copied": 0,
             }
     return {"remotes": statuses}
 
@@ -4440,7 +5401,10 @@ def collect(args: argparse.Namespace) -> int:
 def run_config(args: argparse.Namespace) -> int:
     config_path = assert_no_symlink_components(Path(args.config))
     config = read_json_nofollow(config_path)
-    if config.get("schema_version") != 1:
+    if (
+        type(config.get("schema_version")) is not int
+        or config.get("schema_version") != 1
+    ):
         raise ValueError("unsupported config schema_version")
     config_digest = hashlib.sha256(canonical_json(config)).hexdigest()
     host_id = validate_host_id(config["host_id"])
@@ -4449,6 +5413,18 @@ def run_config(args: argparse.Namespace) -> int:
     spool_root = validate_output_root(Path(config["spool_root"]))
     secure_mkdir(spool_root)
     sources = config.get("sources", {})
+    inventory_harnesses = config.get(
+        "inventory_harnesses", config.get("expected_harnesses", [])
+    )
+    if (
+        not isinstance(inventory_harnesses, list)
+        or len(inventory_harnesses) != len(set(inventory_harnesses))
+        or any(
+            not isinstance(harness, str) or harness not in APPROVED_HARNESSES
+            for harness in inventory_harnesses
+        )
+    ):
+        raise ValueError("inventory_harnesses must be unique approved harness names")
     unapproved_source_keys = sorted(set(sources) - APPROVED_SOURCE_KEYS)
     if unapproved_source_keys:
         raise ValueError(f"unapproved source keys: {', '.join(unapproved_source_keys)}")
@@ -4503,7 +5479,7 @@ def run_config(args: argparse.Namespace) -> int:
     def rollback_uncommitted_collection() -> None:
         if not transaction_snapshots_ready:
             return
-        with defer_sigterm_during_rollback():
+        with defer_termination_signals_during_rollback():
             for index_path, payload in prior_index_payloads.items():
                 if payload is None:
                     remove_file_if_present(index_path)
@@ -4577,6 +5553,7 @@ def run_config(args: argparse.Namespace) -> int:
                             host_id,
                             validation_proofs=validation_proofs,
                             prior_manifest_snapshot=prior_snapshot,
+                            _transaction_token=_RUN_CONFIG_TRANSACTION,
                             **options,
                         )
                     )
@@ -4602,14 +5579,12 @@ def run_config(args: argparse.Namespace) -> int:
                                 host_id,
                                 hermes_exports=hermes_exports,
                                 validation_proofs=validation_proofs,
+                                _transaction_token=_RUN_CONFIG_TRANSACTION,
                             )
                         )
                 except Exception as error:
                     record_failure("hermes", error)
 
-            inventory_harnesses = config.get(
-                "inventory_harnesses", config.get("expected_harnesses", [])
-            )
             for harness in inventory_harnesses:
                 harnesses.setdefault(
                     harness,
@@ -4632,7 +5607,9 @@ def run_config(args: argparse.Namespace) -> int:
                     collection_errors.append(body_free_error)
 
             try:
-                hub_status = pull_hub_remotes(config.get("hub", {}), spool_root)
+                hub_status = pull_hub_remotes(
+                    config.get("hub", {"remotes": []}), spool_root
+                )
             except Exception as error:
                 hub_status = {
                     "remotes": {},
@@ -4746,7 +5723,7 @@ def run_config(args: argparse.Namespace) -> int:
                         validation_proofs=validation_proofs,
                     )
                     manifest_committed = True
-                    quarantine_unindexed_objects(spool_root, host_id)
+                    finalize_manifested_object_set(spool_root, host_id)
                     if drive_root is not None:
                         publication = publish_host_shard(
                             spool_root, drive_root, host_id
@@ -4942,6 +5919,11 @@ def parser() -> argparse.ArgumentParser:
     run_command = commands.add_parser("run")
     run_command.add_argument("--config", required=True)
     run_command.set_defaults(func=run_config)
+    stream_command = commands.add_parser("stream-shard")
+    stream_command.add_argument("--spool-root", required=True)
+    stream_command.add_argument("--host-id", required=True)
+    stream_command.add_argument("--cache-hints-stdin", action="store_true")
+    stream_command.set_defaults(func=stream_shard_command)
     install_command = commands.add_parser("install-launchd")
     install_command.add_argument("--config", required=True)
     install_command.add_argument("--launch-agents-dir")

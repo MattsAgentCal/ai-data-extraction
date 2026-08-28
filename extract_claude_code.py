@@ -15,6 +15,12 @@ import os
 import errno
 import stat
 
+from archive_object_contract import (
+    ARCHIVE_OBJECT_SCHEMA_VERSION,
+    event_envelope,
+    validate_archive_object,
+)
+
 
 _MACOS_COMPATIBILITY_SYMLINKS = {
     Path("/etc"): Path("/private/etc"),
@@ -312,7 +318,9 @@ def extract_claude_session(
                         "timestamp": obj.get("timestamp"),
                     }
                     if "toolUse" in obj:
-                        record["tool_use"] = obj["toolUse"]
+                        record["tool_use"] = event_envelope(
+                            "tool_use", obj["toolUse"], obj.get("timestamp")
+                        )
                     messages.append(record)
                 project_path = obj.get("cwd", project_path)
             elif msg_type == "assistant":
@@ -332,10 +340,10 @@ def extract_claude_session(
                             break
                         if item.get("type") == "text" and isinstance(item.get("text"), str):
                             text_parts.append(item.get("text", ""))
-                        elif isinstance(item, dict) and item.get("type") == "tool_use":
-                            tool_uses.append(item)
                         else:
-                            tool_uses.append(item)
+                            tool_uses.append(
+                                event_envelope("tool_use", item, obj.get("timestamp"))
+                            )
                     if invalid_content:
                         failed_lines += 1
                         recognized_lines -= 1
@@ -361,13 +369,27 @@ def extract_claude_session(
                 recognized_lines += 1
                 tool_result = obj.get("toolResult", {})
                 if tool_result and messages:
-                    messages[-1].setdefault("tool_results", []).append(tool_result)
+                    messages[-1].setdefault("tool_results", []).append(
+                        event_envelope("tool_result", tool_result, obj.get("timestamp"))
+                    )
             elif _is_strict_auxiliary_record(obj):
                 recognized_lines += 1
-                auxiliary_events.append(obj)
+                auxiliary_events.append(
+                    event_envelope(
+                        msg_type,
+                        {key: value for key, value in obj.items() if key not in {"type", "timestamp"}},
+                        obj.get("timestamp"),
+                    )
+                )
             elif msg_type in CLAUDE_IGNORED_RECORD_TYPES:
                 recognized_lines += 1
-                auxiliary_events.append(obj)
+                auxiliary_events.append(
+                    event_envelope(
+                        msg_type,
+                        {key: value for key, value in obj.items() if key not in {"type", "timestamp"}},
+                        obj.get("timestamp"),
+                    )
+                )
             else:
                 failed_lines += 1
         _verify_parsed_source(
@@ -395,6 +417,7 @@ def extract_claude_session(
     if not messages and not auxiliary_events:
         return None
     conversation = {
+        "archive_schema_version": ARCHIVE_OBJECT_SCHEMA_VERSION,
         "messages": messages,
         "source": "claude-code",
         "session_id": session_id,
@@ -406,7 +429,7 @@ def extract_claude_session(
         conversation["events"] = auxiliary_events
     if installation is not None:
         conversation["installation"] = str(installation)
-    return conversation
+    return validate_archive_object(conversation, harness="claude")
 
 
 def extract_claude_project_conversations(project_dir, *, quality_out=None):

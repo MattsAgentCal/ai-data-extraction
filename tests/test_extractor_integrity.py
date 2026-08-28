@@ -7,6 +7,7 @@ from extract_claude_code import extract_claude_project_conversations, extract_cl
 from extract_codex import extract_codex_session, find_all_codex_sessions
 from extract_hermes import extract_hermes_export
 from extract_openclaw import extract_openclaw_session, find_all_openclaw_sessions
+from archive_object_contract import validate_archive_object
 
 
 def write_lines(path: Path, lines: list[str]) -> None:
@@ -19,6 +20,79 @@ def json_line(value: object) -> str:
 
 
 class ExtractorIntegrityTests(unittest.TestCase):
+    def test_current_producers_normalize_context_and_message_tool_containers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            claude_session = root / "claude.jsonl"
+            write_lines(
+                claude_session,
+                [
+                    json_line(
+                        {
+                            "type": "user",
+                            "message": {"content": "run it"},
+                            "toolUse": {"name": "shell", "input": "pwd"},
+                        }
+                    ),
+                    json_line(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": "running"},
+                                    {
+                                        "type": "tool_use",
+                                        "name": "shell",
+                                        "input": "pwd",
+                                    },
+                                ]
+                            },
+                        }
+                    ),
+                    json_line(
+                        {
+                            "type": "tool_result",
+                            "toolResult": {"output": "/repo"},
+                        }
+                    ),
+                ],
+            )
+            claude = extract_claude_session(claude_session)
+            self.assertEqual(claude["messages"][0]["tool_use"]["type"], "tool_use")
+            self.assertEqual(
+                claude["messages"][1]["tool_uses"][0]["type"], "tool_use"
+            )
+            self.assertEqual(
+                claude["messages"][1]["tool_results"][0]["type"], "tool_result"
+            )
+            validate_archive_object(claude, harness="claude")
+
+            codex_session = root / "codex.jsonl"
+            write_lines(
+                codex_session,
+                [
+                    json_line(
+                        {"type": "session_meta", "payload": {"id": "context-1"}}
+                    ),
+                    json_line(
+                        {
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "user_message",
+                                "message": "continue",
+                                "context": {"cwd": "/repo", "mode": "default"},
+                            },
+                        }
+                    ),
+                ],
+            )
+            codex = extract_codex_session(codex_session)
+            self.assertEqual(codex["messages"][0]["context"]["type"], "context")
+            self.assertEqual(
+                codex["messages"][0]["context"]["payload"]["cwd"], "/repo"
+            )
+            validate_archive_object(codex, harness="codex")
+
     def test_claude_reports_partial_parse_and_rejects_contained_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "claude"
@@ -88,9 +162,10 @@ class ExtractorIntegrityTests(unittest.TestCase):
                 [record["type"] for record in current_records],
             )
             self.assertEqual(
-                conversation["events"][-1]["artifacts"]["artifact-1"]["state"],
+                conversation["events"][-1]["payload"]["artifacts"]["artifact-1"]["state"],
                 "written",
             )
+            validate_archive_object(conversation, harness="claude")
 
     def test_claude_accepts_only_exact_relocation_and_worktree_metadata_shapes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -125,7 +200,10 @@ class ExtractorIntegrityTests(unittest.TestCase):
             self.assertEqual(quality["status"], "complete")
             self.assertEqual(quality["recognized_lines"], 2)
             self.assertEqual(quality["failed_lines"], 0)
-            self.assertEqual(conversation["events"], records)
+            self.assertEqual(
+                [event["payload"]["sessionId"] for event in conversation["events"]],
+                ["session-1", "session-1"],
+            )
 
     def test_claude_relocation_metadata_rejects_shape_drift_and_content_smuggling(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -438,9 +516,11 @@ class ExtractorIntegrityTests(unittest.TestCase):
                 [
                     {
                         "type": "toolResult",
-                        "tool": "shell",
-                        "content": "command output",
-                        "message_id": "tool-result-1",
+                        "payload": {
+                            "tool": "shell",
+                            "content": "command output",
+                            "message_id": "tool-result-1",
+                        },
                         "timestamp": None,
                     }
                 ],
@@ -516,7 +596,65 @@ class ExtractorIntegrityTests(unittest.TestCase):
                 [message["role"] for message in conversations[0]["messages"]],
                 ["user", "assistant"],
             )
-            self.assertEqual(conversations[0]["events"], [session_metadata])
+            self.assertEqual(
+                conversations[0]["events"],
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": 1,
+                            "content": None,
+                            "created_at": 1,
+                            "is_meta": 1,
+                            "tool_name": None,
+                        },
+                        "timestamp": 1,
+                    }
+                ],
+            )
+
+    def test_all_four_producers_emit_closed_v2_objects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            claude = root / "claude.jsonl"
+            codex = root / "codex.jsonl"
+            openclaw = root / "openclaw.jsonl"
+            hermes = root / "hermes.jsonl"
+            write_lines(claude, [json_line({"type": "user", "message": {"content": "c"}})])
+            write_lines(codex, [json_line({"type": "event_msg", "payload": {"type": "user_message", "message": "x"}})])
+            write_lines(openclaw, [
+                json_line({"type": "session", "id": "o", "version": 3}),
+                json_line({"type": "message", "id": "m", "message": {"role": "user", "content": "o"}}),
+            ])
+            write_lines(hermes, [json_line({"id": "h", "source": "desktop", "messages": [{"role": "user", "content": "h"}]})])
+            values = (
+                (extract_claude_session(claude), "claude"),
+                (extract_codex_session(codex), "codex"),
+                (extract_openclaw_session(openclaw), "openclaw"),
+                (extract_hermes_export(hermes)[0], "hermes"),
+            )
+            for value, harness in values:
+                with self.subTest(harness=harness):
+                    self.assertEqual(value["archive_schema_version"], 2)
+                    validate_archive_object(value, harness=harness)
+
+    def test_closed_v2_contract_rejects_unknown_top_and_envelope_fields(self):
+        value = {
+            "archive_schema_version": 2,
+            "source": "claude-code",
+            "session_id": "s",
+            "messages": [{"role": "user", "content": "body"}],
+            "project_path": None,
+            "project_name": None,
+            "source_file": "/synthetic/session.jsonl",
+        }
+        for mutated in (
+            {**value, "future": "metadata"},
+            {**value, "messages": [{"role": "user", "content": "body", "future": 1}]},
+            {**value, "events": [{"type": "known", "payload": {}, "future": 1}]},
+        ):
+            with self.assertRaises(ValueError):
+                validate_archive_object(mutated, harness="claude")
 
     def test_hermes_other_unknown_or_null_content_shapes_still_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

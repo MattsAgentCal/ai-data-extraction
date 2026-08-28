@@ -597,8 +597,13 @@ class FleetChatArchiveTests(unittest.TestCase):
             root = Path(tmp)
             remote_spool = root / "remote-spool"
             remote_payload = {
+                "archive_schema_version": 2,
                 "source": "claude-code",
                 "session_id": "remote-session",
+                "messages": [{"role": "user", "content": "remote body"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/remote.jsonl",
             }
             remote_bytes = json.dumps(
                 remote_payload, sort_keys=True, separators=(",", ":")

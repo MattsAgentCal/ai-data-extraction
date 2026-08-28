@@ -266,7 +266,7 @@ class FleetDeployRetryTests(unittest.TestCase):
         copied_relative = [values["relative_path"] for _, values in transport.copies]
         self.assertEqual(tuple(copied_relative), retry.DEPLOYED_FILES)
         self.assertEqual(set(result["files"]["sha256"]), set(retry.DEPLOYED_FILES))
-        self.assertEqual(result["files"]["count"], 6)
+        self.assertEqual(result["files"]["count"], 7)
         self.assertTrue(result["files"]["verified"])
         self.assertNotIn("--delete", json.dumps(transport.copies, default=str))
         self.assertNotIn("scp", json.dumps(transport.copies, default=str))
