@@ -15,6 +15,7 @@ CLI = REPO / "fleet_chat_archive.py"
 sys.path.insert(0, str(REPO))
 
 import fleet_chat_archive as fleet  # noqa: E402
+import extract_codex as codex_extractor  # noqa: E402
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -458,6 +459,76 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(
                 second["codex"]["quality"]["skipped_unchanged_files"], 1
             )
+
+    def test_codex_append_after_prehash_commits_no_snapshot_or_state(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            codex = root / "codex"
+            session = (
+                codex
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-growing.jsonl"
+            )
+            write_jsonl(
+                session,
+                [
+                    {"type": "session_meta", "payload": {"id": "growing"}},
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "initial"},
+                    },
+                ],
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {"codex_roots": [str(codex)]},
+                    }
+                )
+            )
+            appended_body = "must-not-archive-" + "z" * 30
+            real_open = codex_extractor._open_regular_jsonl
+
+            def open_then_append(*args, **kwargs):
+                opened = real_open(*args, **kwargs)
+                with session.open("a") as handle:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "agent_message",
+                                    "message": appended_body,
+                                },
+                            }
+                        )
+                        + "\n"
+                    )
+                return opened
+
+            with mock.patch.object(
+                codex_extractor,
+                "_open_regular_jsonl",
+                side_effect=open_then_append,
+            ), mock.patch("builtins.print"):
+                self.assertNotEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            spool = root / "spool"
+            shard = spool / "hosts" / "test-mac"
+            self.assertFalse((shard / "codex").exists())
+            self.assertFalse((shard / "publish-manifest.json").exists())
+            self.assertFalse((spool / "state" / "test-mac" / "codex.json").exists())
+            receipts = list((shard / "receipts").glob("*.json"))
+            self.assertEqual(len(receipts), 1)
+            self.assertNotIn(appended_body, receipts[0].read_text())
 
     def test_codex_move_between_live_and_archive_paths_has_one_content_object(self):
         with safe_temporary_directory() as tmp:

@@ -22,6 +22,24 @@ _MACOS_COMPATIBILITY_SYMLINKS = {
 }
 
 
+def _snapshot_identity(metadata):
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _descriptor_sha256(descriptor):
+    digest = hashlib.sha256()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _is_macos_compatibility_symlink(path):
     expected = _MACOS_COMPATIBILITY_SYMLINKS.get(path)
     return expected is not None and path.resolve(strict=True) == expected
@@ -87,30 +105,32 @@ def _open_regular_jsonl(
         os.close(descriptor)
         raise ValueError(f"source exceeds maximum of {max_bytes} bytes: {path}")
     if expected_sha256 is not None:
-        digest = hashlib.sha256()
-        for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
-            digest.update(chunk)
+        actual_sha256 = _descriptor_sha256(descriptor)
         final_metadata = os.fstat(descriptor)
-        if (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_size,
-            metadata.st_mtime_ns,
-            metadata.st_ctime_ns,
-        ) != (
-            final_metadata.st_dev,
-            final_metadata.st_ino,
-            final_metadata.st_size,
-            final_metadata.st_mtime_ns,
-            final_metadata.st_ctime_ns,
-        ):
+        if _snapshot_identity(metadata) != _snapshot_identity(final_metadata):
             os.close(descriptor)
             raise ValueError(f"source changed while hashing: {path}")
-        if digest.hexdigest() != expected_sha256:
+        if actual_sha256 != expected_sha256:
             os.close(descriptor)
             raise ValueError(f"source changed before extraction: {path}")
         os.lseek(descriptor, 0, os.SEEK_SET)
-    return os.fdopen(descriptor, "r", encoding="utf-8")
+    return os.fdopen(descriptor, "r", encoding="utf-8"), metadata
+
+
+def _verify_extracted_snapshot(handle, path, initial_metadata, expected_sha256):
+    descriptor = handle.fileno()
+    final_metadata = os.fstat(descriptor)
+    if _snapshot_identity(initial_metadata) != _snapshot_identity(final_metadata):
+        raise ValueError(f"source changed during extraction: {path}")
+    if expected_sha256 is None:
+        return
+    actual_sha256 = _descriptor_sha256(descriptor)
+    rehashed_metadata = os.fstat(descriptor)
+    if (
+        _snapshot_identity(initial_metadata) != _snapshot_identity(rehashed_metadata)
+        or actual_sha256 != expected_sha256
+    ):
+        raise ValueError(f"source changed during extraction: {path}")
 
 
 def _quality(discovered_lines, parsed_lines, failed_lines):
@@ -264,11 +284,12 @@ def extract_codex_session(
         "web_search_call",
     }
 
-    with _open_regular_jsonl(
+    source_handle, source_metadata = _open_regular_jsonl(
         session_file,
         expected_sha256=expected_source_sha256,
         max_bytes=max_source_bytes,
-    ) as f:
+    )
+    with source_handle as f:
         for line in f:
             if not line.strip():
                 continue
@@ -480,6 +501,12 @@ def extract_codex_session(
 
             except json.JSONDecodeError:
                 failed_lines += 1
+        _verify_extracted_snapshot(
+            f,
+            session_file,
+            source_metadata,
+            expected_source_sha256,
+        )
 
     quality = _quality(discovered_lines, parsed_lines, failed_lines)
     if discovered_lines and not recognized_lines:
