@@ -436,6 +436,201 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 len(final_manifest["harnesses"]["claude"]["object_sha256"]), 2
             )
 
+    def test_new_harness_merge_cancellation_removes_index_and_retry_recovers(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination = root / "destination"
+            destination_shard = destination / "hosts" / "mini"
+            shared_conversation = {
+                "source": "claude-code",
+                "session_id": "shared-claude",
+                "messages": [{"role": "user", "content": "healthy claude"}],
+            }
+            fleet.archive_conversations(
+                destination,
+                "mini",
+                "claude",
+                [shared_conversation],
+            )
+            write_healthy_receipt(destination_shard)
+            manifest_path = destination_shard / "publish-manifest.json"
+            old_manifest = manifest_path.read_bytes()
+            old_receipts = {
+                path.name: path.read_bytes()
+                for path in (destination_shard / "receipts").iterdir()
+            }
+
+            source_parent = root / "source"
+            source_shard = source_parent / "hosts" / "mini"
+            fleet.archive_conversations(
+                source_parent,
+                "mini",
+                "claude",
+                [shared_conversation],
+            )
+            fleet.archive_conversations(
+                source_parent,
+                "mini",
+                "openclaw",
+                [
+                    {
+                        "source": "openclaw",
+                        "session_id": "new-openclaw",
+                        "messages": [
+                            {"role": "user", "content": "unbound immutable body"}
+                        ],
+                    }
+                ],
+            )
+            source_run_id = "20260828T000000.000000Z-cafebabe"
+            source_receipt = source_shard / "receipts" / f"{source_run_id}.json"
+            source_receipt.parent.mkdir(parents=True)
+            source_receipt_value = {
+                "schema_version": 1,
+                "extractor_sha256": "a" * 64,
+                "config_sha256": "c" * 64,
+                "run_id": source_run_id,
+                "collected_at": "2026-08-28T00:00:00+00:00",
+                "host_id": "mini",
+                "collection_status": "completed",
+                "status": "completed",
+                "errors": [],
+                "harnesses": {
+                    "claude": {"status": "collected"},
+                    "openclaw": {"status": "collected"},
+                },
+            }
+            write_canonical_json(source_receipt, source_receipt_value)
+            fleet.write_publish_manifest(
+                source_shard,
+                source_receipt,
+                source_receipt_value,
+                "c" * 64,
+            )
+            openclaw_index = destination_shard / "openclaw" / "index.json"
+            openclaw_objects = destination_shard / "openclaw" / "objects"
+            real_copy = fleet.copy_verified_file
+
+            def terminate_after_openclaw_index(source, destination_path, *, immutable):
+                changed = real_copy(source, destination_path, immutable=immutable)
+                if source.name == "index.json" and source.parent.name == "openclaw":
+                    raise fleet.TerminationRequested
+                return changed
+
+            with mock.patch.object(
+                fleet,
+                "copy_verified_file",
+                side_effect=terminate_after_openclaw_index,
+            ), self.assertRaises(fleet.TerminationRequested):
+                fleet.merge_host_shard(source_shard, destination, "mini")
+
+            self.assertEqual(manifest_path.read_bytes(), old_manifest)
+            self.assertFalse(openclaw_index.exists())
+            self.assertTrue(any(openclaw_objects.glob("*.json")))
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (destination_shard / "receipts").iterdir()
+                },
+                old_receipts,
+            )
+            authorized_after_cancellation = set(
+                fleet.validated_shard_files(destination_shard, "mini")
+            )
+            self.assertTrue(
+                set(openclaw_objects.glob("*.json")).isdisjoint(
+                    authorized_after_cancellation
+                )
+            )
+
+            fleet.merge_host_shard(source_shard, destination, "mini")
+            final_manifest = json.loads(manifest_path.read_text())
+            self.assertEqual(set(final_manifest["harnesses"]), {"claude", "openclaw"})
+            fleet.validated_shard_files(destination_shard, "mini")
+
+    def test_first_host_merge_manifest_cancellation_leaves_only_immutable_files(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source_shard = root / "source" / "hosts" / "mini"
+            source_object, source_object_payload = write_archive_object(
+                source_shard, host_id="mini"
+            )
+            source_receipt = write_healthy_receipt(source_shard)
+            destination = root / "destination"
+            destination_shard = destination / "hosts" / "mini"
+            real_copy = fleet.copy_verified_file
+
+            def terminate_after_manifest(source, destination_path, *, immutable):
+                changed = real_copy(source, destination_path, immutable=immutable)
+                if source.name == "publish-manifest.json":
+                    raise fleet.TerminationRequested
+                return changed
+
+            with mock.patch.object(
+                fleet,
+                "copy_verified_file",
+                side_effect=terminate_after_manifest,
+            ), self.assertRaises(fleet.TerminationRequested):
+                fleet.merge_host_shard(source_shard, destination, "mini")
+
+            destination_object = (
+                destination_shard
+                / "claude"
+                / "objects"
+                / source_object.name
+            )
+            destination_receipt = (
+                destination_shard / "receipts" / source_receipt.name
+            )
+            self.assertFalse((destination_shard / "claude" / "index.json").exists())
+            self.assertFalse((destination_shard / "publish-manifest.json").exists())
+            self.assertEqual(destination_object.read_bytes(), source_object_payload)
+            self.assertEqual(destination_receipt.read_bytes(), source_receipt.read_bytes())
+
+            fleet.merge_host_shard(source_shard, destination, "mini")
+            fleet.validated_shard_files(destination_shard, "mini")
+
+    def test_new_mutable_tombstone_does_not_remove_a_racing_file(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source_shard = root / "source" / "hosts" / "mini"
+            source_object, _ = write_archive_object(source_shard, host_id="mini")
+            write_healthy_receipt(source_shard)
+            destination = root / "destination"
+            destination_index = (
+                destination / "hosts" / "mini" / "claude" / "index.json"
+            )
+            racing_payload = b"unrelated racing payload\n"
+            real_copy = fleet.copy_verified_file
+
+            def race_before_index_copy(source, destination_path, *, immutable):
+                if source.name == "index.json":
+                    destination_path.write_bytes(racing_payload)
+                    raise fleet.TerminationRequested
+                return real_copy(source, destination_path, immutable=immutable)
+
+            with mock.patch.object(
+                fleet,
+                "copy_verified_file",
+                side_effect=race_before_index_copy,
+            ), self.assertRaises(fleet.TerminationRequested):
+                fleet.merge_host_shard(source_shard, destination, "mini")
+
+            self.assertEqual(destination_index.read_bytes(), racing_payload)
+            self.assertTrue(
+                (
+                    destination
+                    / "hosts"
+                    / "mini"
+                    / "claude"
+                    / "objects"
+                    / source_object.name
+                ).is_file()
+            )
+            self.assertFalse(
+                (destination / "hosts" / "mini" / "publish-manifest.json").exists()
+            )
+
     def test_shard_index_identity_references_and_additive_merge_are_enforced(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)

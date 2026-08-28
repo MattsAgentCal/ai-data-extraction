@@ -2146,7 +2146,6 @@ def validated_shard_files(
                 if len(relative.parts) != 1:
                     raise ValueError(f"unexpected publish manifest path: {relative}")
             elif top_level in APPROVED_HARNESSES:
-                present_harnesses.add(top_level)
                 valid_shape = (
                     len(relative.parts) == 3
                     and relative.parts[1] == "objects"
@@ -2154,6 +2153,11 @@ def validated_shard_files(
                 ) or (len(relative.parts) == 2 and relative.parts[1] == "index.json")
                 if not valid_shape:
                     raise ValueError(f"unexpected file in {top_level} shard: {relative}")
+                # A manifest authorizes mutable indexes, not every immutable
+                # body left by an interrupted later activation. Object-only
+                # harnesses remain unbound until a matching index is committed.
+                if not require_healthy_receipt or relative.parts[1] == "index.json":
+                    present_harnesses.add(top_level)
             elif len(relative.parts) != 2 or not relative.name.endswith(".json"):
                 raise ValueError(f"unexpected receipt path: {relative}")
 
@@ -2349,10 +2353,22 @@ def link_verified_local_object(source: Path, destination: Path) -> bool:
 
 def merge_index_file(source: Path, destination: Path) -> bool:
     source_index = read_json_nofollow(source)
-    if not destination.exists():
-        atomic_write_json(destination, source_index)
-        return True
-    destination_index = read_json_nofollow(destination)
+    destination_index = (
+        read_json_nofollow(destination) if destination.exists() else None
+    )
+    merged_index = merge_index_values(source_index, destination_index)
+    before = (
+        canonical_json(destination_index) if destination_index is not None else None
+    )
+    if before == canonical_json(merged_index):
+        return False
+    atomic_write_json(destination, merged_index)
+    return True
+
+
+def merge_index_values(source_index: dict, destination_index: dict | None) -> dict:
+    if destination_index is None:
+        return source_index
     if (
         source_index.get("host_id") != destination_index.get("host_id")
         or source_index.get("harness") != destination_index.get("harness")
@@ -2362,17 +2378,15 @@ def merge_index_file(source: Path, destination: Path) -> bool:
         row["object_sha256"]: row
         for row in destination_index.get("conversations", [])
     }
-    before = canonical_json(destination_index)
     for row in source_index.get("conversations", []):
         merged[row["object_sha256"]] = row
-    destination_index["conversations"] = sorted(
-        merged.values(),
-        key=lambda row: (str(row.get("session_id")), row["object_sha256"]),
-    )
-    if canonical_json(destination_index) == before:
-        return False
-    atomic_write_json(destination, destination_index)
-    return True
+    return {
+        **destination_index,
+        "conversations": sorted(
+            merged.values(),
+            key=lambda row: (str(row.get("session_id")), row["object_sha256"]),
+        ),
+    }
 
 
 def quarantine_unindexed_objects(destination_parent: Path, host_id: str) -> int:
@@ -2630,14 +2644,37 @@ def merge_host_shard(
             str(path),
         )
     )
-    rollback_payloads: dict[Path, bytes] = {}
+    rollback_payloads: dict[Path, bytes | None] = {}
+    attempted_payloads: dict[Path, bytes] = {}
+    touched_mutable_destinations: list[Path] = []
+
+    def mutable_destination_payload(destination: Path) -> bytes | None:
+        if not destination.exists() and not destination.is_symlink():
+            return None
+        return read_bytes_nofollow(destination)
+
     if source_wins:
         for source in files:
             relative = source.relative_to(source_root)
             if source.name == "index.json" or source.name == "publish-manifest.json":
                 destination = destination_root / relative
-                if destination.is_file() and not destination.is_symlink():
-                    rollback_payloads[destination] = read_bytes_nofollow(destination)
+                previous_payload = mutable_destination_payload(destination)
+                rollback_payloads[destination] = previous_payload
+                if source.name == "index.json" and not require_healthy_receipt:
+                    source_index = read_json_nofollow(source)
+                    destination_index = (
+                        json.loads(previous_payload)
+                        if previous_payload is not None
+                        else None
+                    )
+                    attempted_payloads[destination] = (
+                        canonical_json(
+                            merge_index_values(source_index, destination_index)
+                        )
+                        + b"\n"
+                    )
+                else:
+                    attempted_payloads[destination] = read_bytes_nofollow(source)
     try:
         for source in files:
             relative = source.relative_to(source_root)
@@ -2645,6 +2682,15 @@ def merge_host_shard(
                 continue
             destination = destination_root / relative
             immutable = "objects" in relative.parts or "receipts" in relative.parts
+            if destination in rollback_payloads:
+                if (
+                    mutable_destination_payload(destination)
+                    != rollback_payloads[destination]
+                ):
+                    raise ValueError(
+                        f"mutable destination changed during merge: {relative}"
+                    )
+                touched_mutable_destinations.append(destination)
             if source.name == "index.json":
                 changed = (
                     copy_verified_file(source, destination, immutable=False)
@@ -2665,8 +2711,22 @@ def merge_host_shard(
             validation_proofs=validation_proofs,
         )
     except BaseException:
-        for destination, payload in rollback_payloads.items():
-            atomic_write_bytes(destination, payload)
+        for destination in touched_mutable_destinations:
+            try:
+                current_payload = mutable_destination_payload(destination)
+            except (OSError, ValueError):
+                # A path we wrote was replaced with unrelated or unsafe data.
+                # Do not let rollback turn that race into a destructive unlink.
+                continue
+            previous_payload = rollback_payloads[destination]
+            if current_payload == previous_payload:
+                continue
+            if current_payload != attempted_payloads[destination]:
+                continue
+            if previous_payload is None:
+                remove_file_if_present(destination)
+            else:
+                atomic_write_bytes(destination, previous_payload)
         raise
     return {
         "status": "published",
