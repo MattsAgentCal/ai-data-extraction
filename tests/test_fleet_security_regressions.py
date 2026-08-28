@@ -809,6 +809,53 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 allow_unindexed_objects=True,
             )
 
+    def test_codex_replacement_preserves_same_session_from_other_installation(self):
+        destination_index = {
+            "schema_version": 1,
+            "host_id": "test-mac",
+            "harness": "codex",
+            "conversations": [
+                {
+                    "object_sha256": "a" * 64,
+                    "source": "codex",
+                    "session_id": "shared-session",
+                    "installation": "/install/a",
+                    "source_sha256": "1" * 64,
+                },
+                {
+                    "object_sha256": "b" * 64,
+                    "source": "codex",
+                    "session_id": "shared-session",
+                    "installation": "/install/b",
+                    "source_sha256": "2" * 64,
+                },
+            ],
+        }
+        source_index = {
+            "schema_version": 1,
+            "host_id": "test-mac",
+            "harness": "codex",
+            "conversations": [
+                {
+                    "object_sha256": "c" * 64,
+                    "source": "codex",
+                    "session_id": "shared-session",
+                    "installation": "/install/a",
+                    "source_sha256": "3" * 64,
+                }
+            ],
+        }
+
+        merged = fleet.merge_index_values(source_index, destination_index)
+
+        self.assertEqual(
+            {
+                (row["installation"], row["object_sha256"])
+                for row in merged["conversations"]
+            },
+            {("/install/a", "c" * 64), ("/install/b", "b" * 64)},
+        )
+
     def test_drive_publication_rejects_git_checkout_even_with_test_path_bypass(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -4229,9 +4276,8 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                     )
                     + "\n"
                 )
-            prior_index["conversations"][0]["source_sha256"] = fleet.file_sha256(
-                session
-            )
+            prior_index["conversations"][0].pop("source_sha256")
+            prior_index["conversations"][0].pop("installation")
             write_canonical_json(index_path, prior_index)
             manifest_path = shard / "publish-manifest.json"
             prior_manifest = json.loads(manifest_path.read_text())

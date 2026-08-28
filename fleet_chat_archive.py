@@ -3133,15 +3133,40 @@ def merge_index_values(source_index: dict, destination_index: dict | None) -> di
         raise ValueError("refusing to merge indexes with different identities")
     harness = source_index["harness"]
     incoming_rows = source_index.get("conversations", [])
-    incoming_identities = {
-        (row.get("source"), harness, row.get("session_id"))
+
+    def base_identity(row: dict) -> tuple[object, str, object]:
+        return (row.get("source"), harness, row.get("session_id"))
+
+    incoming_base_identities = {base_identity(row) for row in incoming_rows}
+    incoming_codex_identities = {
+        (*base_identity(row), row.get("installation"))
         for row in incoming_rows
+        if harness == "codex" and row.get("installation") is not None
     }
+    incoming_legacy_codex_identities = {
+        base_identity(row)
+        for row in incoming_rows
+        if harness == "codex" and row.get("installation") is None
+    }
+
+    def is_replaced(row: dict) -> bool:
+        identity = base_identity(row)
+        if harness != "codex":
+            return identity in incoming_base_identities
+        installation = row.get("installation")
+        # Current Codex rows are installation-scoped. A legacy row lacks that
+        # discriminator and is replaced by a newly processed matching session;
+        # likewise a legacy incoming row must act as a compatibility wildcard.
+        return (
+            installation is None and identity in incoming_base_identities
+        ) or (
+            (*identity, installation) in incoming_codex_identities
+        ) or identity in incoming_legacy_codex_identities
+
     merged = {
         row["object_sha256"]: row
         for row in destination_index.get("conversations", [])
-        if (row.get("source"), harness, row.get("session_id"))
-        not in incoming_identities
+        if not is_replaced(row)
     }
     for row in incoming_rows:
         merged[row["object_sha256"]] = row

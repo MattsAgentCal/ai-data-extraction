@@ -42,7 +42,7 @@ RUNTIME_FILES = (
     "extract_hermes.py",
 )
 REVIEWED_RUNTIME_SHA256 = {
-    "fleet_chat_archive.py": "1d151b0e0b4cdfd04fa7ba888c0c13b700994f96f65cab65044d2497d083149f",
+    "fleet_chat_archive.py": "087020cb541a37b140235633185d6ed8c5f5dc5e7dd3fb07447ece839117129b",
     "extract_claude_code.py": "3b6d311a208574f51813699b0885586d97cfc61c7e01a9dda6e97d09be6e9328",
     "extract_codex.py": "50a34f07cc5abc4d19565bd855754c59fffe1165631f6c6c6cd2e6b3869d62e8",
     "extract_openclaw.py": "a13ef9e016fa8b49a6839098377d95f16f1cd6b0f82896c9585de5e9316c2c1d",
