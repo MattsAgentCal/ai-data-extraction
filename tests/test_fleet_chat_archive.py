@@ -615,8 +615,8 @@ class FleetChatArchiveTests(unittest.TestCase):
             remote_object.parent.mkdir(parents=True)
             remote_object.write_bytes(remote_bytes + b"\n")
             remote_harness = remote_spool / "hosts" / "mini" / "claude"
-            (remote_harness / "index.json").write_text(
-                json.dumps(
+            (remote_harness / "index.json").write_bytes(
+                fleet.canonical_json(
                     {
                         "schema_version": 1,
                         "host_id": "mini",
@@ -630,6 +630,7 @@ class FleetChatArchiveTests(unittest.TestCase):
                         ],
                     }
                 )
+                + b"\n"
             )
             remote_run_id = "20260827T000000.000000Z-deadbeef"
             remote_receipt = (
@@ -650,9 +651,36 @@ class FleetChatArchiveTests(unittest.TestCase):
                 "collection_status": "completed",
                 "status": "completed",
                 "errors": [],
-                "harnesses": {"claude": {"status": "collected"}},
+                "harnesses": {
+                    "claude": {
+                        "status": "collected",
+                        "conversations": 1,
+                        "new_objects": 1,
+                        "redactions": 0,
+                        "index_conversations": 1,
+                        "publishable": True,
+                        "quality": {
+                            "discovered_lines": 1,
+                            "parsed_lines": 1,
+                            "failed_lines": 0,
+                            "recognized_lines": 1,
+                            "discovered_files": 1,
+                            "processed_files": 1,
+                            "skipped_unchanged_files": 0,
+                            "status": "complete",
+                        },
+                    }
+                },
+                "hub": {"remotes": {}},
+                "publication": {
+                    "status": "blocked_no_drive_root",
+                    "files_copied": 0,
+                },
+                "receipt_path": str(remote_receipt),
             }
-            remote_receipt.write_text(json.dumps(remote_receipt_value))
+            remote_receipt.write_bytes(
+                fleet.canonical_json(remote_receipt_value) + b"\n"
+            )
             fleet.write_publish_manifest(
                 remote_spool / "hosts" / "mini",
                 remote_receipt,

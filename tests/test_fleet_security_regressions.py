@@ -78,23 +78,20 @@ def write_archive_object(
     payload = canonical + b"\n"
     object_path.write_bytes(payload)
     index_path = shard / harness / "index.json"
-    index_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "host_id": host_id or shard.name,
-                "harness": harness,
-                "conversations": [
-                    {
-                        "object_sha256": digest,
-                        "session_id": conversation["session_id"],
-                        "source": conversation["source"],
-                    }
-                ],
-            },
-            sort_keys=True,
-        )
-        + "\n"
+    write_canonical_json(
+        index_path,
+        {
+            "schema_version": 1,
+            "host_id": host_id or shard.name,
+            "harness": harness,
+            "conversations": [
+                {
+                    "object_sha256": digest,
+                    "session_id": conversation["session_id"],
+                    "source": conversation["source"],
+                }
+            ],
+        },
     )
     return object_path, payload
 
@@ -112,9 +109,31 @@ def write_healthy_receipt(shard: Path, harness: str = "claude") -> Path:
         "collection_status": "completed",
         "status": "completed",
         "errors": [],
-        "harnesses": {harness: {"status": "collected"}},
+        "harnesses": {
+            harness: {
+                "status": "collected",
+                "conversations": 1,
+                "new_objects": 1,
+                "redactions": 0,
+                "index_conversations": 1,
+                "publishable": True,
+                "quality": {
+                    "discovered_lines": 1,
+                    "parsed_lines": 1,
+                    "failed_lines": 0,
+                    "recognized_lines": 1,
+                    "discovered_files": 1,
+                    "processed_files": 1,
+                    "skipped_unchanged_files": 0,
+                    "status": "complete",
+                },
+            }
+        },
+        "hub": {"remotes": {}},
+        "publication": {"status": "blocked_no_drive_root", "files_copied": 0},
+        "receipt_path": f"/archive/hosts/{shard.name}/receipts/{TEST_RUN_ID}.json",
     }
-    receipt.write_text(json.dumps(value, sort_keys=True) + "\n")
+    write_canonical_json(receipt, value)
     fleet.write_publish_manifest(shard, receipt, value, "c" * 64)
     return receipt
 
@@ -282,23 +301,20 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             object_path.parent.mkdir(parents=True)
             object_path.write_bytes(payload + b"\n")
             index_path = shard / "claude" / "index.json"
-            index_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "host_id": "mini",
-                        "harness": "claude",
-                        "conversations": [
-                            {
-                                "object_sha256": digest,
-                                "session_id": "different-session",
-                                "source": "claude-code",
-                            }
-                        ],
-                    },
-                    sort_keys=True,
-                )
-                + "\n"
+            write_canonical_json(
+                index_path,
+                {
+                    "schema_version": 1,
+                    "host_id": "mini",
+                    "harness": "claude",
+                    "conversations": [
+                        {
+                            "object_sha256": digest,
+                            "session_id": "different-session",
+                            "source": "claude-code",
+                        }
+                    ],
+                },
             )
             forged_run_id = "20260828T000000.000000Z-feedface"
             receipt = shard / "receipts" / f"{forged_run_id}.json"
@@ -308,12 +324,39 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 "extractor_sha256": "a" * 64,
                 "config_sha256": "c" * 64,
                 "run_id": forged_run_id,
+                "collected_at": "2026-08-28T00:00:00+00:00",
                 "host_id": "mini",
                 "collection_status": "completed",
                 "status": "completed",
-                "harnesses": {"claude": {"status": "collected"}},
+                "errors": [],
+                "harnesses": {
+                    "claude": {
+                        "status": "collected",
+                        "conversations": 1,
+                        "new_objects": 1,
+                        "redactions": 0,
+                        "index_conversations": 1,
+                        "publishable": True,
+                        "quality": {
+                            "discovered_lines": 1,
+                            "parsed_lines": 1,
+                            "failed_lines": 0,
+                            "recognized_lines": 1,
+                            "discovered_files": 1,
+                            "processed_files": 1,
+                            "skipped_unchanged_files": 0,
+                            "status": "complete",
+                        },
+                    }
+                },
+                "hub": {"remotes": {}},
+                "publication": {
+                    "status": "blocked_no_drive_root",
+                    "files_copied": 0,
+                },
+                "receipt_path": f"/archive/hosts/mini/receipts/{forged_run_id}.json",
             }
-            receipt.write_text(json.dumps(receipt_value, sort_keys=True) + "\n")
+            write_canonical_json(receipt, receipt_value)
             manifest = {
                 "schema_version": 1,
                 "host_id": "mini",
@@ -642,13 +685,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             index_path = source_shard / "claude" / "index.json"
             bad_index = json.loads(index_path.read_text())
             bad_index["host_id"] = "wrong-host"
-            index_path.write_text(json.dumps(bad_index))
+            write_canonical_json(index_path, bad_index)
             with self.assertRaisesRegex(ValueError, "index identity"):
                 fleet.validated_shard_files(source_shard, "mini")
 
             bad_index["host_id"] = "mini"
             bad_index["conversations"][0]["object_sha256"] = "0" * 64
-            index_path.write_text(json.dumps(bad_index))
+            write_canonical_json(index_path, bad_index)
             with self.assertRaisesRegex(ValueError, "missing object"):
                 fleet.validated_shard_files(source_shard, "mini")
 
@@ -898,9 +941,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             legacy_index = json.loads((harness_root / "index.json").read_text())
             legacy_index["conversations"][0].pop("source_sha256")
             legacy_index["conversations"][0].pop("installation")
-            (harness_root / "index.json").write_text(
-                json.dumps(legacy_index, sort_keys=True) + "\n"
-            )
+            write_canonical_json(harness_root / "index.json", legacy_index)
             write_healthy_receipt(harness_root.parent, harness="codex")
             legacy_digest = legacy_index["conversations"][0]["object_sha256"]
             legacy_object = harness_root / "objects" / f"{legacy_digest}.json"
@@ -1823,15 +1864,12 @@ assert peak < 80 * 1024 * 1024, peak
         with safe_temporary_directory() as tmp:
             spool_root = Path(tmp) / "remote-spool"
             shard = spool_root / "hosts" / "mini"
-            shard.mkdir(parents=True)
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
             (spool_root / ".run.lock").touch()
-            write_canonical_json(
-                shard / "publish-manifest.json",
-                {"schema_version": 1},
-            )
             outside = Path(tmp) / "outside"
             outside.mkdir()
-            (shard / "receipts").symlink_to(outside, target_is_directory=True)
+            (shard / "trap").symlink_to(outside, target_is_directory=True)
 
             blocked = subprocess.run(
                 [
@@ -1857,12 +1895,9 @@ assert peak < 80 * 1024 * 1024, peak
         with safe_temporary_directory() as tmp:
             spool_root = Path(tmp) / "remote-spool"
             shard = spool_root / "hosts" / "mini"
-            shard.mkdir(parents=True)
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
             (spool_root / ".run.lock").touch()
-            write_canonical_json(
-                shard / "publish-manifest.json",
-                {"schema_version": 1},
-            )
 
             allowed = subprocess.run(
                 [
@@ -1888,12 +1923,11 @@ assert peak < 80 * 1024 * 1024, peak
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
             spool_root = root / "remote-spool"
-            (spool_root / "hosts" / "mini").mkdir(parents=True)
+            shard = spool_root / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
             lock_path = spool_root / ".run.lock"
             lock_path.touch()
-            (
-                spool_root / "hosts" / "mini" / "publish-manifest.json"
-            ).write_bytes(fleet.canonical_json({"schema_version": 1}) + b"\n")
             fake_bin = root / "bin"
             fake_bin.mkdir()
             (fake_bin / "rsync").symlink_to("/bin/sleep")
@@ -2631,6 +2665,213 @@ assert peak < 80 * 1024 * 1024, peak
             self.assertEqual(blocked.stdout, "")
             self.assertEqual(blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR)
 
+    def test_client_and_sender_reject_manifest_bound_metadata_body_smuggling(self):
+        private_body = "private transcript body that metadata must never carry"
+        for location in (
+            "receipt_top_level",
+            "receipt_harness",
+            "index_top_level",
+            "index_row",
+        ):
+            with self.subTest(location=location), safe_temporary_directory() as tmp:
+                spool_root = Path(tmp) / "remote-spool"
+                shard = spool_root / "hosts" / "mini"
+                write_archive_object(shard, host_id="mini")
+                receipt_path = write_healthy_receipt(shard)
+                manifest_path = shard / "publish-manifest.json"
+                manifest = json.loads(manifest_path.read_text())
+                if location.startswith("receipt"):
+                    receipt = json.loads(receipt_path.read_text())
+                    if location == "receipt_top_level":
+                        receipt["messages"] = [{"content": private_body}]
+                    else:
+                        receipt["harnesses"]["claude"]["messages"] = [
+                            {"content": private_body}
+                        ]
+                    write_canonical_json(receipt_path, receipt)
+                    manifest["receipt"]["sha256"] = fleet.file_sha256(receipt_path)
+                else:
+                    index_path = shard / "claude" / "index.json"
+                    index = json.loads(index_path.read_text())
+                    if location == "index_top_level":
+                        index["messages"] = [{"content": private_body}]
+                    else:
+                        index["conversations"][0]["messages"] = [
+                            {"content": private_body}
+                        ]
+                    write_canonical_json(index_path, index)
+                    manifest["harnesses"]["claude"]["index_sha256"] = (
+                        fleet.file_sha256(index_path)
+                    )
+                write_canonical_json(manifest_path, manifest)
+
+                with self.assertRaises(ValueError) as raised:
+                    fleet.validate_publish_manifest(
+                        shard,
+                        "mini",
+                        {"claude"},
+                        [receipt_path],
+                        require_objects=False,
+                    )
+                self.assertNotIn(private_body, str(raised.exception))
+
+                (spool_root / ".run.lock").touch()
+                blocked = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        fleet.REMOTE_RSYNC_GUARD,
+                        str(spool_root),
+                        "mini",
+                        str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
+                        "--version",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(blocked.returncode, 42)
+                self.assertEqual(blocked.stdout, "")
+                self.assertEqual(
+                    blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR
+                )
+                self.assertNotIn(private_body, blocked.stderr)
+
+    def test_body_free_metadata_accepts_exact_fleet_variants(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            digest = "d" * 64
+            base_row = {
+                "object_sha256": digest,
+                "session_id": "fleet-session",
+            }
+            source_by_harness = {
+                "claude": "claude-code",
+                "openclaw": "openclaw",
+                "hermes": "hermes",
+            }
+            for harness, source in source_by_harness.items():
+                index_path = root / harness / "index.json"
+                index_path.parent.mkdir(parents=True)
+                write_canonical_json(
+                    index_path,
+                    {
+                        "schema_version": 1,
+                        "host_id": "mini",
+                        "harness": harness,
+                        "conversations": [{**base_row, "source": source}],
+                    },
+                )
+                self.assertEqual(
+                    fleet.validate_index_metadata(index_path, "mini", harness)[
+                        "conversations"
+                    ][0]["source"],
+                    source,
+                )
+
+            codex_path = root / "codex" / "index.json"
+            codex_path.parent.mkdir(parents=True)
+            codex_base = {**base_row, "source": "codex"}
+            for row in (
+                codex_base,
+                {
+                    **codex_base,
+                    "source_sha256": "e" * 64,
+                    "installation": "/Users/example/.codex",
+                },
+            ):
+                write_canonical_json(
+                    codex_path,
+                    {
+                        "schema_version": 1,
+                        "host_id": "mini",
+                        "harness": "codex",
+                        "conversations": [row],
+                    },
+                )
+                self.assertEqual(
+                    fleet.validate_index_metadata(codex_path, "mini", "codex")[
+                        "conversations"
+                    ][0],
+                    row,
+                )
+
+            spool_root = root / "spool"
+            shard = spool_root / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            receipt_path = write_healthy_receipt(shard)
+            manifest_path = shard / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            receipt = json.loads(receipt_path.read_text())
+            receipt["collection_status"] = "completed_with_absent_harnesses"
+            receipt["status"] = "failed"
+            receipt["errors"] = [
+                {
+                    "component": "receipt_publication",
+                    "error_type": "PublicationBlocked",
+                }
+            ]
+            receipt["harnesses"]["codex"] = {
+                "status": "not_present_on_host",
+                "conversations": 0,
+                "new_objects": 0,
+                "publishable": False,
+                "inventory_only": True,
+            }
+            published = {
+                "status": "published",
+                "files_copied": 3,
+                "files_verified": 4,
+                "quarantined_unindexed_objects": 0,
+            }
+            receipt["hub"] = {
+                "remotes": {
+                    "oldmac": {
+                        "status": "pulled",
+                        "files_copied": 3,
+                        "files_verified": 4,
+                        "publication": published,
+                    }
+                }
+            }
+            receipt["publication"] = published
+            receipt["receipt_publication"] = {
+                "status": "blocked_integrity_failure",
+                "files_copied": 0,
+                "error": "archive verification failed",
+            }
+            write_canonical_json(receipt_path, receipt)
+            manifest["receipt"]["sha256"] = fleet.file_sha256(receipt_path)
+            write_canonical_json(manifest_path, manifest)
+
+            validated = fleet.validate_publish_manifest(
+                shard,
+                "mini",
+                {"claude"},
+                [receipt_path],
+                require_objects=False,
+            )
+            self.assertEqual(validated, manifest)
+
+            (spool_root / ".run.lock").touch()
+            allowed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    fleet.REMOTE_RSYNC_GUARD,
+                    str(spool_root),
+                    "mini",
+                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
+                    "--version",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
     def test_manifest_rejects_per_harness_and_total_object_count_pathologies(self):
         with safe_temporary_directory() as tmp:
             shard = Path(tmp) / "hosts" / "mini"
@@ -3315,23 +3556,20 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             object_path.parent.mkdir(parents=True)
             object_path.write_bytes(fleet.canonical_json(conversation) + b"\n")
             index_path = shard / "claude" / "index.json"
-            index_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "host_id": "test-mac",
-                        "harness": "claude",
-                        "conversations": [
-                            {
-                                "object_sha256": digest,
-                                "source": "claude-code",
-                                "session_id": "residual-session",
-                            }
-                        ],
-                    },
-                    sort_keys=True,
-                )
-                + "\n"
+            write_canonical_json(
+                index_path,
+                {
+                    "schema_version": 1,
+                    "host_id": "test-mac",
+                    "harness": "claude",
+                    "conversations": [
+                        {
+                            "object_sha256": digest,
+                            "source": "claude-code",
+                            "session_id": "residual-session",
+                        }
+                    ],
+                },
             )
             receipt = shard / "receipts" / f"{TEST_RUN_ID}.json"
             receipt.parent.mkdir(parents=True)
@@ -3386,23 +3624,20 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             claude_object_root.mkdir(parents=True)
             claude_object = claude_object_root / openclaw_object.name
             os.link(openclaw_object, claude_object)
-            (shard / "claude" / "index.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "host_id": "test-mac",
-                        "harness": "claude",
-                        "conversations": [
-                            {
-                                "object_sha256": openclaw_object.stem,
-                                "source": "claude-code",
-                                "session_id": "shared-inode",
-                            }
-                        ],
-                    },
-                    sort_keys=True,
-                )
-                + "\n"
+            write_canonical_json(
+                shard / "claude" / "index.json",
+                {
+                    "schema_version": 1,
+                    "host_id": "test-mac",
+                    "harness": "claude",
+                    "conversations": [
+                        {
+                            "object_sha256": openclaw_object.stem,
+                            "source": "claude-code",
+                            "session_id": "shared-inode",
+                        }
+                    ],
+                },
             )
             # Creating the hard link changes ctime. Revalidate the legitimate
             # OpenClaw path so the forged Claude path exercises a cache hit.
@@ -3623,16 +3858,14 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             shard = destination_parent / "hosts" / "test-mac"
             manifested_object, _ = write_archive_object(shard, host_id="test-mac")
             write_healthy_receipt(shard)
-            (shard / "claude" / "index.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "host_id": "test-mac",
-                        "harness": "claude",
-                        "conversations": [],
-                    }
-                )
-                + "\n"
+            write_canonical_json(
+                shard / "claude" / "index.json",
+                {
+                    "schema_version": 1,
+                    "host_id": "test-mac",
+                    "harness": "claude",
+                    "conversations": [],
+                },
             )
 
             moved = fleet.quarantine_unindexed_objects(

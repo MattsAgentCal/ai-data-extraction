@@ -155,6 +155,11 @@ MAX_OBJECT_BYTES = 1280 * 1024 * 1024
 MAX_PRIVATE_KEY_LABEL_CHARS = 64
 MAX_REMOTE_TIMEOUT_SECONDS = 24 * 60 * 60
 MAX_PUBLISH_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_RECEIPT_METADATA_BYTES = MAX_PUBLISH_MANIFEST_BYTES
+MAX_INDEX_METADATA_BYTES = MAX_PUBLISH_MANIFEST_BYTES
+MAX_METADATA_STRING_CHARS = 4096
+MAX_RECEIPT_ERRORS = 1024
+MAX_RECEIPT_REMOTES = 1024
 # The inspected 2026-08-28 fleet high-water marks were 1,129 objects in one
 # harness and 1,158 total. These leave substantial growth room without making
 # a manifest-controlled transfer or allocation unbounded.
@@ -171,11 +176,14 @@ CODEX_PATH_PROVENANCE_FIELDS = frozenset({"session_file"})
 REMOTE_RSYNC_GUARD_ERROR = "fleet-unsafe-source"
 REMOTE_RSYNC_GUARD = r'''
 import fcntl
+import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
+from datetime import datetime
 
 ERROR = "fleet-unsafe-source"
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -206,6 +214,450 @@ def bounded_json_loads(payload):
         object_pairs_hook=unique_json_object,
         parse_constant=reject_json_constant,
     )
+
+
+def canonical_json_payload(payload):
+    value = bounded_json_loads(payload)
+    canonical = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    if payload != canonical:
+        fail()
+    return value
+
+
+def bounded_file_payload(root_descriptor, parts, limit):
+    descriptor = os.dup(root_descriptor)
+    try:
+        for part in parts[:-1]:
+            next_descriptor = os.open(
+                part,
+                os.O_RDONLY | DIRECTORY | NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        file_descriptor = os.open(
+            parts[-1],
+            os.O_RDONLY | NOFOLLOW,
+            dir_fd=descriptor,
+        )
+    finally:
+        os.close(descriptor)
+    try:
+        initial = os.fstat(file_descriptor)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size > limit:
+            fail()
+        payload = bytearray()
+        while len(payload) <= limit:
+            chunk = os.read(
+                file_descriptor,
+                min(1024 * 1024, limit + 1 - len(payload)),
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+        final = os.fstat(file_descriptor)
+        if (
+            len(payload) > limit
+            or file_identity(initial) != file_identity(final)
+            or len(payload) != final.st_size
+        ):
+            fail()
+        return bytes(payload)
+    finally:
+        os.close(file_descriptor)
+
+
+def bounded_string(value, allow_empty=False):
+    return (
+        isinstance(value, str)
+        and (allow_empty or bool(value))
+        and len(value) <= 4096
+        and not any(character in value for character in ("\0", "\r", "\n"))
+    )
+
+
+def nonnegative_int(value):
+    return type(value) is int and value >= 0
+
+
+def valid_run_id(value):
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-[0-9a-f]{8}", value
+    ):
+        return False
+    try:
+        datetime.strptime(value[:22], "%Y%m%dT%H%M%S.%f")
+    except ValueError:
+        return False
+    return True
+
+
+def valid_utc_timestamp(value, require_microseconds):
+    fraction = r"\.[0-9]{6}" if require_microseconds else r"(?:\.[0-9]{6})?"
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+        + fraction
+        + r"\+00:00",
+        value,
+    ):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    offset = parsed.utcoffset()
+    return offset is not None and offset.total_seconds() == 0
+
+
+def validate_publication(value):
+    if not isinstance(value, dict):
+        fail()
+    status = value.get("status")
+    fields = {"status", "files_copied"}
+    if status == "published":
+        fields.update({"files_verified", "quarantined_unindexed_objects"})
+    elif status == "blocked_integrity_failure":
+        fields.add("error")
+    if (
+        set(value) != fields
+        or status not in {
+            "not_attempted",
+            "pending_manifest",
+            "blocked_no_drive_root",
+            "blocked_drive_unavailable",
+            "blocked_ambiguous_drive_root",
+            "blocked_not_google_drive",
+            "blocked_source_missing",
+            "blocked_incomplete_collection",
+            "blocked_integrity_failure",
+            "published",
+            "failed",
+        }
+        or not nonnegative_int(value.get("files_copied"))
+        or (
+            "files_verified" in value
+            and not nonnegative_int(value["files_verified"])
+        )
+        or (
+            "quarantined_unindexed_objects" in value
+            and not nonnegative_int(value["quarantined_unindexed_objects"])
+        )
+        or ("error" in value and not bounded_string(value["error"]))
+    ):
+        fail()
+
+
+def validate_harness_result(value):
+    if not isinstance(value, dict):
+        fail()
+    if value.get("status") == "not_present_on_host":
+        if (
+            set(value)
+            != {
+                "status",
+                "conversations",
+                "new_objects",
+                "publishable",
+                "inventory_only",
+            }
+            or value.get("conversations") != 0
+            or value.get("new_objects") != 0
+            or value.get("publishable") is not False
+            or value.get("inventory_only") is not True
+        ):
+            fail()
+        return
+    fields = {
+        "status",
+        "conversations",
+        "new_objects",
+        "redactions",
+        "index_conversations",
+        "publishable",
+        "quality",
+    }
+    quality_fields = {
+        "discovered_lines",
+        "parsed_lines",
+        "failed_lines",
+        "recognized_lines",
+        "discovered_files",
+        "processed_files",
+        "skipped_unchanged_files",
+        "status",
+    }
+    quality = value.get("quality")
+    if (
+        set(value) != fields
+        or value.get("status") not in {"collected", "no_conversations"}
+        or any(
+            not nonnegative_int(value.get(field))
+            for field in (
+                "conversations",
+                "new_objects",
+                "redactions",
+                "index_conversations",
+            )
+        )
+        or value.get("publishable") is not True
+        or not isinstance(quality, dict)
+        or set(quality) != quality_fields
+        or quality.get("status") != "complete"
+        or any(
+            not nonnegative_int(quality.get(field))
+            for field in quality_fields - {"status"}
+        )
+    ):
+        fail()
+
+
+def validate_remote_result(value):
+    if not isinstance(value, dict):
+        fail()
+    status = value.get("status")
+    fields = {"status", "files_copied"}
+    if status == "pulled":
+        fields.add("files_verified")
+    elif status == "blocked_integrity_failure":
+        fields.add("error")
+    if "publication" in value:
+        fields.add("publication")
+    if (
+        set(value) != fields
+        or status not in {
+            "pulled",
+            "cached",
+            "invalid_remote",
+            "unreachable",
+            "pending_manifest",
+            "blocked_integrity_failure",
+        }
+        or not nonnegative_int(value.get("files_copied"))
+        or (
+            "files_verified" in value
+            and not nonnegative_int(value["files_verified"])
+        )
+        or ("error" in value and not bounded_string(value["error"]))
+    ):
+        fail()
+    if "publication" in value:
+        validate_publication(value["publication"])
+
+
+def validate_receipt(receipt, manifest, receipt_name):
+    required = {
+        "schema_version",
+        "extractor_sha256",
+        "config_sha256",
+        "run_id",
+        "collected_at",
+        "host_id",
+        "collection_status",
+        "status",
+        "harnesses",
+        "hub",
+        "publication",
+        "errors",
+        "receipt_path",
+    }
+    allowed = required | {"receipt_publication"}
+    if not isinstance(receipt, dict):
+        fail()
+    harnesses = receipt.get("harnesses")
+    errors = receipt.get("errors")
+    collection_status = receipt.get("collection_status")
+    receipt_path = receipt.get("receipt_path")
+    if (
+        not required.issubset(receipt)
+        or not set(receipt).issubset(allowed)
+        or type(receipt.get("schema_version")) is not int
+        or receipt.get("schema_version") != 1
+        or receipt.get("host_id") != host_id
+        or receipt.get("run_id") != manifest["run_id"]
+        or receipt.get("extractor_sha256") != manifest["extractor_sha256"]
+        or receipt.get("config_sha256") != manifest["config_sha256"]
+        or not valid_utc_timestamp(receipt.get("collected_at"), False)
+        or collection_status not in {"completed", "completed_with_absent_harnesses"}
+        or receipt.get("status") not in {collection_status, "failed"}
+        or not isinstance(harnesses, dict)
+        or not set(harnesses).issubset(APPROVED_HARNESSES)
+        or not isinstance(errors, list)
+        or len(errors) > 1024
+        or not bounded_string(receipt_path)
+        or not receipt_path.startswith("/")
+        or not receipt_path.endswith(
+            "/hosts/" + host_id + "/receipts/" + receipt_name
+        )
+    ):
+        fail()
+    for error in errors:
+        if (
+            not isinstance(error, dict)
+            or set(error) != {"component", "error_type"}
+            or error.get("component")
+            not in {"hub", "publication", "receipt_publication"}
+            or not bounded_string(error.get("error_type"))
+        ):
+            fail()
+    if bool(errors) != (receipt.get("status") == "failed"):
+        fail()
+    for result in harnesses.values():
+        validate_harness_result(result)
+    hub = receipt.get("hub")
+    if not isinstance(hub, dict) or not isinstance(hub.get("remotes"), dict):
+        fail()
+    if set(hub) == {"remotes"}:
+        pass
+    elif not (
+        set(hub) == {"remotes", "status", "error_type"}
+        and hub.get("status") == "failed"
+        and bounded_string(hub.get("error_type"))
+    ):
+        fail()
+    if len(hub["remotes"]) > 1024:
+        fail()
+    for remote_host_id, remote in hub["remotes"].items():
+        if not isinstance(remote_host_id, str) or not re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]{0,62})", remote_host_id
+        ):
+            fail()
+        validate_remote_result(remote)
+    validate_publication(receipt.get("publication"))
+    if "receipt_publication" in receipt:
+        validate_publication(receipt["receipt_publication"])
+    return harnesses
+
+
+APPROVED_HARNESSES = {"claude", "codex", "openclaw", "hermes"}
+HARNESS_SOURCES = {
+    "claude": {"claude-code"},
+    "codex": {"codex"},
+    "openclaw": {"openclaw"},
+    "hermes": {"hermes"},
+}
+
+
+def validate_manifest(manifest):
+    receipt = manifest.get("receipt") if isinstance(manifest, dict) else None
+    harnesses = manifest.get("harnesses") if isinstance(manifest, dict) else None
+    digest_values = (
+        manifest.get("extractor_sha256") if isinstance(manifest, dict) else None,
+        manifest.get("config_sha256") if isinstance(manifest, dict) else None,
+        receipt.get("sha256") if isinstance(receipt, dict) else None,
+    )
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest)
+        != {
+            "schema_version",
+            "host_id",
+            "run_id",
+            "generated_at",
+            "extractor_sha256",
+            "config_sha256",
+            "receipt",
+            "harnesses",
+        }
+        or type(manifest.get("schema_version")) is not int
+        or manifest.get("schema_version") != 1
+        or manifest.get("host_id") != host_id
+        or not valid_run_id(manifest.get("run_id"))
+        or not valid_utc_timestamp(manifest.get("generated_at"), True)
+        or any(
+            not isinstance(value, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in digest_values
+        )
+        or not isinstance(receipt, dict)
+        or set(receipt) != {"path", "sha256"}
+        or not isinstance(harnesses, dict)
+        or not set(harnesses).issubset(APPROVED_HARNESSES)
+    ):
+        fail()
+    receipt_path = receipt.get("path")
+    if receipt_path not in {
+        "receipts/" + manifest["run_id"] + suffix + ".json"
+        for suffix in (
+            "",
+            "-published",
+            "-publication-blocked",
+            "-publication-failed",
+        )
+    }:
+        fail()
+    total = 0
+    for binding in harnesses.values():
+        digests = binding.get("object_sha256") if isinstance(binding, dict) else None
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != {"index_sha256", "object_sha256"}
+            or not isinstance(binding.get("index_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", binding["index_sha256"])
+            or not isinstance(digests, list)
+            or len(digests) > 25000
+            or any(
+                not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                for digest in digests
+            )
+            or digests != sorted(set(digests))
+        ):
+            fail()
+        total += len(digests)
+        if total > 50000:
+            fail()
+    return receipt_path, harnesses
+
+
+def validate_index(index, harness, expected_digests):
+    if (
+        not isinstance(index, dict)
+        or set(index) != {"schema_version", "host_id", "harness", "conversations"}
+        or type(index.get("schema_version")) is not int
+        or index.get("schema_version") != 1
+        or index.get("host_id") != host_id
+        or index.get("harness") != harness
+        or not isinstance(index.get("conversations"), list)
+        or len(index["conversations"]) > 25000
+    ):
+        fail()
+    referenced = []
+    seen = set()
+    base_fields = frozenset({"object_sha256", "session_id", "source"})
+    codex_fields = frozenset(
+        {"object_sha256", "session_id", "source", "source_sha256", "installation"}
+    )
+    for row in index["conversations"]:
+        allowed = {base_fields, codex_fields} if harness == "codex" else {base_fields}
+        if not isinstance(row, dict) or frozenset(row) not in allowed:
+            fail()
+        digest = row.get("object_sha256")
+        if (
+            not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or digest in seen
+            or not bounded_string(row.get("session_id"))
+            or row.get("source") not in HARNESS_SOURCES[harness]
+        ):
+            fail()
+        if frozenset(row) == codex_fields and (
+            not isinstance(row.get("source_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", row["source_sha256"])
+            or not bounded_string(row.get("installation"))
+        ):
+            fail()
+        seen.add(digest)
+        referenced.append(digest)
+    if sorted(referenced) != expected_digests:
+        fail()
 
 
 def file_identity(metadata):
@@ -333,25 +785,33 @@ try:
         ):
             fail()
         try:
-            manifest = bounded_json_loads(manifest_payload)
-            if (
-                not isinstance(manifest, dict)
-                or type(manifest.get("schema_version")) is not int
-                or manifest["schema_version"] != 1
-            ):
-                fail()
-            canonical_manifest = (
-                json.dumps(
-                    manifest,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                + b"\n"
+            manifest = canonical_json_payload(bytes(manifest_payload))
+            receipt_path, manifest_harnesses = validate_manifest(manifest)
+            receipt_name = receipt_path.split("/", 1)[1]
+            receipt_payload = bounded_file_payload(
+                shard_descriptor,
+                ("receipts", receipt_name),
+                manifest_limit,
             )
-        except (OverflowError, TypeError, UnicodeError, ValueError):
-            fail()
-        if bytes(manifest_payload) != canonical_manifest:
+            if hashlib.sha256(receipt_payload).hexdigest() != manifest["receipt"]["sha256"]:
+                fail()
+            receipt = canonical_json_payload(receipt_payload)
+            receipt_harnesses = validate_receipt(receipt, manifest, receipt_name)
+            if not set(manifest_harnesses).issubset(receipt_harnesses):
+                fail()
+            for harness, binding in manifest_harnesses.items():
+                if receipt_harnesses[harness].get("status") == "not_present_on_host":
+                    fail()
+                index_payload = bounded_file_payload(
+                    shard_descriptor,
+                    (harness, "index.json"),
+                    manifest_limit,
+                )
+                if hashlib.sha256(index_payload).hexdigest() != binding["index_sha256"]:
+                    fail()
+                index = canonical_json_payload(index_payload)
+                validate_index(index, harness, binding["object_sha256"])
+        except (OSError, OverflowError, TypeError, UnicodeError, ValueError):
             fail()
     finally:
         os.close(manifest_descriptor)
@@ -391,6 +851,19 @@ def canonical_json(value: object) -> bytes:
 
 def is_exact_schema_version_one(value: object) -> bool:
     return type(value) is int and value == 1
+
+
+def is_nonnegative_int(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def is_bounded_metadata_string(value: object, *, allow_empty: bool = False) -> bool:
+    return (
+        isinstance(value, str)
+        and (allow_empty or bool(value))
+        and len(value) <= MAX_METADATA_STRING_CHARS
+        and not any(character in value for character in ("\0", "\r", "\n"))
+    )
 
 
 def extractor_sha256() -> str:
@@ -589,6 +1062,17 @@ def bounded_json_loads(payload: bytes):
     )
 
 
+def parse_canonical_json(payload: bytes, *, size_label: str):
+    try:
+        value = bounded_json_loads(payload)
+        canonical_payload = canonical_json(value) + b"\n"
+    except (OverflowError, TypeError, UnicodeError, ValueError) as error:
+        raise ValueError(f"{size_label} is not canonical JSON") from error
+    if payload != canonical_payload:
+        raise ValueError(f"{size_label} is not canonical JSON")
+    return value
+
+
 def read_canonical_json_nofollow(
     path: Path,
     *,
@@ -600,14 +1084,7 @@ def read_canonical_json_nofollow(
         max_bytes=max_bytes,
         size_label=size_label,
     )
-    try:
-        value = bounded_json_loads(payload)
-        canonical_payload = canonical_json(value) + b"\n"
-    except (OverflowError, TypeError, UnicodeError, ValueError) as error:
-        raise ValueError(f"{size_label} is not canonical JSON") from error
-    if payload != canonical_payload:
-        raise ValueError(f"{size_label} is not canonical JSON")
-    return value
+    return parse_canonical_json(payload, size_label=size_label)
 
 
 def secure_mkdir(path: Path) -> None:
@@ -1767,37 +2244,52 @@ def validated_object_provenance(
 
 def validate_index_metadata(index_path: Path, host_id: str, harness: str) -> dict:
     """Validate an index without opening any conversation object bodies."""
-    index = read_json_nofollow(index_path)
+    index = read_canonical_json_nofollow(
+        index_path,
+        max_bytes=MAX_INDEX_METADATA_BYTES,
+        size_label="archive index",
+    )
     if not isinstance(index, dict):
         raise ValueError(f"invalid archive index identity: {index_path.name}")
     if (
-        index.get("schema_version") != 1
+        set(index) != {"schema_version", "host_id", "harness", "conversations"}
+        or not is_exact_schema_version_one(index.get("schema_version"))
         or index.get("host_id") != host_id
         or index.get("harness") != harness
         or not isinstance(index.get("conversations"), list)
+        or len(index["conversations"]) > MAX_MANIFEST_OBJECTS_PER_HARNESS
     ):
         raise ValueError(f"invalid archive index identity: {index_path.name}")
     referenced: set[str] = set()
     for row in index["conversations"]:
-        if not isinstance(row, dict) or not OBJECT_NAME_RE.fullmatch(
-            f"{row.get('object_sha256', '')}.json"
+        if not isinstance(row, dict):
+            raise ValueError(f"invalid archive index row: {index_path.name}")
+        base_fields = {"object_sha256", "session_id", "source"}
+        codex_fields = base_fields | {"source_sha256", "installation"}
+        allowed_fields = {frozenset(base_fields)}
+        if harness == "codex":
+            # The base shape is the bounded legacy Codex variant. New Codex
+            # rows carry both provenance fields or neither; other harnesses
+            # may never acquire those path-derived fields.
+            allowed_fields.add(frozenset(codex_fields))
+        if frozenset(row) not in allowed_fields:
+            raise ValueError(f"invalid archive index row: {index_path.name}")
+        if (
+            not isinstance(row.get("object_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", row["object_sha256"])
+            or not is_bounded_metadata_string(row.get("session_id"))
+            or row.get("source") not in HARNESS_SOURCES[harness]
         ):
             raise ValueError(f"invalid archive index row: {index_path.name}")
-        if row.get("source_sha256") is not None and not re.fullmatch(
-            r"[0-9a-f]{64}", str(row["source_sha256"])
+        if frozenset(row) == frozenset(codex_fields) and (
+            not isinstance(row.get("source_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", row["source_sha256"])
+            or not is_bounded_metadata_string(row.get("installation"))
         ):
-            raise ValueError(f"invalid archive source identity: {index_path.name}")
-        if (
-            harness == "codex"
-            and row.get("source_sha256") is not None
-            and not isinstance(row.get("installation"), str)
-        ):
-            raise ValueError(f"invalid Codex installation identity: {index_path.name}")
+            raise ValueError(f"invalid Codex source identity: {index_path.name}")
         digest = row["object_sha256"]
         if digest in referenced:
             raise ValueError(f"duplicate archive index row: {digest}")
-        if row.get("source") not in HARNESS_SOURCES[harness]:
-            raise ValueError(f"unauthorized source in {harness} index")
         referenced.add(digest)
     return index
 
@@ -1848,6 +2340,21 @@ def is_pipeline_run_id(value: object) -> bool:
 
 def is_canonical_utc_timestamp(value: object) -> bool:
     if not isinstance(value, str) or not GENERATED_AT_RE.fullmatch(value):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    offset = parsed.utcoffset()
+    return offset is not None and offset.total_seconds() == 0
+
+
+def is_archive_receipt_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+        r"(?:\.[0-9]{6})?\+00:00",
+        value,
+    ):
         return False
     try:
         parsed = datetime.fromisoformat(value)
@@ -2037,6 +2544,245 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
     return manifest
 
 
+def validate_publication_receipt_metadata(value: object) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("invalid manifest-bound publication metadata")
+    status = value.get("status")
+    base_fields = {"status", "files_copied"}
+    if status == "published":
+        expected_fields = base_fields | {
+            "files_verified",
+            "quarantined_unindexed_objects",
+        }
+    elif status == "blocked_integrity_failure":
+        expected_fields = base_fields | {"error"}
+    else:
+        expected_fields = base_fields
+    if (
+        set(value) != expected_fields
+        or status
+        not in {
+            "not_attempted",
+            "pending_manifest",
+            "blocked_no_drive_root",
+            "blocked_drive_unavailable",
+            "blocked_ambiguous_drive_root",
+            "blocked_not_google_drive",
+            "blocked_source_missing",
+            "blocked_incomplete_collection",
+            "blocked_integrity_failure",
+            "published",
+            "failed",
+        }
+        or not is_nonnegative_int(value.get("files_copied"))
+        or (
+            "files_verified" in value
+            and not is_nonnegative_int(value["files_verified"])
+        )
+        or (
+            "quarantined_unindexed_objects" in value
+            and not is_nonnegative_int(value["quarantined_unindexed_objects"])
+        )
+        or ("error" in value and not is_bounded_metadata_string(value["error"]))
+    ):
+        raise ValueError("invalid manifest-bound publication metadata")
+
+
+def validate_harness_receipt_metadata(harness: str, value: object) -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid manifest-bound {harness} receipt metadata")
+    if value.get("status") == "not_present_on_host":
+        if (
+            set(value)
+            != {
+                "status",
+                "conversations",
+                "new_objects",
+                "publishable",
+                "inventory_only",
+            }
+            or value.get("conversations") != 0
+            or value.get("new_objects") != 0
+            or value.get("publishable") is not False
+            or value.get("inventory_only") is not True
+        ):
+            raise ValueError(f"invalid manifest-bound {harness} receipt metadata")
+        return
+
+    expected_fields = {
+        "status",
+        "conversations",
+        "new_objects",
+        "redactions",
+        "index_conversations",
+        "publishable",
+        "quality",
+    }
+    quality = value.get("quality")
+    quality_fields = {
+        "discovered_lines",
+        "parsed_lines",
+        "failed_lines",
+        "recognized_lines",
+        "discovered_files",
+        "processed_files",
+        "skipped_unchanged_files",
+        "status",
+    }
+    if (
+        set(value) != expected_fields
+        or value.get("status") not in {"collected", "no_conversations"}
+        or any(
+            not is_nonnegative_int(value.get(field))
+            for field in (
+                "conversations",
+                "new_objects",
+                "redactions",
+                "index_conversations",
+            )
+        )
+        or value.get("publishable") is not True
+        or not isinstance(quality, dict)
+        or set(quality) != quality_fields
+        or quality.get("status") != "complete"
+        or any(
+            not is_nonnegative_int(quality.get(field))
+            for field in quality_fields - {"status"}
+        )
+    ):
+        raise ValueError(f"invalid manifest-bound {harness} receipt metadata")
+
+
+def validate_remote_receipt_metadata(value: object) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("invalid manifest-bound remote receipt metadata")
+    status = value.get("status")
+    expected_fields = {"status", "files_copied"}
+    if status == "pulled":
+        expected_fields.add("files_verified")
+    elif status == "blocked_integrity_failure":
+        expected_fields.add("error")
+    if "publication" in value:
+        expected_fields.add("publication")
+    if (
+        set(value) != expected_fields
+        or status
+        not in {
+            "pulled",
+            "cached",
+            "invalid_remote",
+            "unreachable",
+            "pending_manifest",
+            "blocked_integrity_failure",
+        }
+        or not is_nonnegative_int(value.get("files_copied"))
+        or (
+            "files_verified" in value
+            and not is_nonnegative_int(value["files_verified"])
+        )
+        or ("error" in value and not is_bounded_metadata_string(value["error"]))
+    ):
+        raise ValueError("invalid manifest-bound remote receipt metadata")
+    if "publication" in value:
+        validate_publication_receipt_metadata(value["publication"])
+
+
+def validate_hub_receipt_metadata(value: object) -> None:
+    if not isinstance(value, dict) or not isinstance(value.get("remotes"), dict):
+        raise ValueError("invalid manifest-bound hub receipt metadata")
+    if set(value) == {"remotes"}:
+        pass
+    elif (
+        set(value) == {"remotes", "status", "error_type"}
+        and value.get("status") == "failed"
+        and is_bounded_metadata_string(value.get("error_type"))
+    ):
+        pass
+    else:
+        raise ValueError("invalid manifest-bound hub receipt metadata")
+    remotes = value["remotes"]
+    if len(remotes) > MAX_RECEIPT_REMOTES:
+        raise ValueError("invalid manifest-bound hub receipt metadata")
+    for remote_host_id, remote in remotes.items():
+        if not isinstance(remote_host_id, str) or not HOST_ID_RE.fullmatch(remote_host_id):
+            raise ValueError("invalid manifest-bound hub receipt metadata")
+        validate_remote_receipt_metadata(remote)
+
+
+def validate_manifest_bound_receipt_metadata(
+    receipt: object,
+    manifest: dict,
+    host_id: str,
+    receipt_relative: Path,
+) -> dict:
+    if not isinstance(receipt, dict):
+        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    required_fields = {
+        "schema_version",
+        "extractor_sha256",
+        "config_sha256",
+        "run_id",
+        "collected_at",
+        "host_id",
+        "collection_status",
+        "status",
+        "harnesses",
+        "hub",
+        "publication",
+        "errors",
+        "receipt_path",
+    }
+    allowed_fields = required_fields | {"receipt_publication"}
+    receipt_harnesses = receipt.get("harnesses")
+    collection_status = receipt.get("collection_status")
+    errors = receipt.get("errors")
+    receipt_path_value = receipt.get("receipt_path")
+    if (
+        not required_fields.issubset(receipt)
+        or not set(receipt).issubset(allowed_fields)
+        or not is_exact_schema_version_one(receipt.get("schema_version"))
+        or receipt.get("host_id") != host_id
+        or receipt.get("run_id") != manifest["run_id"]
+        or receipt.get("extractor_sha256") != manifest["extractor_sha256"]
+        or receipt.get("config_sha256") != manifest["config_sha256"]
+        or not is_archive_receipt_timestamp(receipt.get("collected_at"))
+        or collection_status
+        not in {"completed", "completed_with_absent_harnesses"}
+        or receipt.get("status") not in {collection_status, "failed"}
+        or not isinstance(receipt_harnesses, dict)
+        or not set(receipt_harnesses).issubset(APPROVED_HARNESSES)
+        or not isinstance(errors, list)
+        or len(errors) > MAX_RECEIPT_ERRORS
+        or not is_bounded_metadata_string(receipt_path_value)
+    ):
+        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    receipt_path = Path(receipt_path_value)
+    if (
+        not receipt_path.is_absolute()
+        or receipt_path.as_posix() != receipt_path_value
+        or tuple(receipt_path.parts[-4:])
+        != ("hosts", host_id, "receipts", receipt_relative.name)
+    ):
+        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    for error in errors:
+        if (
+            not isinstance(error, dict)
+            or set(error) != {"component", "error_type"}
+            or error.get("component") not in {"hub", "publication", "receipt_publication"}
+            or not is_bounded_metadata_string(error.get("error_type"))
+        ):
+            raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    if bool(errors) != (receipt.get("status") == "failed"):
+        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    for harness, result in receipt_harnesses.items():
+        validate_harness_receipt_metadata(harness, result)
+    validate_hub_receipt_metadata(receipt.get("hub"))
+    validate_publication_receipt_metadata(receipt.get("publication"))
+    if "receipt_publication" in receipt:
+        validate_publication_receipt_metadata(receipt["receipt_publication"])
+    return receipt
+
+
 def validate_publish_manifest(
     source_root: Path,
     host_id: str,
@@ -2056,35 +2802,33 @@ def validate_publish_manifest(
     receipt_path = source_root / receipt_relative
     if receipt_path not in receipt_paths:
         raise ValueError(f"manifest receipt is missing: {host_id}")
-    receipt_payload = read_bytes_nofollow(receipt_path)
+    receipt_payload = read_bytes_nofollow(
+        receipt_path,
+        max_bytes=MAX_RECEIPT_METADATA_BYTES,
+        size_label="manifest-bound receipt",
+    )
     if hashlib.sha256(receipt_payload).hexdigest() != receipt_binding["sha256"]:
         raise ValueError(f"manifest receipt hash mismatch: {host_id}")
-    receipt = json.loads(receipt_payload)
-    if not isinstance(receipt, dict):
-        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    receipt = parse_canonical_json(
+        receipt_payload,
+        size_label="manifest-bound receipt",
+    )
+    validate_manifest_bound_receipt_metadata(
+        receipt,
+        manifest,
+        host_id,
+        receipt_relative,
+    )
     receipt_harnesses = receipt.get("harnesses")
-    collection_status = receipt.get("collection_status", receipt.get("status"))
     if (
-        receipt.get("schema_version") != 1
-        or receipt.get("host_id") != host_id
-        or receipt.get("run_id") != manifest["run_id"]
-        or receipt.get("extractor_sha256") != manifest["extractor_sha256"]
-        or receipt.get("config_sha256") != manifest["config_sha256"]
-        or collection_status not in {"completed", "completed_with_absent_harnesses"}
-        or not isinstance(receipt_harnesses, dict)
-        or not set(receipt_harnesses).issubset(APPROVED_HARNESSES)
-        or not present_harnesses.issubset(receipt_harnesses)
+        not present_harnesses.issubset(receipt_harnesses)
+        or any(
+            receipt_harnesses[harness].get("status") == "not_present_on_host"
+            for harness in present_harnesses
+        )
     ):
         raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
     for harness in present_harnesses:
-        result = receipt_harnesses[harness]
-        if not isinstance(result, dict) or result.get("status") in {
-            "failed",
-            "partial",
-            "source_missing",
-            "not_present_on_host",
-        }:
-            raise ValueError(f"manifest receipt has incomplete {harness} extraction")
         binding = harnesses.get(harness)
         object_digests = (
             binding.get("object_sha256") if isinstance(binding, dict) else None
