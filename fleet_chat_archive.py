@@ -40,30 +40,41 @@ APPROVED_SOURCE_KEYS = {
     "hermes_exports",
     "hermes_instances",
 }
-PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
-    re.IGNORECASE | re.DOTALL,
+PRIVATE_KEY_PATTERN = (
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
 )
-SENSITIVE_NAME_PATTERN = (
-    r"(?:[A-Za-z0-9_.-]*"
-    r"(?:api[_-]?key|credential(?:s)?|password|passwd|"
-    r"secret(?:[_-]?(?:key|access[_-]?key))?|"
-    r"(?:access|auth|refresh)[_-]?token|token))"
-)
-SENSITIVE_ASSIGNMENT_MARKER_RE = re.compile(
-    rf"(?i)(?<![A-Za-z0-9_.-])[\"']?{SENSITIVE_NAME_PATTERN}[\"']?\s*[:=]"
-)
-PROVIDER_TOKEN_RE = re.compile(
+PROVIDER_TOKEN_PATTERN = (
     r"\b(?:sk-[A-Za-z0-9_-]{20,}|gh[opusr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b"
 )
-JWT_RE = re.compile(
+JWT_PATTERN = (
     r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
 )
-AUTH_HEADER_RE = re.compile(
-    r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*[^\r\n]+"
+AUTH_HEADER_PATTERN = r"\b(?:authorization|proxy-authorization)\s*:\s*[^\r\n]+"
+COOKIE_HEADER_PATTERN = r"\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+"
+GENERIC_BEARER_PATTERN = r"\b(?:bearer|basic)\s+[A-Za-z0-9+/=_-]{8,}"
+PRIVATE_KEY_RE = re.compile(
+    PRIVATE_KEY_PATTERN,
+    re.IGNORECASE | re.DOTALL,
 )
-COOKIE_HEADER_RE = re.compile(r"(?i)\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+")
-GENERIC_BEARER_RE = re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9+/=_-]{8,}")
+PROVIDER_TOKEN_RE = re.compile(
+    PROVIDER_TOKEN_PATTERN
+)
+JWT_RE = re.compile(JWT_PATTERN)
+AUTH_HEADER_RE = re.compile(AUTH_HEADER_PATTERN, re.IGNORECASE)
+COOKIE_HEADER_RE = re.compile(COOKIE_HEADER_PATTERN, re.IGNORECASE)
+GENERIC_BEARER_RE = re.compile(GENERIC_BEARER_PATTERN, re.IGNORECASE)
+REDACTABLE_SECRET_PATTERN = "|".join(
+    (
+        f"(?is:{PRIVATE_KEY_PATTERN})",
+        f"(?:{PROVIDER_TOKEN_PATTERN})",
+        f"(?:{JWT_PATTERN})",
+        f"(?i:{AUTH_HEADER_PATTERN})",
+        f"(?i:{COOKIE_HEADER_PATTERN})",
+        f"(?i:{GENERIC_BEARER_PATTERN})",
+    )
+)
+REDACTABLE_SECRET_RE = re.compile(REDACTABLE_SECRET_PATTERN)
+RESIDUAL_SECRET_RE = re.compile(REDACTABLE_SECRET_PATTERN)
 SENSITIVE_KEY_PARTS = {
     "apikey",
     "accesstoken",
@@ -84,6 +95,35 @@ SENSITIVE_KEY_PARTS = {
     "setcookie",
     "token",
 }
+ASSIGNMENT_KEY_TERMINALS = (
+    "authorization",
+    "credentials",
+    "credential",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "cookie",
+    "key",
+)
+REDACTABLE_TEXT_MARKERS = (
+    "-----begin",
+    "authorization",
+    "cookie",
+    "bearer",
+    "basic",
+    "sk-",
+    "gho_",
+    "ghp_",
+    "ghr_",
+    "ghs_",
+    "ghu_",
+    "akia",
+    "eyj",
+)
+REGEX_CASE_TRANSLATION = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZİıſK", "abcdefghijklmnopqrstuvwxyziisk"
+)
 OBJECT_NAME_RE = re.compile(r"[0-9a-f]{64}\.json\Z")
 APPROVED_HARNESSES = {"claude", "codex", "openclaw", "hermes"}
 HARNESS_SOURCES = {
@@ -228,7 +268,12 @@ def secure_mkdir(path: Path) -> None:
 
 
 def normalized_key(value: object) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+    return re.sub(r"[^a-z0-9]", "", regex_compatible_lower(str(value)))
+
+
+def regex_compatible_lower(value: str) -> str:
+    """Apply Python re.I's ASCII case equivalents without changing offsets."""
+    return value.translate(REGEX_CASE_TRANSLATION)
 
 
 def is_sensitive_key(value: object) -> bool:
@@ -238,29 +283,51 @@ def is_sensitive_key(value: object) -> bool:
     )
 
 
-def has_residual_assignment(value: str) -> bool:
-    return value != "[REDACTED]" and bool(SENSITIVE_ASSIGNMENT_MARKER_RE.search(value))
+def has_residual_assignment(value: str, lowered: str | None = None) -> bool:
+    if value == "[REDACTED]" or (":" not in value and "=" not in value):
+        return False
+    lowered = regex_compatible_lower(value) if lowered is None else lowered
+    length = len(value)
+    key_characters = "abcdefghijklmnopqrstuvwxyz0123456789_.-"
+    for terminal in ASSIGNMENT_KEY_TERMINALS:
+        start = 0
+        while True:
+            terminal_start = lowered.find(terminal, start)
+            if terminal_start < 0:
+                break
+            terminal_end = terminal_start + len(terminal)
+            cursor = terminal_end
+            while cursor < length and value[cursor] == "\\":
+                cursor += 1
+            if cursor < length and value[cursor] in "\"'":
+                cursor += 1
+            while cursor < length and value[cursor].isspace():
+                cursor += 1
+            if cursor < length and value[cursor] in ":=":
+                key_start = terminal_start
+                while (
+                    key_start > 0
+                    and lowered[key_start - 1] in key_characters
+                ):
+                    key_start -= 1
+                if is_sensitive_key(value[key_start:terminal_end]):
+                    return True
+            start = terminal_end
+    return False
 
 
 def redact_text(value: str) -> tuple[str, int]:
-    redactions = 0
-    value, count = PRIVATE_KEY_RE.subn("[REDACTED]", value)
-    redactions += count
+    lowered = regex_compatible_lower(value)
     # Assignment values can be multiline YAML blocks, shell $'...' strings, or
     # escaped serialized JSON. Redact the containing string as one unit rather
     # than risk preserving a suffix the parser cannot safely delimit.
-    if SENSITIVE_ASSIGNMENT_MARKER_RE.search(value):
-        return "[REDACTED]", redactions + 1
-    for pattern in (
-        AUTH_HEADER_RE,
-        COOKIE_HEADER_RE,
-        GENERIC_BEARER_RE,
-        PROVIDER_TOKEN_RE,
-        JWT_RE,
+    if has_residual_assignment(value, lowered):
+        return "[REDACTED]", 1
+    if value.isascii() and not any(
+        marker in lowered for marker in REDACTABLE_TEXT_MARKERS
     ):
-        value, count = pattern.subn("[REDACTED]", value)
-        redactions += count
-    return value, redactions
+        return value, 0
+    return REDACTABLE_SECRET_RE.subn("[REDACTED]", value)
 
 
 def redact_value(value):
@@ -300,9 +367,7 @@ def residual_secret_paths(value: object, path: str = "$") -> list[str]:
     if isinstance(value, dict):
         for key, item in value.items():
             key_has_secret = isinstance(key, str) and (
-                bool(PROVIDER_TOKEN_RE.search(key))
-                or bool(JWT_RE.search(key))
-                or bool(PRIVATE_KEY_RE.search(key))
+                bool(RESIDUAL_SECRET_RE.search(key))
                 or has_residual_assignment(key)
             )
             child_path = f"{path}.<sensitive-key>" if key_has_secret else f"{path}.{key}"
@@ -315,13 +380,13 @@ def residual_secret_paths(value: object, path: str = "$") -> list[str]:
         for index, item in enumerate(value):
             findings.extend(residual_secret_paths(item, f"{path}[{index}]"))
     elif isinstance(value, str):
-        if (
-            PRIVATE_KEY_RE.search(value)
-            or PROVIDER_TOKEN_RE.search(value)
-            or JWT_RE.search(value)
-            or AUTH_HEADER_RE.search(value)
-            or COOKIE_HEADER_RE.search(value)
-            or has_residual_assignment(value)
+        lowered = regex_compatible_lower(value)
+        if has_residual_assignment(value, lowered) or (
+            (
+                not value.isascii()
+                or any(marker in lowered for marker in REDACTABLE_TEXT_MARKERS)
+            )
+            and RESIDUAL_SECRET_RE.search(value)
         ):
             findings.append(path)
     return findings
@@ -1068,8 +1133,7 @@ def validated_shard_files(
                 raise ValueError(f"unexpected receipt path: {relative}")
 
             if "objects" in relative.parts:
-                if not require_healthy_receipt:
-                    validate_object_file(candidate)
+                pass
             elif name in {"index.json", "publish-manifest.json"} or top_level == "receipts":
                 if not require_healthy_receipt:
                     read_json_nofollow(candidate)

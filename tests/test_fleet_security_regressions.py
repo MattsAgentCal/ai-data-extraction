@@ -656,6 +656,47 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(cleaned[key], 42)
             self.assertEqual(count, 0)
 
+    def test_assignment_scanner_handles_case_prefixes_and_escaped_keys(self):
+        sentinel = "SENTINEL-" + "q" * 24
+        sensitive = (
+            f"my.secret-access_key = {sentinel}",
+            f"ReFrEsH-ToKeN: {sentinel}",
+            f'{{\\"password\\": \\"{sentinel}\\"}}',
+            f"PRIVATE.KEY={sentinel}",
+            f"Unicode İ before PASSWORD={sentinel}",
+            f"İPASSWORD={sentinel}",
+            f"İsecretKey: {sentinel}",
+            f"İMY_SECRET={sentinel}",
+            f"PAſSWORD={sentinel}",
+            f"TOKEN={sentinel}",
+            f"SECRETKEY={sentinel}",
+        )
+        for sample in sensitive:
+            cleaned, count = fleet.redact_text(sample)
+            self.assertEqual(cleaned, "[REDACTED]", sample)
+            self.assertEqual(count, 1, sample)
+        for sample in ("monkey: 42", "token_count: 42", "tokenizer=42"):
+            cleaned, count = fleet.redact_text(sample)
+            self.assertEqual(cleaned, sample)
+            self.assertEqual(count, 0)
+
+        self.assertEqual(
+            fleet.residual_secret_paths("bEaReR abcdefghijklmnop"), ["$"]
+        )
+
+        unicode_casefold_secrets = (
+            "AUTHORIZATİON: ApiKey opaque-value",
+            "BASİC abcdefghijklmnop",
+            "BAſIC abcdefghijklmnop",
+            "COOKIE: session=opaque-value",
+        )
+        for sample in unicode_casefold_secrets:
+            cleaned, count = fleet.redact_text(sample)
+            self.assertNotEqual(cleaned, sample)
+            self.assertGreaterEqual(count, 1)
+            self.assertEqual(fleet.residual_secret_paths(cleaned), [])
+            self.assertEqual(fleet.residual_secret_paths(sample), ["$"])
+
     def test_archive_blocks_a_residual_structured_secret(self):
         with safe_temporary_directory() as tmp:
             archive_root = Path(tmp) / "archive"
@@ -951,6 +992,7 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                     "test-mac",
                     allow_non_google_drive=True,
                 )
+
             except ValueError:
                 result = None
 
@@ -960,6 +1002,19 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                     "published",
                     "publication accepted a corrupt existing object",
                 )
+
+    def test_unmanifested_shard_validation_checks_each_object_once(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "test-mac"
+            write_archive_object(shard, host_id="test-mac")
+            real_validate = fleet.validate_object_file
+            with mock.patch.object(
+                fleet, "validate_object_file", wraps=real_validate
+            ) as validate:
+                fleet.validated_shard_files(
+                    shard, "test-mac", require_healthy_receipt=False
+                )
+            self.assertEqual(validate.call_count, 1)
 
     def test_spool_preflight_happens_before_hermes_export(self):
         with safe_temporary_directory() as tmp:
