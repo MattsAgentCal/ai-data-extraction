@@ -2528,6 +2528,26 @@ def validate_index_file(
     validation_proofs: ObjectValidationProofCache | None = None,
 ) -> dict:
     index = validate_index_metadata(index_path, host_id, harness)
+    return validate_index_object_set(
+        index,
+        source_root,
+        host_id,
+        harness,
+        require_exact_object_set=require_exact_object_set,
+        validation_proofs=validation_proofs,
+    )
+
+
+def validate_index_object_set(
+    index: dict,
+    source_root: Path,
+    host_id: str,
+    harness: str,
+    *,
+    require_exact_object_set: bool = True,
+    validation_proofs: ObjectValidationProofCache | None = None,
+) -> dict:
+    index = validate_index_value(index, host_id, harness)
     referenced: set[str] = set()
     for row in index["conversations"]:
         digest = row["object_sha256"]
@@ -3542,6 +3562,71 @@ def merge_index_values(source_index: dict, destination_index: dict | None) -> di
     }
 
 
+def is_regenerable_legacy_duplicate_index(
+    destination_index: object,
+    destination_index_path: Path,
+    expected_host_id: str,
+    expected_harness: str,
+) -> bool:
+    """Recognize only manifest-era logical duplicates backed by legacy bodies."""
+    if not isinstance(destination_index, dict):
+        return False
+    host_id = destination_index.get("host_id")
+    harness = destination_index.get("harness")
+    rows = destination_index.get("conversations")
+    if (
+        host_id != expected_host_id
+        or harness != expected_harness
+        or expected_harness not in APPROVED_HARNESSES
+        or not isinstance(rows, list)
+        or len(rows) < 2
+        or rows
+        != sorted(
+            rows,
+            key=lambda row: (
+                str(row.get("session_id")) if isinstance(row, dict) else "",
+                row.get("object_sha256", "") if isinstance(row, dict) else "",
+            ),
+        )
+    ):
+        return False
+
+    seen_identities: set[tuple[object, ...]] = set()
+    duplicate_identity = False
+    for row in rows:
+        single_row_index = dict(destination_index)
+        single_row_index["conversations"] = [row]
+        try:
+            validate_index_value(single_row_index, host_id, harness)
+        except (LegacyArchiveSchemaError, ValueError):
+            return False
+        identity = archive_row_identity(row)
+        if identity in seen_identities:
+            duplicate_identity = True
+        seen_identities.add(identity)
+    if not duplicate_identity:
+        return False
+
+    objects_root = destination_index_path.parent / "objects"
+    for row in rows:
+        object_path = objects_root / f"{row['object_sha256']}.json"
+        try:
+            archived = read_json_nofollow(object_path)
+        except (OSError, ValueError):
+            return False
+        if (
+            not isinstance(archived, dict)
+            or hashlib.sha256(canonical_json(archived)).hexdigest()
+            != row["object_sha256"]
+            or "archive_schema_version" in archived
+            or "schema_version" in archived
+            or archived.get("source") != row["source"]
+            or archived.get("session_id") != row["session_id"]
+        ):
+            return False
+    return True
+
+
 def merge_index_file(source: Path, destination: Path) -> bool:
     source_index = read_json_nofollow(source)
     source_host_id = source_index.get("host_id")
@@ -4038,6 +4123,7 @@ def merge_host_shard(
     )
     rollback_payloads: dict[Path, bytes | None] = {}
     attempted_payloads: dict[Path, bytes] = {}
+    legacy_duplicate_replacements: dict[Path, bytes] = {}
     touched_mutable_destinations: list[Path] = []
     newly_created_paths: dict[Path, str] = {}
     newly_created_directories: set[Path] = set()
@@ -4055,18 +4141,48 @@ def merge_host_shard(
                 previous_payload = mutable_destination_payload(destination)
                 rollback_payloads[destination] = previous_payload
                 if source.name == "index.json" and not require_healthy_receipt:
-                    source_index = read_json_nofollow(source)
+                    harness = relative.parts[0]
+                    source_payload = read_bytes_nofollow(source)
+                    source_index = exact_json_loads(
+                        source_payload,
+                        label=f"{harness} staged archive index",
+                    )
+                    validate_index_object_set(
+                        source_index,
+                        source.parent.parent,
+                        host_id,
+                        harness,
+                        validation_proofs=None,
+                    )
                     destination_index = (
-                        json.loads(previous_payload)
+                        exact_json_loads(
+                            previous_payload,
+                            label=f"{harness} destination archive index",
+                        )
                         if previous_payload is not None
                         else None
                     )
-                    attempted_payloads[destination] = (
-                        canonical_json(
-                            merge_index_values(source_index, destination_index)
+                    if (
+                        defer_destination_validation
+                        and destination_index is not None
+                        and is_regenerable_legacy_duplicate_index(
+                            destination_index,
+                            destination,
+                            host_id,
+                            harness,
                         )
-                        + b"\n"
-                    )
+                    ):
+                        attempted_payloads[destination] = source_payload
+                        legacy_duplicate_replacements[destination] = (
+                            attempted_payloads[destination]
+                        )
+                    else:
+                        attempted_payloads[destination] = (
+                            canonical_json(
+                                merge_index_values(source_index, destination_index)
+                            )
+                            + b"\n"
+                        )
                 else:
                     attempted_payloads[destination] = read_bytes_nofollow(source)
     try:
@@ -4097,11 +4213,16 @@ def merge_host_shard(
                     )
                 touched_mutable_destinations.append(destination)
             if source.name == "index.json":
-                changed = (
-                    copy_verified_file(source, destination, immutable=False)
-                    if require_healthy_receipt
-                    else merge_index_file(source, destination)
-                )
+                if require_healthy_receipt:
+                    changed = copy_verified_file(source, destination, immutable=False)
+                elif destination in legacy_duplicate_replacements:
+                    replacement_payload = legacy_duplicate_replacements[destination]
+                    current_payload = mutable_destination_payload(destination)
+                    changed = current_payload != replacement_payload
+                    if changed:
+                        atomic_write_bytes(destination, replacement_payload)
+                else:
+                    changed = merge_index_file(source, destination)
             elif immutable and not require_healthy_receipt and "objects" in relative.parts:
                 changed = link_verified_local_object(source, destination)
             else:

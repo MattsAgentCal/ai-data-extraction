@@ -100,6 +100,118 @@ def write_archive_object(
     return object_path, payload
 
 
+def write_legacy_duplicate_claude_index(
+    shard: Path,
+    *,
+    host_id: str = "test-mac",
+    session_id: str = "legacy-duplicate-session",
+) -> tuple[Path, list[str]]:
+    object_root = shard / "claude" / "objects"
+    object_root.mkdir(parents=True, exist_ok=True)
+    rows = []
+    digests = []
+    for content in ("legacy body one", "legacy body two"):
+        legacy_conversation = {
+            "source": "claude-code",
+            "session_id": session_id,
+            "messages": [{"role": "user", "content": content}],
+        }
+        payload = fleet.canonical_json(legacy_conversation)
+        digest = hashlib.sha256(payload).hexdigest()
+        (object_root / f"{digest}.json").write_bytes(payload + b"\n")
+        digests.append(digest)
+        rows.append(
+            {
+                "object_sha256": digest,
+                "session_id": session_id,
+                "source": "claude-code",
+            }
+        )
+    rows.sort(key=lambda row: (row["session_id"], row["object_sha256"]))
+    index_path = shard / "claude" / "index.json"
+    write_canonical_json(
+        index_path,
+        {
+            "schema_version": 1,
+            "host_id": host_id,
+            "harness": "claude",
+            "conversations": rows,
+        },
+    )
+    return index_path, sorted(digests)
+
+
+def write_legacy_duplicate_manifest(shard: Path) -> tuple[Path, Path]:
+    index_path, digests = write_legacy_duplicate_claude_index(
+        shard, host_id=shard.name
+    )
+    receipt_path = shard / "receipts" / f"{TEST_RUN_ID}.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "schema_version": 1,
+        "extractor_sha256": "a" * 64,
+        "config_sha256": "c" * 64,
+        "run_id": TEST_RUN_ID,
+        "collected_at": "2026-08-27T00:00:00+00:00",
+        "host_id": shard.name,
+        "collection_status": "completed",
+        "status": "completed",
+        "errors": [],
+        "harnesses": {"claude": {"status": "collected"}},
+        "hub": {"remotes": {}},
+        "publication": {"status": "blocked_no_drive_root", "files_copied": 0},
+        "receipt_path": str(receipt_path),
+    }
+    write_canonical_json(receipt_path, receipt)
+    write_canonical_json(
+        shard / "publish-manifest.json",
+        {
+            "schema_version": 1,
+            "host_id": shard.name,
+            "run_id": TEST_RUN_ID,
+            "generated_at": "2026-08-27T00:00:00.000000+00:00",
+            "extractor_sha256": receipt["extractor_sha256"],
+            "config_sha256": receipt["config_sha256"],
+            "receipt": {
+                "path": f"receipts/{receipt_path.name}",
+                "sha256": fleet.file_sha256(receipt_path),
+            },
+            "harnesses": {
+                "claude": {
+                    "index_sha256": fleet.file_sha256(index_path),
+                    "object_sha256": digests,
+                }
+            },
+        },
+    )
+    return index_path, shard / "publish-manifest.json"
+
+
+def write_current_claude_staging(
+    root: Path,
+    *,
+    host_id: str = "test-mac",
+    session_id: str = "legacy-duplicate-session",
+) -> Path:
+    fleet.archive_conversations(
+        root,
+        host_id,
+        "claude",
+        [
+            {
+                "archive_schema_version": 2,
+                "source": "claude-code",
+                "session_id": session_id,
+                "messages": [{"role": "user", "content": "regenerated body"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/regenerated.jsonl",
+            }
+        ],
+    )
+    return root / "hosts" / host_id
+
+
 def write_healthy_receipt(shard: Path, harness: str = "claude") -> Path:
     receipt = shard / "receipts" / f"{TEST_RUN_ID}.json"
     receipt.parent.mkdir(parents=True, exist_ok=True)
@@ -3611,6 +3723,347 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 "test-mac",
                 require_healthy_receipt=False,
             )
+
+    def test_transaction_regenerates_manifest_era_duplicate_claude_index(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination_parent = root / "spool"
+            destination_shard = destination_parent / "hosts" / "test-mac"
+            _legacy_index, legacy_digests = write_legacy_duplicate_claude_index(
+                destination_shard
+            )
+            staged_shard = write_current_claude_staging(root / "staged")
+            staged_index = (staged_shard / "claude" / "index.json").read_bytes()
+
+            result = fleet.merge_host_shard(
+                staged_shard,
+                destination_parent,
+                "test-mac",
+                require_healthy_receipt=False,
+                _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+            )
+
+            self.assertEqual(result["status"], "pending_validation")
+            self.assertEqual(
+                (destination_shard / "claude" / "index.json").read_bytes(),
+                staged_index,
+            )
+            for digest in legacy_digests:
+                self.assertTrue(
+                    (
+                        destination_shard
+                        / "claude"
+                        / "objects"
+                        / f"{digest}.json"
+                    ).is_file()
+                )
+            fleet.validate_index_file(
+                destination_shard / "claude" / "index.json",
+                destination_shard,
+                "test-mac",
+                "claude",
+                require_exact_object_set=False,
+            )
+
+    def test_standalone_merge_rejects_manifest_era_duplicate_claude_index(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination_parent = root / "spool"
+            write_legacy_duplicate_claude_index(
+                destination_parent / "hosts" / "test-mac"
+            )
+            staged_shard = write_current_claude_staging(root / "staged")
+
+            with self.assertRaisesRegex(
+                ValueError, "duplicate logical archive index row for claude"
+            ):
+                fleet.merge_host_shard(
+                    staged_shard,
+                    destination_parent,
+                    "test-mac",
+                    require_healthy_receipt=False,
+                )
+
+    def test_transaction_rejects_malformed_legacy_duplicate_claude_index(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination_parent = root / "spool"
+            destination_index, _digests = write_legacy_duplicate_claude_index(
+                destination_parent / "hosts" / "test-mac"
+            )
+            malformed = json.loads(destination_index.read_text())
+            malformed["conversations"][0]["unexpected"] = "must fail closed"
+            write_canonical_json(destination_index, malformed)
+            staged_shard = write_current_claude_staging(root / "staged")
+
+            with self.assertRaisesRegex(ValueError, "invalid archive index row schema"):
+                fleet.merge_host_shard(
+                    staged_shard,
+                    destination_parent,
+                    "test-mac",
+                    require_healthy_receipt=False,
+                    _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+                )
+
+    def test_transaction_rejects_mismatched_legacy_destination_identity(self):
+        mismatches = {"host_id": "other-mac", "harness": "hermes"}
+        for field, value in mismatches.items():
+            with self.subTest(field=field), safe_temporary_directory() as tmp:
+                root = Path(tmp)
+                destination_parent = root / "spool"
+                destination_index, _digests = write_legacy_duplicate_claude_index(
+                    destination_parent / "hosts" / "test-mac"
+                )
+                mismatched = json.loads(destination_index.read_text())
+                mismatched[field] = value
+                write_canonical_json(destination_index, mismatched)
+                staged_shard = write_current_claude_staging(root / "staged")
+
+                with self.assertRaisesRegex(
+                    ValueError, "refusing to merge indexes with different identities"
+                ):
+                    fleet.merge_host_shard(
+                        staged_shard,
+                        destination_parent,
+                        "test-mac",
+                        require_healthy_receipt=False,
+                        _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+                    )
+
+    def test_transaction_rejects_non_exact_legacy_destination_json(self):
+        corruptions = {
+            "duplicate_nested_key": (
+                b'"session_id":"legacy-duplicate-session"',
+                b'"session_id":"legacy-duplicate-session",'
+                b'"session_id":"legacy-duplicate-session"',
+                "duplicate JSON key",
+            ),
+            "non_finite_constant": (
+                b'"schema_version":1',
+                b'"schema_version":NaN',
+                "non-finite JSON constant",
+            ),
+        }
+        for name, (needle, replacement, expected_error) in corruptions.items():
+            with self.subTest(name=name), safe_temporary_directory() as tmp:
+                root = Path(tmp)
+                destination_parent = root / "spool"
+                destination_index, _digests = write_legacy_duplicate_claude_index(
+                    destination_parent / "hosts" / "test-mac"
+                )
+                payload = destination_index.read_bytes()
+                self.assertIn(needle, payload)
+                destination_index.write_bytes(payload.replace(needle, replacement, 1))
+                staged_shard = write_current_claude_staging(root / "staged")
+
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    fleet.merge_host_shard(
+                        staged_shard,
+                        destination_parent,
+                        "test-mac",
+                        require_healthy_receipt=False,
+                        _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+                    )
+
+    def test_transaction_rejects_unknown_legacy_object_schema_markers(self):
+        for schema_marker in (3, "2", None):
+            with self.subTest(schema_marker=schema_marker), safe_temporary_directory() as tmp:
+                root = Path(tmp)
+                destination_parent = root / "spool"
+                destination_index, _digests = write_legacy_duplicate_claude_index(
+                    destination_parent / "hosts" / "test-mac"
+                )
+                index = json.loads(destination_index.read_text())
+                object_root = destination_index.parent / "objects"
+                rewritten_rows = []
+                for row in index["conversations"]:
+                    old_path = object_root / f"{row['object_sha256']}.json"
+                    value = json.loads(old_path.read_text())
+                    value["archive_schema_version"] = schema_marker
+                    payload = fleet.canonical_json(value)
+                    digest = hashlib.sha256(payload).hexdigest()
+                    (object_root / f"{digest}.json").write_bytes(payload + b"\n")
+                    old_path.unlink()
+                    rewritten_rows.append({**row, "object_sha256": digest})
+                index["conversations"] = sorted(
+                    rewritten_rows,
+                    key=lambda row: (row["session_id"], row["object_sha256"]),
+                )
+                write_canonical_json(destination_index, index)
+                staged_shard = write_current_claude_staging(root / "staged")
+
+                with self.assertRaisesRegex(
+                    ValueError, "duplicate logical archive index row for claude"
+                ):
+                    fleet.merge_host_shard(
+                        staged_shard,
+                        destination_parent,
+                        "test-mac",
+                        require_healthy_receipt=False,
+                        _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+                    )
+
+    def test_legacy_replacement_uses_captured_bytes_and_rolls_back_source_swap(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination_parent = root / "spool"
+            destination_shard = destination_parent / "hosts" / "test-mac"
+            destination_index, _digests = write_legacy_duplicate_claude_index(
+                destination_shard
+            )
+            prior_index = destination_index.read_bytes()
+            staged_shard = write_current_claude_staging(root / "staged")
+            staged_index = staged_shard / "claude" / "index.json"
+            source_swapped = False
+            real_atomic_write = fleet.atomic_write_bytes
+            real_validate_index = fleet.validate_index_file
+
+            def swap_source_at_destination_write(path, payload):
+                nonlocal source_swapped
+                if path == destination_index and not source_swapped:
+                    staged_index.write_bytes(b"{}\n")
+                    source_swapped = True
+                return real_atomic_write(path, payload)
+
+            def fail_after_replacement(index_path, *args, **kwargs):
+                if source_swapped and index_path == destination_index:
+                    raise ValueError("synthetic post-replacement validation failure")
+                return real_validate_index(index_path, *args, **kwargs)
+
+            with mock.patch.object(
+                fleet, "atomic_write_bytes", side_effect=swap_source_at_destination_write
+            ), mock.patch.object(
+                fleet, "validate_index_file", side_effect=fail_after_replacement
+            ), self.assertRaisesRegex(
+                ValueError, "synthetic post-replacement validation failure"
+            ):
+                fleet.merge_host_shard(
+                    staged_shard,
+                    destination_parent,
+                    "test-mac",
+                    require_healthy_receipt=False,
+                    _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+                )
+
+            self.assertTrue(source_swapped)
+            self.assertEqual(destination_index.read_bytes(), prior_index)
+
+    def test_legacy_replacement_rejects_row_drop_during_source_capture(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination_parent = root / "spool"
+            destination_shard = destination_parent / "hosts" / "test-mac"
+            destination_index, _digests = write_legacy_duplicate_claude_index(
+                destination_shard
+            )
+            prior_index = destination_index.read_bytes()
+            staged_root = root / "staged"
+            staged_shard = write_current_claude_staging(staged_root)
+            fleet.archive_conversations(
+                staged_root,
+                "test-mac",
+                "claude",
+                [
+                    {
+                        "archive_schema_version": 2,
+                        "source": "claude-code",
+                        "session_id": "second-current-session",
+                        "messages": [{"role": "user", "content": "second body"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/second.jsonl",
+                    }
+                ],
+            )
+            staged_index = staged_shard / "claude" / "index.json"
+            self.assertEqual(
+                len(json.loads(staged_index.read_text())["conversations"]), 2
+            )
+            race_fired = False
+            real_read_bytes = fleet.read_bytes_nofollow
+
+            def drop_row_at_capture(path, *args, **kwargs):
+                nonlocal race_fired
+                if path == staged_index and not race_fired:
+                    value = json.loads(staged_index.read_text())
+                    value["conversations"] = value["conversations"][:1]
+                    write_canonical_json(staged_index, value)
+                    race_fired = True
+                return real_read_bytes(path, *args, **kwargs)
+
+            with mock.patch.object(
+                fleet, "read_bytes_nofollow", side_effect=drop_row_at_capture
+            ), self.assertRaisesRegex(
+                ValueError, "archive index/object set mismatch for claude"
+            ):
+                fleet.merge_host_shard(
+                    staged_shard,
+                    destination_parent,
+                    "test-mac",
+                    require_healthy_receipt=False,
+                    _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+                )
+
+            self.assertTrue(race_fired)
+            self.assertEqual(destination_index.read_bytes(), prior_index)
+
+    def test_later_harness_failure_restores_legacy_duplicate_snapshot(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            spool = root / "spool"
+            shard = spool / "hosts" / "test-mac"
+            index_path, manifest_path = write_legacy_duplicate_manifest(shard)
+            prior_index = index_path.read_bytes()
+            prior_manifest = manifest_path.read_bytes()
+            prior_objects = sorted(
+                path.name for path in (shard / "claude" / "objects").iterdir()
+            )
+
+            claude_root = root / "claude"
+            write_jsonl(
+                claude_root
+                / "projects"
+                / "sample"
+                / "legacy-duplicate-session.jsonl",
+                [
+                    {
+                        "sessionId": "legacy-duplicate-session",
+                        "type": "user",
+                        "message": {"content": "regenerated from source"},
+                    }
+                ],
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(spool),
+                        "drive_root": None,
+                        "sources": {
+                            "claude_roots": [str(claude_root)],
+                            "hermes_instances": [{"name": "later-failure"}],
+                        },
+                    }
+                )
+            )
+
+            with mock.patch.object(
+                fleet,
+                "export_hermes_instances",
+                side_effect=RuntimeError("synthetic later harness failure"),
+            ), mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 1)
+
+            self.assertEqual(index_path.read_bytes(), prior_index)
+            self.assertEqual(manifest_path.read_bytes(), prior_manifest)
+            self.assertEqual(
+                sorted(path.name for path in (shard / "claude" / "objects").iterdir()),
+                prior_objects,
+            )
+            snapshot = fleet.load_healthy_manifest_snapshot(shard, "test-mac")
+            self.assertIsNotNone(snapshot)
 
     def test_local_merges_defer_unrelated_legacy_validation_until_replacement(self):
         with safe_temporary_directory() as tmp:
