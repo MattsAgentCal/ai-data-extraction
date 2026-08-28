@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "host_id": "old-macbook",
+  "ssh_host": "oldmac",
+  "expected_remote_user": "mattrotundo",
+  "expected_remote_home": "/Users/mattrotundo",
+  "remote_repo_root": "/Users/mattrotundo/Projects/ai-data-extraction",
+  "retry_interval_seconds": 21600,
+  "archive_interval_seconds": 21600,
+  "runtime_files": [
+    "fleet_chat_archive.py",
+    "extract_claude_code.py",
+    "extract_codex.py",
+    "extract_openclaw.py",
+    "extract_hermes.py"
+  ],
+  "runtime_sha256": {
+    "fleet_chat_archive.py": "279635cfdbf689e45698cb139d9a2b3f7308e024e618e45deda002f225711d43",
+    "extract_claude_code.py": "3b6d311a208574f51813699b0885586d97cfc61c7e01a9dda6e97d09be6e9328",
+    "extract_codex.py": "50a34f07cc5abc4d19565bd855754c59fffe1165631f6c6c6cd2e6b3869d62e8",
+    "extract_openclaw.py": "a13ef9e016fa8b49a6839098377d95f16f1cd6b0f82896c9585de5e9316c2c1d",
+    "extract_hermes.py": "5d3211855af039e5caf660c2929831a9d460394866fe8b2eefcabcc8e65e372a"
+  },
+  "remote_config_relative_path": "configs/old-macbook.json"
+}
