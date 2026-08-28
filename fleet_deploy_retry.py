@@ -43,12 +43,12 @@ RUNTIME_FILES = (
     "extract_hermes.py",
 )
 REVIEWED_RUNTIME_SHA256 = {
-    "fleet_chat_archive.py": "1a0eb646ef1facb4dd7717b1870f3d259d09a6dbf6c0d680539818fde31854d2",
+    "fleet_chat_archive.py": "8ca5749b0744aa6e8efc6909ca32d06aa96dd03f17631ff20ada9c872d026c84",
     "archive_object_contract.py": "f31e840f49fcc9f35dc8223d1d0da3a479ae6da2de7fc62fac73ef6e8521825a",
     "extract_claude_code.py": "cc09aa37295d98572fdffcf6d8ef465d340e9154c1722f85871991aa9af8512e",
-    "extract_codex.py": "0e1254d39dd9978ad6e2da72f3198f6edae27dcb101b7342c6feee4f71b825c0",
+    "extract_codex.py": "6b7132413ad3dc3042ca4644d9ae30062f2a972da48809cdca376c0f35f377e6",
     "extract_openclaw.py": "6049a3832abcddb380b9a9845e4cd1ef264467358be8ad8ce000a11da3e1b84b",
-    "extract_hermes.py": "728f16453802b9e398b67a77d56b261b10898380cf75ea8d0ed0e06e9488281f",
+    "extract_hermes.py": "38d3b045050793e99474883d0edb8f83a44b8879fad634e0ff074b6f486413dc",
 }
 DEPLOYED_FILES = (*RUNTIME_FILES, REMOTE_CONFIG_RELATIVE_PATH)
 DEPLOY_CONFIG_KEYS = {

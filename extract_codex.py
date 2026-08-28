@@ -45,11 +45,22 @@ def _snapshot_identity(metadata):
     )
 
 
-def _descriptor_sha256(descriptor):
+def _descriptor_sha256(descriptor, *, byte_limit=None):
     digest = hashlib.sha256()
     os.lseek(descriptor, 0, os.SEEK_SET)
-    for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+    remaining = byte_limit
+    while remaining is None or remaining:
+        chunk = os.read(
+            descriptor,
+            1024 * 1024 if remaining is None else min(1024 * 1024, remaining),
+        )
+        if not chunk:
+            if remaining:
+                raise ValueError("source changed during bounded hashing")
+            break
         digest.update(chunk)
+        if remaining is not None:
+            remaining -= len(chunk)
     return digest.hexdigest()
 
 
@@ -73,6 +84,7 @@ def _open_regular_jsonl(
     path,
     *,
     expected_sha256=None,
+    expected_size=None,
     max_bytes=None,
 ):
     """Open one regular JSONL file without following a leaf symlink."""
@@ -114,35 +126,93 @@ def _open_regular_jsonl(
     if not stat.S_ISREG(metadata.st_mode):
         os.close(descriptor)
         raise ValueError(f"JSONL input must be a regular file: {path}")
-    if max_bytes is not None and metadata.st_size > max_bytes:
+    if expected_size is not None and (
+        type(expected_size) is not int or expected_size < 0
+    ):
+        os.close(descriptor)
+        raise ValueError("invalid expected Codex snapshot size")
+    snapshot_size = metadata.st_size if expected_size is None else expected_size
+    if metadata.st_size < snapshot_size:
+        os.close(descriptor)
+        raise ValueError(f"source changed before extraction: {path}")
+    if max_bytes is not None and snapshot_size > max_bytes:
         os.close(descriptor)
         raise ValueError(f"source exceeds maximum of {max_bytes} bytes: {path}")
     if expected_sha256 is not None:
-        actual_sha256 = _descriptor_sha256(descriptor)
+        actual_sha256 = _descriptor_sha256(
+            descriptor,
+            byte_limit=snapshot_size if expected_size is not None else None,
+        )
         final_metadata = os.fstat(descriptor)
-        if _snapshot_identity(metadata) != _snapshot_identity(final_metadata):
+        if expected_size is not None:
+            snapshot_changed = (
+                (metadata.st_dev, metadata.st_ino)
+                != (final_metadata.st_dev, final_metadata.st_ino)
+                or final_metadata.st_size < snapshot_size
+            )
+        else:
+            snapshot_changed = (
+                _snapshot_identity(metadata) != _snapshot_identity(final_metadata)
+            )
+        if snapshot_changed:
             os.close(descriptor)
             raise ValueError(f"source changed while hashing: {path}")
         if actual_sha256 != expected_sha256:
             os.close(descriptor)
             raise ValueError(f"source changed before extraction: {path}")
         os.lseek(descriptor, 0, os.SEEK_SET)
-    return os.fdopen(descriptor, "r", encoding="utf-8"), metadata
+    return os.fdopen(descriptor, "rb"), metadata
 
 
-def _verify_extracted_snapshot(handle, path, initial_metadata, expected_sha256):
+def _bounded_snapshot_lines(handle, path, expected_size):
+    if expected_size is None:
+        yield from handle
+        return
+    remaining = expected_size
+    while remaining:
+        line = handle.readline(remaining + 1)
+        if not line or len(line) > remaining:
+            raise ValueError(f"source changed at snapshot boundary: {path}")
+        remaining -= len(line)
+        yield line
+
+
+def _verify_extracted_snapshot(
+    handle, path, initial_metadata, expected_sha256, expected_size
+):
     descriptor = handle.fileno()
     final_metadata = os.fstat(descriptor)
-    if _snapshot_identity(initial_metadata) != _snapshot_identity(final_metadata):
+    if expected_size is not None:
+        snapshot_changed = (
+            (initial_metadata.st_dev, initial_metadata.st_ino)
+            != (final_metadata.st_dev, final_metadata.st_ino)
+            or final_metadata.st_size < expected_size
+            or handle.tell() != expected_size
+        )
+    else:
+        snapshot_changed = (
+            _snapshot_identity(initial_metadata) != _snapshot_identity(final_metadata)
+        )
+    if snapshot_changed:
         raise ValueError(f"source changed during extraction: {path}")
     if expected_sha256 is None:
         return
-    actual_sha256 = _descriptor_sha256(descriptor)
+    actual_sha256 = _descriptor_sha256(
+        descriptor,
+        byte_limit=expected_size if expected_size is not None else None,
+    )
     rehashed_metadata = os.fstat(descriptor)
-    if (
-        _snapshot_identity(initial_metadata) != _snapshot_identity(rehashed_metadata)
-        or actual_sha256 != expected_sha256
-    ):
+    if expected_size is not None:
+        rehash_changed = (
+            (initial_metadata.st_dev, initial_metadata.st_ino)
+            != (rehashed_metadata.st_dev, rehashed_metadata.st_ino)
+            or rehashed_metadata.st_size < expected_size
+        )
+    else:
+        rehash_changed = (
+            _snapshot_identity(initial_metadata) != _snapshot_identity(rehashed_metadata)
+        )
+    if rehash_changed or actual_sha256 != expected_sha256:
         raise ValueError(f"source changed during extraction: {path}")
 
 
@@ -306,6 +376,7 @@ def extract_codex_session(
     *,
     quality_out=None,
     expected_source_sha256=None,
+    expected_source_size=None,
     max_source_bytes=None,
     installation_identity=None,
 ):
@@ -357,15 +428,17 @@ def extract_codex_session(
     source_handle, source_metadata = _open_regular_jsonl(
         session_file,
         expected_sha256=expected_source_sha256,
+        expected_size=expected_source_size,
         max_bytes=max_source_bytes,
     )
     with source_handle as f:
-        for line in f:
+        for line in _bounded_snapshot_lines(f, session_file, expected_source_size):
             if not line.strip():
                 continue
             discovered_lines += 1
             try:
-                obj = json.loads(line)
+                decoded_line = line.decode("utf-8", errors="strict")
+                obj = json.loads(decoded_line)
                 if not isinstance(obj, dict):
                     failed_lines += 1
                     continue
@@ -556,13 +629,14 @@ def extract_codex_session(
                 else:
                     failed_lines += 1
 
-            except json.JSONDecodeError:
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 failed_lines += 1
         _verify_extracted_snapshot(
             f,
             session_file,
             source_metadata,
             expected_source_sha256,
+            expected_source_size,
         )
 
     quality = _quality(discovered_lines, parsed_lines, failed_lines)

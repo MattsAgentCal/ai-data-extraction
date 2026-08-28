@@ -970,6 +970,130 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 second["claude"]["quality"]["skipped_unchanged_files"], 1
             )
 
+    def test_claude_legacy_duplicate_index_forces_complete_source_regeneration(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude = root / "claude"
+            source = claude / "projects" / "sample" / "session.jsonl"
+            write_jsonl(
+                source,
+                [
+                    {
+                        "sessionId": "legacy-duplicate-session",
+                        "type": "user",
+                        "message": {"content": "regenerated from source"},
+                    }
+                ],
+            )
+            spool = root / "spool"
+            shard = spool / "hosts" / "test-mac"
+            write_legacy_duplicate_manifest(shard)
+            state_path = spool / "state" / "test-mac" / "claude.json"
+            fleet.save_incremental_state(
+                state_path,
+                {str(fleet.lexical_absolute(source)): fleet.source_fingerprint(source)},
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(spool),
+                        "drive_root": None,
+                        "sources": {"claude_roots": [str(claude)]},
+                    }
+                )
+            )
+
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            index = json.loads((shard / "claude" / "index.json").read_text())
+            manifest = json.loads((shard / "publish-manifest.json").read_text())
+            receipt = json.loads(
+                (shard / manifest["receipt"]["path"]).read_text()
+            )
+            quality = receipt["harnesses"]["claude"]["quality"]
+            self.assertEqual(quality["processed_files"], 1)
+            self.assertEqual(quality["skipped_unchanged_files"], 0)
+            self.assertEqual(len(index["conversations"]), 1)
+            object_path = (
+                shard
+                / "claude"
+                / "objects"
+                / f"{index['conversations'][0]['object_sha256']}.json"
+            )
+            self.assertEqual(
+                json.loads(object_path.read_text())["archive_schema_version"], 2
+            )
+
+    def test_openclaw_legacy_duplicate_index_with_warm_cache_fails_closed(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            openclaw = root / "openclaw"
+            source = openclaw / "session.jsonl"
+            write_jsonl(
+                source,
+                [
+                    {"type": "session", "version": 3, "id": "openclaw-session"},
+                    {
+                        "type": "message",
+                        "message": {"role": "user", "content": "source body"},
+                    },
+                ],
+            )
+            spool = root / "spool"
+            harness_root = spool / "hosts" / "test-mac" / "openclaw"
+            objects_root = harness_root / "objects"
+            objects_root.mkdir(parents=True)
+            rows = []
+            for body in ("legacy one", "legacy two"):
+                legacy = {
+                    "source": "openclaw",
+                    "session_id": "openclaw-session",
+                    "messages": [{"role": "user", "content": body}],
+                }
+                payload = fleet.canonical_json(legacy)
+                digest = hashlib.sha256(payload).hexdigest()
+                (objects_root / f"{digest}.json").write_bytes(payload + b"\n")
+                rows.append(
+                    {
+                        "object_sha256": digest,
+                        "session_id": "openclaw-session",
+                        "source": "openclaw",
+                    }
+                )
+            rows.sort(key=lambda row: (row["session_id"], row["object_sha256"]))
+            index_path = harness_root / "index.json"
+            write_canonical_json(
+                index_path,
+                {
+                    "schema_version": 1,
+                    "host_id": "test-mac",
+                    "harness": "openclaw",
+                    "conversations": rows,
+                },
+            )
+            state_path = spool / "state" / "test-mac" / "openclaw.json"
+            fleet.save_incremental_state(
+                state_path,
+                {str(fleet.lexical_absolute(source)): fleet.source_fingerprint(source)},
+            )
+            prior_index = index_path.read_bytes()
+            prior_state = state_path.read_bytes()
+
+            with self.assertRaisesRegex(ValueError, "duplicate logical"):
+                fleet.collect_sources(
+                    spool,
+                    "test-mac",
+                    openclaw_roots=[openclaw],
+                    _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+                )
+
+            self.assertEqual(index_path.read_bytes(), prior_index)
+            self.assertEqual(state_path.read_bytes(), prior_state)
+
     def test_transactional_multiharness_run_validates_live_objects_once(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -1144,7 +1268,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 second["codex"]["quality"]["skipped_unchanged_files"], 1
             )
 
-    def test_codex_append_after_prehash_commits_no_snapshot_or_state(self):
+    def test_codex_append_after_prehash_commits_prefix_then_reprocesses_growth(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
             codex = root / "codex"
@@ -1203,16 +1327,532 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 "_open_regular_jsonl",
                 side_effect=open_then_append,
             ), mock.patch("builtins.print"):
-                self.assertNotEqual(fleet.run_config(configured_args(config_path)), 0)
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
 
             spool = root / "spool"
             shard = spool / "hosts" / "test-mac"
-            self.assertFalse((shard / "codex").exists())
-            self.assertFalse((shard / "publish-manifest.json").exists())
-            self.assertFalse((spool / "state" / "test-mac" / "codex.json").exists())
+            self.assertTrue((shard / "publish-manifest.json").is_file())
+            self.assertTrue((spool / "state" / "test-mac" / "codex.json").is_file())
             receipts = list((shard / "receipts").glob("*.json"))
             self.assertEqual(len(receipts), 1)
             self.assertNotIn(appended_body, receipts[0].read_text())
+            first_index = json.loads((shard / "codex" / "index.json").read_text())
+            first_object = json.loads(
+                (
+                    shard
+                    / "codex"
+                    / "objects"
+                    / f"{first_index['conversations'][0]['object_sha256']}.json"
+                ).read_text()
+            )
+            self.assertNotIn(appended_body, json.dumps(first_object))
+
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+            second_index = json.loads((shard / "codex" / "index.json").read_text())
+            second_object = json.loads(
+                (
+                    shard
+                    / "codex"
+                    / "objects"
+                    / f"{second_index['conversations'][0]['object_sha256']}.json"
+                ).read_text()
+            )
+            self.assertNotEqual(first_index, second_index)
+            self.assertIn(appended_body, json.dumps(second_object))
+
+    def test_codex_prefix_rewrite_after_open_still_fails_closed(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source = root / "rollout-rewritten.jsonl"
+            write_jsonl(
+                source,
+                [
+                    {"type": "session_meta", "payload": {"id": "rewritten"}},
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "before1"},
+                    },
+                ],
+            )
+            fingerprint = fleet.source_fingerprint(
+                source, include_content_hash=True, allow_append=True
+            )
+            real_open = codex_extractor._open_regular_jsonl
+
+            def open_then_rewrite(*args, **kwargs):
+                opened = real_open(*args, **kwargs)
+                payload = source.read_bytes().replace(b"before1", b"changed")
+                source.write_bytes(payload)
+                return opened
+
+            with mock.patch.object(
+                codex_extractor,
+                "_open_regular_jsonl",
+                side_effect=open_then_rewrite,
+            ), self.assertRaisesRegex(ValueError, "source changed during extraction"):
+                fleet.extract_codex_session(
+                    source,
+                    expected_source_sha256=fingerprint["sha256"],
+                    expected_source_size=fingerprint["size"],
+                    max_source_bytes=fleet.MAX_SOURCE_BYTES,
+                )
+
+    def test_codex_fingerprint_binds_prefix_when_source_appends_during_hash(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source = root / "rollout-growing-during-hash.jsonl"
+            initial_rows = [
+                {"type": "session_meta", "payload": {"id": "growing-hash"}},
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "snapshot"},
+                },
+            ]
+            appended_row = {
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "later"},
+            }
+            write_jsonl(source, initial_rows)
+            initial_payload = source.read_bytes()
+            real_hash = fleet.descriptor_sha256
+
+            def hash_then_append(descriptor, *, byte_limit=None):
+                result = real_hash(descriptor, byte_limit=byte_limit)
+                with source.open("a") as handle:
+                    handle.write(json.dumps(appended_row) + "\n")
+                return result
+
+            with mock.patch.object(
+                fleet, "descriptor_sha256", side_effect=hash_then_append
+            ):
+                fingerprint = fleet.source_fingerprint(
+                    source, include_content_hash=True, allow_append=True
+                )
+
+            self.assertEqual(fingerprint["size"], len(initial_payload))
+            self.assertEqual(
+                fingerprint["sha256"], hashlib.sha256(initial_payload).hexdigest()
+            )
+            conversation = fleet.extract_codex_session(
+                source,
+                expected_source_sha256=fingerprint["sha256"],
+                expected_source_size=fingerprint["size"],
+                max_source_bytes=fleet.MAX_SOURCE_BYTES,
+            )
+            serialized = json.dumps(conversation)
+            self.assertIn("snapshot", serialized)
+            self.assertNotIn("later", serialized)
+
+    def test_immutable_spool_writer_never_replaces_and_repairs_mode(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            body = b'{"safe":true}'
+            payload = body + b"\n"
+            digest = hashlib.sha256(body).hexdigest()
+            destination = root / "objects" / f"{digest}.json"
+            real_link = fleet.os.link
+            raced = False
+
+            def race_then_link(*args, **kwargs):
+                nonlocal raced
+                if not raced:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(payload)
+                    destination.chmod(0o644)
+                    raced = True
+                return real_link(*args, **kwargs)
+
+            with tempfile.TemporaryFile(mode="w+b", dir=root) as spool:
+                spool.write(payload)
+                with mock.patch.object(fleet.os, "link", side_effect=race_then_link):
+                    self.assertFalse(
+                        fleet.write_immutable_spool_slice(
+                            destination, spool, 0, len(payload), digest
+                        )
+                    )
+            self.assertTrue(raced)
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+
+            collision = b'{"safe":false}\n'
+            destination.write_bytes(collision)
+            with tempfile.TemporaryFile(mode="w+b", dir=root) as spool:
+                spool.write(payload)
+                with self.assertRaisesRegex(ValueError, "immutable archive collision"):
+                    fleet.write_immutable_spool_slice(
+                        destination, spool, 0, len(payload), digest
+                    )
+            self.assertEqual(destination.read_bytes(), collision)
+
+    def test_immutable_spool_writer_rejects_final_name_swap(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            body = b'{"safe":true}'
+            payload = body + b"\n"
+            digest = hashlib.sha256(body).hexdigest()
+            destination = root / "objects" / f"{digest}.json"
+            replacement = root / "replacement.json"
+            replacement.write_bytes(b'{"safe":false}\n')
+            real_descriptor_sha256 = fleet.descriptor_sha256
+            swapped = False
+
+            def hash_then_swap(descriptor, *args, **kwargs):
+                nonlocal swapped
+                result = real_descriptor_sha256(descriptor, *args, **kwargs)
+                if not swapped:
+                    os.replace(replacement, destination)
+                    swapped = True
+                return result
+
+            with tempfile.TemporaryFile(mode="w+b", dir=root) as spool:
+                spool.write(payload)
+                with mock.patch.object(
+                    fleet, "descriptor_sha256", side_effect=hash_then_swap
+                ), self.assertRaisesRegex(ValueError, "immutable archive"):
+                    fleet.write_immutable_spool_slice(
+                        destination, spool, 0, len(payload), digest
+                    )
+
+            self.assertTrue(swapped)
+            self.assertEqual(destination.read_bytes(), b'{"safe":false}\n')
+
+    def test_immutable_spool_writer_rejects_same_inode_mutation_after_hash(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            body = b'{"safe":true}'
+            payload = body + b"\n"
+            digest = hashlib.sha256(body).hexdigest()
+            destination = root / "objects" / f"{digest}.json"
+            real_descriptor_sha256 = fleet.descriptor_sha256
+            mutated_inode = None
+
+            def hash_then_mutate(descriptor, *args, **kwargs):
+                nonlocal mutated_inode
+                result = real_descriptor_sha256(descriptor, *args, **kwargs)
+                before = destination.stat().st_ino
+                destination.write_bytes(b'{"evil":true}\n')
+                after = destination.stat().st_ino
+                self.assertEqual(before, after)
+                mutated_inode = after
+                return result
+
+            with tempfile.TemporaryFile(mode="w+b", dir=root) as spool:
+                spool.write(payload)
+                with mock.patch.object(
+                    fleet, "descriptor_sha256", side_effect=hash_then_mutate
+                ), self.assertRaisesRegex(ValueError, "immutable archive collision"):
+                    fleet.write_immutable_spool_slice(
+                        destination, spool, 0, len(payload), digest
+                    )
+
+            self.assertIsNotNone(mutated_inode)
+            self.assertEqual(destination.stat().st_ino, mutated_inode)
+            self.assertEqual(destination.read_bytes(), b'{"evil":true}\n')
+
+    def test_candidate_spool_materialization_streams_bounded_chunks(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            body = b'{"blob":"' + (b"x" * (3 * 1024 * 1024)) + b'"}'
+            payload = body + b"\n"
+            digest = hashlib.sha256(body).hexdigest()
+            destination = root / "objects" / f"{digest}.json"
+            real_pread = fleet.os.pread
+            requested = []
+
+            def record_pread(descriptor, size, offset):
+                requested.append(size)
+                return real_pread(descriptor, size, offset)
+
+            with tempfile.TemporaryFile(mode="w+b", dir=root) as spool:
+                spool.write(payload)
+                with mock.patch.object(fleet.os, "pread", side_effect=record_pread):
+                    self.assertTrue(
+                        fleet.write_immutable_spool_slice(
+                            destination, spool, 0, len(payload), digest
+                        )
+                    )
+
+            self.assertGreater(len(requested), 1)
+            self.assertLessEqual(max(requested), 1024 * 1024)
+            self.assertEqual(destination.stat().st_size, len(payload))
+            self.assertEqual(fleet.file_sha256(destination), hashlib.sha256(payload).hexdigest())
+
+    def test_candidate_spool_aggregate_cap_fails_before_any_object_commit(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+
+            def conversation(session_id, body):
+                return {
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": session_id,
+                    "messages": [{"role": "user", "content": body}],
+                    "project_path": None,
+                    "project_name": None,
+                    "source_file": f"/synthetic/{session_id}.jsonl",
+                }
+
+            first = conversation("one", "x" * 256)
+            second = conversation("two", "y" * 256)
+            cap = len(fleet.canonical_json(first)) + len(fleet.canonical_json(second))
+            with mock.patch.object(fleet, "MAX_CANDIDATE_SPOOL_BYTES", cap):
+                with self.assertRaisesRegex(ValueError, "candidate spool exceeds"):
+                    fleet.archive_conversations(
+                        root,
+                        "test-mac",
+                        "claude",
+                        [first, second],
+                    )
+
+            harness_root = root / "hosts" / "test-mac" / "claude"
+            self.assertFalse((harness_root / "index.json").exists())
+            self.assertEqual(list((harness_root / "objects").glob("*.json")), [])
+
+    def test_candidate_materialization_budget_fails_before_any_object_commit(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            conversation = {
+                "archive_schema_version": 2,
+                "source": "claude-code",
+                "session_id": "one",
+                "messages": [{"role": "user", "content": "x" * 256}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/one.jsonl",
+            }
+            winner_bytes = len(fleet.canonical_json(conversation)) + 1
+            with mock.patch.object(
+                fleet, "MAX_CANDIDATE_SPOOL_BYTES", winner_bytes
+            ), self.assertRaisesRegex(ValueError, "materialization exceeds"):
+                fleet.archive_conversations(
+                    root, "test-mac", "claude", [conversation]
+                )
+
+            harness_root = root / "hosts" / "test-mac" / "claude"
+            self.assertFalse((harness_root / "index.json").exists())
+            self.assertEqual(list((harness_root / "objects").glob("*.json")), [])
+
+    def test_candidate_count_is_bounded_before_materialization(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+
+            def conversation(session_id):
+                return {
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": session_id,
+                    "messages": [{"role": "user", "content": session_id}],
+                    "project_path": None,
+                    "project_name": None,
+                    "source_file": f"/synthetic/{session_id}.jsonl",
+                }
+
+            with mock.patch.object(
+                fleet, "MAX_MANIFEST_OBJECTS_PER_HARNESS", 1
+            ), self.assertRaisesRegex(ValueError, "count exceeds"):
+                fleet.archive_conversations(
+                    root,
+                    "test-mac",
+                    "claude",
+                    [conversation("one"), conversation("two")],
+                )
+
+            harness_root = root / "hosts" / "test-mac" / "claude"
+            self.assertFalse((harness_root / "index.json").exists())
+            self.assertEqual(list((harness_root / "objects").glob("*.json")), [])
+
+    def test_candidate_disk_headroom_is_rechecked_before_materialization(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            conversation = {
+                "archive_schema_version": 2,
+                "source": "claude-code",
+                "session_id": "one",
+                "messages": [{"role": "user", "content": "x" * 256}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/one.jsonl",
+            }
+            winner_bytes = len(fleet.canonical_json(conversation)) + 1
+            initial_free = fleet.MIN_ARCHIVE_FREE_BYTES + (4 * winner_bytes)
+            final_free = fleet.MIN_ARCHIVE_FREE_BYTES + winner_bytes - 1
+            with mock.patch.object(
+                fleet,
+                "available_disk_bytes",
+                side_effect=[initial_free, final_free],
+            ), self.assertRaisesRegex(ValueError, "insufficient disk headroom"):
+                fleet.archive_conversations(
+                    root, "test-mac", "claude", [conversation]
+                )
+
+            harness_root = root / "hosts" / "test-mac" / "claude"
+            self.assertFalse((harness_root / "index.json").exists())
+            self.assertEqual(list((harness_root / "objects").glob("*.json")), [])
+
+    def test_superseded_generated_candidate_is_never_materialized_or_unlinked(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            materialized = []
+            real_writer = fleet.write_immutable_spool_slice
+            real_unlink = fleet.os.unlink
+
+            def conversation(body, source_digest):
+                return {
+                    "archive_schema_version": 2,
+                    "source": "codex",
+                    "session_id": "same-native-session",
+                    "messages": [{"role": "user", "content": body}],
+                    "cwd": None,
+                    "session_file": f"/synthetic/{source_digest}.jsonl",
+                    "timestamp": None,
+                    "installation": "/synthetic/codex",
+                    "_archive_source_sha256": source_digest,
+                }
+
+            def record_writer(path, spool, offset, length, digest):
+                materialized.append(digest)
+                return real_writer(path, spool, offset, length, digest)
+
+            def forbid_object_unlink(path, *args, **kwargs):
+                if str(path).endswith(".json"):
+                    self.fail("archive_conversations attempted to unlink an object leaf")
+                return real_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(
+                fleet, "write_immutable_spool_slice", side_effect=record_writer
+            ), mock.patch.object(fleet.os, "unlink", side_effect=forbid_object_unlink):
+                fleet.archive_conversations(
+                    root,
+                    "test-mac",
+                    "codex",
+                    [
+                        conversation("older", "1" * 64),
+                        conversation("winner", "2" * 64),
+                    ],
+                )
+
+            objects = list(
+                (root / "hosts" / "test-mac" / "codex" / "objects").glob("*.json")
+            )
+            self.assertEqual(len(materialized), 1)
+            self.assertEqual(len(objects), 1)
+            self.assertIn("winner", objects[0].read_text())
+            self.assertNotIn("older", objects[0].read_text())
+
+    def test_superseded_reuse_candidate_is_never_materialized(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            installation = "/synthetic/codex"
+
+            def conversation(body, source_digest):
+                return {
+                    "archive_schema_version": 2,
+                    "source": "codex",
+                    "session_id": "same-native-session",
+                    "messages": [{"role": "user", "content": body}],
+                    "cwd": None,
+                    "session_file": f"/synthetic/{source_digest}.jsonl",
+                    "timestamp": None,
+                    "installation": installation,
+                    "_archive_source_sha256": source_digest,
+                }
+
+            reuse_root = root / "reuse"
+            fleet.archive_conversations(
+                reuse_root,
+                "test-mac",
+                "codex",
+                [conversation("reused", "1" * 64)],
+            )
+            reuse_harness = reuse_root / "hosts" / "test-mac" / "codex"
+            reuse_index = json.loads((reuse_harness / "index.json").read_text())
+            reused_digest = reuse_index["conversations"][0]["object_sha256"]
+            staged_root = root / "staged"
+            materialized = []
+            real_writer = fleet.write_immutable_spool_slice
+
+            def record_writer(path, spool, offset, length, digest):
+                materialized.append(digest)
+                return real_writer(path, spool, offset, length, digest)
+
+            with mock.patch.object(
+                fleet, "write_immutable_spool_slice", side_effect=record_writer
+            ):
+                fleet.archive_conversations(
+                    staged_root,
+                    "test-mac",
+                    "codex",
+                    [
+                        conversation("reused", "1" * 64),
+                        conversation("winner", "2" * 64),
+                    ],
+                    reuse_harness_root=reuse_harness,
+                    reuse_index=reuse_index,
+                )
+
+            staged_harness = staged_root / "hosts" / "test-mac" / "codex"
+            objects = list((staged_harness / "objects").glob("*.json"))
+            self.assertEqual(len(materialized), 1)
+            self.assertEqual(len(objects), 1)
+            self.assertNotEqual(materialized[0], reused_digest)
+            self.assertFalse(
+                (staged_harness / "objects" / f"{reused_digest}.json").exists()
+            )
+
+    def test_reusable_object_is_snapshotted_before_later_path_swap(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            conversation = {
+                "archive_schema_version": 2,
+                "source": "codex",
+                "session_id": "reused-session",
+                "messages": [{"role": "user", "content": "stable reuse body"}],
+                "cwd": None,
+                "session_file": "/synthetic/reuse.jsonl",
+                "timestamp": None,
+                "installation": "/synthetic/codex",
+                "_archive_source_sha256": "1" * 64,
+            }
+            reuse_root = root / "reuse"
+            fleet.archive_conversations(
+                reuse_root, "test-mac", "codex", [dict(conversation)]
+            )
+            reuse_harness = reuse_root / "hosts" / "test-mac" / "codex"
+            reuse_index = json.loads((reuse_harness / "index.json").read_text())
+            digest = reuse_index["conversations"][0]["object_sha256"]
+            reusable_path = reuse_harness / "objects" / f"{digest}.json"
+            real_validate = fleet.validate_object_file
+            reuse_reads = 0
+
+            def swap_after_second_snapshot(path, *args, **kwargs):
+                nonlocal reuse_reads
+                value = real_validate(path, *args, **kwargs)
+                if Path(path) == reusable_path:
+                    reuse_reads += 1
+                    if reuse_reads == 2:
+                        reusable_path.write_bytes(b"{}\n")
+                return value
+
+            staged_root = root / "staged"
+            with mock.patch.object(
+                fleet, "validate_object_file", side_effect=swap_after_second_snapshot
+            ):
+                fleet.archive_conversations(
+                    staged_root,
+                    "test-mac",
+                    "codex",
+                    [dict(conversation)],
+                    reuse_harness_root=reuse_harness,
+                    reuse_index=reuse_index,
+                )
+
+            staged_object = staged_root / "hosts" / "test-mac" / "codex" / "objects" / f"{digest}.json"
+            self.assertEqual(reuse_reads, 2)
+            self.assertIn("stable reuse body", staged_object.read_text())
+            self.assertEqual(
+                hashlib.sha256(staged_object.read_bytes()[:-1]).hexdigest(), digest
+            )
 
     def test_codex_move_between_live_and_archive_paths_has_one_content_object(self):
         with safe_temporary_directory() as tmp:

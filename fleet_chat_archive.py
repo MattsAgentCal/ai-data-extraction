@@ -164,6 +164,8 @@ EXTRACTOR_FILES = (
 )
 MAX_SOURCE_BYTES = 1280 * 1024 * 1024
 MAX_OBJECT_BYTES = 1280 * 1024 * 1024
+MAX_CANDIDATE_SPOOL_BYTES = 64 * 1024 * 1024 * 1024
+MIN_ARCHIVE_FREE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PRIVATE_KEY_LABEL_CHARS = 64
 MAX_REMOTE_TIMEOUT_SECONDS = 24 * 60 * 60
 MAX_PUBLISH_MANIFEST_BYTES = 4 * 1024 * 1024
@@ -790,6 +792,147 @@ def atomic_write_bytes(path: Path, payload: bytes) -> None:
         os.close(directory_fd)
 
 
+def available_disk_bytes(path: Path) -> int:
+    filesystem = os.statvfs(lexical_absolute(path))
+    return filesystem.f_bavail * filesystem.f_frsize
+
+
+def write_immutable_spool_slice(
+    path: Path,
+    spool,
+    offset: int,
+    length: int,
+    expected_object_sha256: str,
+) -> bool:
+    """Materialize one canonical candidate without replacing another writer."""
+    if (
+        type(offset) is not int
+        or offset < 0
+        or type(length) is not int
+        or not 1 < length <= MAX_OBJECT_BYTES
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_object_sha256)
+    ):
+        raise ValueError("invalid candidate object spool slice")
+    path = lexical_absolute(path)
+    if path.name != f"{expected_object_sha256}.json":
+        raise ValueError("candidate object path does not match its digest")
+    secure_mkdir(path.parent)
+    _, directory_fd = open_directory_fd(path.parent)
+    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    output_fd = -1
+    target_fd = -1
+    created = False
+    full_digest = hashlib.sha256()
+    object_digest = hashlib.sha256()
+    try:
+        output_fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        spool.flush()
+        spool_fd = spool.fileno()
+        remaining = length
+        position = offset
+        while remaining:
+            chunk = os.pread(spool_fd, min(1024 * 1024, remaining), position)
+            if not chunk:
+                raise ValueError("candidate object spool ended before materialization")
+            position += len(chunk)
+            remaining -= len(chunk)
+            full_digest.update(chunk)
+            if remaining == 0:
+                if not chunk.endswith(b"\n"):
+                    raise ValueError("candidate object is missing canonical newline")
+                object_digest.update(chunk[:-1])
+            else:
+                object_digest.update(chunk)
+            view = memoryview(chunk)
+            written = 0
+            while written < len(view):
+                count = os.write(output_fd, view[written:])
+                if count <= 0:
+                    raise OSError("short write while materializing candidate object")
+                written += count
+        if object_digest.hexdigest() != expected_object_sha256:
+            raise ValueError("candidate object digest changed before materialization")
+        os.fchmod(output_fd, 0o600)
+        os.fsync(output_fd)
+        os.close(output_fd)
+        output_fd = -1
+        try:
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            created = True
+        except FileExistsError:
+            created = False
+        target_fd = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        target_metadata = os.fstat(target_fd)
+        if not stat.S_ISREG(target_metadata.st_mode):
+            raise ValueError(f"immutable archive collision: {path.name}")
+        os.fchmod(target_fd, 0o600)
+        os.fsync(target_fd)
+        hash_metadata = os.fstat(target_fd)
+        target_digest = descriptor_sha256(target_fd)
+        verified_metadata = os.fstat(target_fd)
+        hash_identity = (
+            hash_metadata.st_dev,
+            hash_metadata.st_ino,
+            hash_metadata.st_size,
+            hash_metadata.st_mtime_ns,
+            hash_metadata.st_ctime_ns,
+        )
+        verified_identity = (
+            verified_metadata.st_dev,
+            verified_metadata.st_ino,
+            verified_metadata.st_size,
+            verified_metadata.st_mtime_ns,
+            verified_metadata.st_ctime_ns,
+        )
+        if (
+            hash_identity != verified_identity
+            or target_digest != full_digest.hexdigest()
+        ):
+            raise ValueError(f"immutable archive collision: {path.name}")
+        os.fsync(directory_fd)
+        live_metadata = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        live_identity = (
+            live_metadata.st_dev,
+            live_metadata.st_ino,
+            live_metadata.st_size,
+            live_metadata.st_mtime_ns,
+            live_metadata.st_ctime_ns,
+        )
+        if (
+            not stat.S_ISREG(live_metadata.st_mode)
+            or live_identity != verified_identity
+        ):
+            raise ValueError(f"immutable archive destination changed: {path.name}")
+        return created
+    finally:
+        if output_fd >= 0:
+            os.close(output_fd)
+        if target_fd >= 0:
+            os.close(target_fd)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        else:
+            os.fsync(directory_fd)
+        os.close(directory_fd)
+
+
 def remove_file_if_present(path: Path) -> None:
     absolute = lexical_absolute(path)
     try:
@@ -1106,6 +1249,34 @@ def archive_conversations(
     reuse_index: dict | None = None,
 ) -> dict:
     harness_root = archive_root / "hosts" / host_id / harness
+    secure_mkdir(archive_root / "hosts")
+    secure_mkdir(archive_root / "hosts" / host_id)
+    secure_mkdir(harness_root)
+    with tempfile.TemporaryFile(mode="w+b", dir=harness_root) as candidate_spool:
+        return _archive_conversations_with_spool(
+            archive_root,
+            host_id,
+            harness,
+            conversations,
+            candidate_spool=candidate_spool,
+            collection_complete=collection_complete,
+            reuse_harness_root=reuse_harness_root,
+            reuse_index=reuse_index,
+        )
+
+
+def _archive_conversations_with_spool(
+    archive_root: Path,
+    host_id: str,
+    harness: str,
+    conversations,
+    *,
+    candidate_spool,
+    collection_complete: bool = True,
+    reuse_harness_root: Path | None = None,
+    reuse_index: dict | None = None,
+) -> dict:
+    harness_root = archive_root / "hosts" / host_id / harness
     objects_root = harness_root / "objects"
     secure_mkdir(archive_root / "hosts")
     secure_mkdir(archive_root / "hosts" / host_id)
@@ -1176,11 +1347,41 @@ def archive_conversations(
             )
     current_by_raw_identity: dict[tuple[str, str], tuple[str, str]] = {}
     reusable_stable_sha256: dict[Path, tuple[str, object, object, object]] = {}
-    created_object_names: set[str] = set()
-    newly_written_object_names: set[str] = set()
+    candidate_slices: dict[str, tuple[int, int]] = {}
+    candidate_spool_bytes = 0
+    scratch_budget = min(
+        MAX_CANDIDATE_SPOOL_BYTES,
+        max(0, available_disk_bytes(harness_root) - MIN_ARCHIVE_FREE_BYTES),
+    )
+
+    def stage_candidate(digest: str, payload: bytes) -> None:
+        nonlocal candidate_spool_bytes
+        if digest in candidate_slices:
+            return
+        if len(candidate_slices) >= MAX_MANIFEST_OBJECTS_PER_HARNESS:
+            raise ValueError("candidate object count exceeds per-harness limit")
+        candidate_length = len(payload) + 1
+        if candidate_length > MAX_OBJECT_BYTES:
+            raise ValueError(
+                f"object exceeds maximum of {MAX_OBJECT_BYTES} bytes before write"
+            )
+        if candidate_spool_bytes > scratch_budget - candidate_length:
+            raise ValueError(
+                f"candidate spool exceeds scratch budget of {scratch_budget} bytes"
+            )
+        candidate_spool.seek(0, os.SEEK_END)
+        candidate_offset = candidate_spool.tell()
+        if candidate_spool.write(payload) != len(payload):
+            raise OSError("short write while staging candidate object")
+        if candidate_spool.write(b"\n") != 1:
+            raise OSError("short write while staging candidate object newline")
+        candidate_slices[digest] = (candidate_offset, candidate_length)
+        candidate_spool_bytes += candidate_length
 
     for conversation in conversations:
         conversation_count += 1
+        if conversation_count > MAX_MANIFEST_OBJECTS_PER_HARNESS:
+            raise ValueError("conversation candidate count exceeds per-harness limit")
         source_sha256 = conversation.pop("_archive_source_sha256", None)
         validate_archive_object(conversation, harness=harness)
         conversation, conversation_redactions = redact_value(conversation)
@@ -1233,6 +1434,7 @@ def archive_conversations(
                             archived.get("installation"),
                         )
                         reusable_stable_sha256[candidate_path] = cached
+                        del archived
                     (
                         candidate_stable_sha256,
                         archived_source,
@@ -1246,10 +1448,25 @@ def archive_conversations(
                         and candidate_stable_sha256 == stable_sha256
                     ):
                         digest = row["object_sha256"]
-                        object_path = objects_root / f"{digest}.json"
-                        if not object_path.exists():
-                            if link_verified_local_object(candidate_path, object_path):
-                                created_object_names.add(object_path.name)
+                        if digest not in candidate_slices:
+                            reusable_value = validate_object_file(candidate_path)
+                            reusable_identity = (
+                                stable_codex_conversation_sha256(reusable_value),
+                                reusable_value.get("source"),
+                                reusable_value.get("session_id"),
+                                reusable_value.get("installation"),
+                            )
+                            if reusable_identity != cached:
+                                raise ValueError(
+                                    "reusable Codex object changed before staging"
+                                )
+                            reusable_payload = canonical_json(reusable_value)
+                            if hashlib.sha256(reusable_payload).hexdigest() != digest:
+                                raise ValueError(
+                                    "reusable Codex object digest changed before staging"
+                                )
+                            stage_candidate(digest, reusable_payload)
+                            del reusable_payload, reusable_value
                         break
 
         if digest is None:
@@ -1259,16 +1476,10 @@ def archive_conversations(
                     f"object exceeds maximum of {MAX_OBJECT_BYTES} bytes before write"
                 )
             digest = hashlib.sha256(payload).hexdigest()
+            stage_candidate(digest, payload)
+            del payload
         else:
             payload = None
-        object_path = objects_root / f"{digest}.json"
-        if not object_path.exists():
-            if payload is None:
-                raise ValueError(f"reused Codex object is missing: {digest}")
-            atomic_write_bytes(object_path, payload + b"\n")
-            new_objects += 1
-            created_object_names.add(object_path.name)
-            newly_written_object_names.add(object_path.name)
         index_row = {
             "object_sha256": digest,
             "session_id": conversation.get("session_id"),
@@ -1282,34 +1493,81 @@ def archive_conversations(
                 stable_sha256,
             )
         index_by_identity[archive_row_identity(index_row)] = index_row
+        if len(index_by_identity) > MAX_MANIFEST_OBJECTS_PER_HARNESS:
+            raise ValueError("archive index exceeds per-harness limit")
+        del conversation
 
     index_rows = list(index_by_identity.values())
+    if len(index_rows) > MAX_MANIFEST_OBJECTS_PER_HARNESS:
+        raise ValueError("archive index exceeds per-harness limit")
     index_rows.sort(key=lambda row: (str(row["session_id"]), row["object_sha256"]))
-    referenced_object_names = {
-        f"{row['object_sha256']}.json" for row in index_rows
-    }
-    # Multiple native files can represent the same logical session (for
-    # example, copied Claude project transcripts or a Codex rollout present in
-    # both live and archived locations).  The last normalized record wins the
-    # index identity, so discard only its superseded object from this private
-    # staging directory before the exact-set validator runs.
-    for candidate_name in sorted(created_object_names - referenced_object_names):
-        candidate = objects_root / candidate_name
-        if (
-            candidate.is_symlink()
-            or not candidate.is_file()
-            or not OBJECT_NAME_RE.fullmatch(candidate.name)
-        ):
-            raise ValueError(f"refusing unsafe staged object: {candidate.name}")
-        try:
-            validate_object_file(candidate)
-        except (OSError, ValueError) as error:
-            raise ValueError(
-                f"refusing unsafe staged object: {candidate.name}"
-            ) from error
-        remove_file_if_present(candidate)
-        if candidate.name in newly_written_object_names:
-            new_objects -= 1
+    referenced_digests = sorted(
+        {row["object_sha256"] for row in index_rows}
+    )
+    candidate_spool.flush()
+    candidate_digests = [
+        digest for digest in referenced_digests if digest in candidate_slices
+    ]
+    winner_spool_bytes = sum(candidate_slices[digest][1] for digest in candidate_digests)
+    if max(candidate_spool_bytes, 2 * winner_spool_bytes) > scratch_budget:
+        raise ValueError(
+            f"candidate materialization exceeds scratch budget of {scratch_budget} bytes"
+        )
+
+    # Reclaim superseded slices before final object creation.  Copying winners
+    # toward offset zero is memmove-safe because destinations never begin
+    # after their source slices; truncate releases loser blocks before the
+    # materialization pass can consume a second winner-sized allocation.
+    compacted_slices: dict[str, tuple[int, int]] = {}
+    compacted_offset = 0
+    spool_fd = candidate_spool.fileno()
+    for digest in sorted(candidate_digests, key=lambda item: candidate_slices[item][0]):
+        source_offset, length = candidate_slices[digest]
+        remaining = length
+        read_offset = source_offset
+        write_offset = compacted_offset
+        while remaining:
+            chunk = os.pread(spool_fd, min(1024 * 1024, remaining), read_offset)
+            if not chunk:
+                raise ValueError("candidate spool ended during compaction")
+            written = 0
+            while written < len(chunk):
+                count = os.pwrite(
+                    spool_fd,
+                    chunk[written:],
+                    write_offset + written,
+                )
+                if count <= 0:
+                    raise OSError("short write while compacting candidate spool")
+                written += count
+            read_offset += len(chunk)
+            write_offset += len(chunk)
+            remaining -= len(chunk)
+        compacted_slices[digest] = (compacted_offset, length)
+        compacted_offset += length
+    os.ftruncate(spool_fd, compacted_offset)
+    os.fsync(spool_fd)
+    candidate_slices = compacted_slices
+    candidate_spool_bytes = compacted_offset
+    if winner_spool_bytes and available_disk_bytes(harness_root) < (
+        winner_spool_bytes + MIN_ARCHIVE_FREE_BYTES
+    ):
+        raise ValueError("insufficient disk headroom for candidate materialization")
+
+    for digest in referenced_digests:
+        object_path = objects_root / f"{digest}.json"
+        candidate_slice = candidate_slices.get(digest)
+        if candidate_slice is not None:
+            if write_immutable_spool_slice(
+                object_path,
+                candidate_spool,
+                candidate_slice[0],
+                candidate_slice[1],
+                digest,
+            ):
+                new_objects += 1
+        elif not object_path.exists():
+            raise ValueError(f"referenced archive object is missing: {digest}")
     atomic_write_json(
         harness_root / "index.json",
         {
@@ -1318,6 +1576,13 @@ def archive_conversations(
             "harness": harness,
             "conversations": index_rows,
         },
+    )
+    validate_index_file(
+        harness_root / "index.json",
+        harness_root.parent,
+        host_id,
+        harness,
+        require_exact_object_set=False,
     )
     return {
         "status": (
@@ -1333,7 +1598,9 @@ def archive_conversations(
     }
 
 
-def source_fingerprint(path: Path, *, include_content_hash: bool = False) -> dict:
+def source_fingerprint(
+    path: Path, *, include_content_hash: bool = False, allow_append: bool = False
+) -> dict:
     descriptor = open_regular_fd(path)
     try:
         metadata = os.fstat(descriptor)
@@ -1341,21 +1608,36 @@ def source_fingerprint(path: Path, *, include_content_hash: bool = False) -> dic
             raise ValueError(
                 f"source exceeds maximum of {MAX_SOURCE_BYTES} bytes: {path}"
             )
-        content_sha256 = descriptor_sha256(descriptor) if include_content_hash else None
+        content_sha256 = (
+            descriptor_sha256(
+                descriptor,
+                byte_limit=metadata.st_size if allow_append else None,
+            )
+            if include_content_hash
+            else None
+        )
         final_metadata = os.fstat(descriptor)
-        if (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_size,
-            metadata.st_mtime_ns,
-            metadata.st_ctime_ns,
-        ) != (
-            final_metadata.st_dev,
-            final_metadata.st_ino,
-            final_metadata.st_size,
-            final_metadata.st_mtime_ns,
-            final_metadata.st_ctime_ns,
-        ):
+        if allow_append:
+            stable_snapshot = (
+                (metadata.st_dev, metadata.st_ino)
+                == (final_metadata.st_dev, final_metadata.st_ino)
+                and final_metadata.st_size >= metadata.st_size
+            )
+        else:
+            stable_snapshot = (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            ) == (
+                final_metadata.st_dev,
+                final_metadata.st_ino,
+                final_metadata.st_size,
+                final_metadata.st_mtime_ns,
+                final_metadata.st_ctime_ns,
+            )
+        if not stable_snapshot:
             raise ValueError(f"source changed while hashing: {path}")
     finally:
         os.close(descriptor)
@@ -1381,6 +1663,21 @@ def load_incremental_state(archive_root: Path, host_id: str, harness: str) -> tu
         return state_path, {}
     sources = state.get("sources", {})
     return state_path, sources if isinstance(sources, dict) else {}
+
+
+def claude_destination_requires_complete_rescan(
+    archive_root: Path, host_id: str
+) -> bool:
+    index_path = archive_root / "hosts" / host_id / "claude" / "index.json"
+    if not index_path.exists() and not index_path.is_symlink():
+        return False
+    index = read_json_nofollow(index_path)
+    return is_regenerable_legacy_duplicate_index(
+        index,
+        index_path,
+        host_id,
+        "claude",
+    )
 
 
 def save_incremental_state(state_path: Path, sources: dict) -> None:
@@ -1518,6 +1815,11 @@ def collect_sources(
         state_path, prior_state = load_incremental_state(
             archive_root, host_id, "claude"
         )
+        if claude_destination_requires_complete_rescan(archive_root, host_id):
+            # A legacy duplicate index can be replaced only by a complete
+            # source projection; warm incremental rows would silently omit
+            # unchanged conversations from that replacement.
+            prior_state = {}
         next_state = dict(prior_state)
         def claude_conversations():
             nonlocal source_missing
@@ -1573,7 +1875,9 @@ def collect_sources(
                     file_counts["discovered"] += 1
                     state_key = str(lexical_absolute(session_file))
                     fingerprint = source_fingerprint(
-                        session_file, include_content_hash=True
+                        session_file,
+                        include_content_hash=True,
+                        allow_append=True,
                     )
                     if prior_state.get(state_key) == fingerprint:
                         file_counts["skipped"] += 1
@@ -1584,6 +1888,7 @@ def collect_sources(
                         session_file,
                         quality_out=quality,
                         expected_source_sha256=fingerprint["sha256"],
+                        expected_source_size=fingerprint["size"],
                         max_source_bytes=MAX_SOURCE_BYTES,
                         installation_identity=codex_root,
                     )
@@ -1819,11 +2124,22 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def descriptor_sha256(descriptor: int) -> str:
+def descriptor_sha256(descriptor: int, *, byte_limit: int | None = None) -> str:
     digest = hashlib.sha256()
     os.lseek(descriptor, 0, os.SEEK_SET)
-    for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+    remaining = byte_limit
+    while remaining is None or remaining:
+        chunk = os.read(
+            descriptor,
+            1024 * 1024 if remaining is None else min(1024 * 1024, remaining),
+        )
+        if not chunk:
+            if remaining:
+                raise ValueError("source changed during bounded hashing")
+            break
         digest.update(chunk)
+        if remaining is not None:
+            remaining -= len(chunk)
     return digest.hexdigest()
 
 
@@ -3386,11 +3702,18 @@ def copy_verified_file(source: Path, destination: Path, *, immutable: bool) -> b
     source_digest = file_sha256(source)
     if destination.exists() or destination.is_symlink():
         assert_no_symlink_components(destination)
-        destination_digest = file_sha256(destination)
         if immutable:
-            if destination_digest != source_digest:
-                raise ValueError(f"immutable archive collision: {destination.name}")
-            return False
+            destination_fd = open_regular_fd(destination)
+            try:
+                if descriptor_sha256(destination_fd) != source_digest:
+                    raise ValueError(
+                        f"immutable archive collision: {destination.name}"
+                    )
+                os.fchmod(destination_fd, 0o600)
+                os.fsync(destination_fd)
+                return False
+            finally:
+                os.close(destination_fd)
     secure_mkdir(destination.parent)
     _, directory_fd = open_directory_fd(destination.parent)
     temporary_name = f".{destination.name}.{uuid.uuid4().hex}.tmp"
@@ -3428,7 +3751,21 @@ def copy_verified_file(source: Path, destination: Path, *, immutable: bool) -> b
                     follow_symlinks=False,
                 )
             except FileExistsError:
-                assert_no_symlink_components(destination)
+                target_fd = os.open(
+                    destination.name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    if descriptor_sha256(target_fd) != source_digest:
+                        raise ValueError(
+                            f"immutable archive collision: {destination.name}"
+                        )
+                    os.fchmod(target_fd, 0o600)
+                    os.fsync(target_fd)
+                finally:
+                    os.close(target_fd)
+                os.fsync(directory_fd)
                 if file_sha256(destination) != source_digest:
                     raise ValueError(f"immutable archive collision: {destination.name}")
                 return False
@@ -3491,6 +3828,9 @@ def link_verified_local_object(source: Path, destination: Path) -> bool:
             )
             if descriptor_sha256(target_descriptor) != source_digest:
                 raise ValueError(f"immutable archive collision: {destination.name}")
+            os.fchmod(target_descriptor, 0o600)
+            os.fsync(target_descriptor)
+            os.fsync(target_directory_fd)
             return False
         except OSError as error:
             if error.errno != errno.EXDEV:
@@ -3569,6 +3909,8 @@ def is_regenerable_legacy_duplicate_index(
     expected_harness: str,
 ) -> bool:
     """Recognize only manifest-era logical duplicates backed by legacy bodies."""
+    if expected_harness != "claude":
+        return False
     if not isinstance(destination_index, dict):
         return False
     host_id = destination_index.get("host_id")
