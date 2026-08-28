@@ -716,6 +716,74 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(len(merged["conversations"]), 2)
             self.assertTrue(source_object.is_file())
 
+    def test_complete_local_merge_replaces_prior_same_session_row(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination = root / "spool"
+            old_conversation = {
+                "source": "claude-code",
+                "session_id": "same-session",
+                "messages": [{"role": "user", "content": "old body"}],
+            }
+            fleet.archive_conversations(
+                destination, "test-mac", "claude", [old_conversation]
+            )
+            destination_shard = destination / "hosts" / "test-mac"
+            write_healthy_receipt(destination_shard)
+            old_index = json.loads(
+                (destination_shard / "claude" / "index.json").read_text()
+            )
+            old_digest = old_index["conversations"][0]["object_sha256"]
+
+            staged = root / "staged"
+            new_conversation = {
+                "source": "claude-code",
+                "session_id": "same-session",
+                "messages": [{"role": "user", "content": "new body"}],
+            }
+            fleet.archive_conversations(
+                staged, "test-mac", "claude", [new_conversation]
+            )
+            staged_index = json.loads(
+                (
+                    staged
+                    / "hosts"
+                    / "test-mac"
+                    / "claude"
+                    / "index.json"
+                ).read_text()
+            )
+            new_digest = staged_index["conversations"][0]["object_sha256"]
+
+            fleet.merge_host_shard(
+                staged / "hosts" / "test-mac",
+                destination,
+                "test-mac",
+                require_healthy_receipt=False,
+            )
+
+            merged = json.loads(
+                (destination_shard / "claude" / "index.json").read_text()
+            )
+            self.assertEqual(
+                [row["object_sha256"] for row in merged["conversations"]],
+                [new_digest],
+            )
+            self.assertTrue(
+                (
+                    destination_shard
+                    / "claude"
+                    / "objects"
+                    / f"{old_digest}.json"
+                ).is_file()
+            )
+            fleet.validated_shard_files(
+                destination_shard,
+                "test-mac",
+                require_healthy_receipt=False,
+                allow_unindexed_objects=True,
+            )
+
     def test_drive_publication_rejects_git_checkout_even_with_test_path_bypass(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -3743,7 +3811,7 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             self.assertFalse((escaped / source_object.name).exists())
             self.assertEqual((held_target / source_object.name).read_bytes(), payload)
 
-    def test_interrupted_local_link_then_changed_source_retry_quarantines_orphan(self):
+    def test_interrupted_local_link_retry_retains_orphan_until_manifest_commit(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
             destination_parent = root / "spool"
@@ -3762,6 +3830,21 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                         "messages": [{"role": "user", "content": "first new body"}],
                     }
                 ],
+            )
+            interrupted_digest = json.loads(
+                (
+                    first_source_parent
+                    / "hosts"
+                    / "test-mac"
+                    / "claude"
+                    / "index.json"
+                ).read_text()
+            )["conversations"][0]["object_sha256"]
+            interrupted_object = (
+                destination_shard
+                / "claude"
+                / "objects"
+                / f"{interrupted_digest}.json"
             )
             with mock.patch.object(
                 fleet, "merge_index_file", side_effect=KeyboardInterrupt
@@ -3793,16 +3876,17 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 require_healthy_receipt=False,
             )
 
-            self.assertEqual(result["quarantined_unindexed_objects"], 1)
+            self.assertEqual(result["quarantined_unindexed_objects"], 0)
+            self.assertTrue(interrupted_object.is_file())
             fleet.validated_shard_files(
                 destination_shard,
                 "test-mac",
                 require_healthy_receipt=False,
+                allow_unindexed_objects=True,
             )
-            quarantine_objects = list(
-                (destination_parent / "quarantine" / "test-mac").rglob("*.json")
+            self.assertFalse(
+                (destination_parent / "quarantine" / "test-mac").exists()
             )
-            self.assertEqual(len(quarantine_objects), 1)
 
     def test_quarantine_parent_swap_cannot_escape_owner_only_spool(self):
         with safe_temporary_directory() as tmp:
@@ -4051,6 +4135,214 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             self.assertFalse(
                 (root / "spool" / "state" / "test-mac" / "hermes.json").exists()
             )
+
+    def test_replaced_manifest_object_is_quarantined_only_after_new_manifest_commit(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            codex_root = root / "codex"
+            session = (
+                codex_root
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-same-session.jsonl"
+            )
+            write_jsonl(
+                session,
+                [
+                    {"type": "session_meta", "payload": {"id": "same-session"}},
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "first snapshot",
+                        },
+                    },
+                ],
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {"codex_roots": [str(codex_root)]},
+                    }
+                )
+            )
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            shard = root / "spool" / "hosts" / "test-mac"
+            index_path = shard / "codex" / "index.json"
+            prior_index = json.loads(index_path.read_text())
+            old_digest = prior_index["conversations"][0]["object_sha256"]
+            old_object = shard / "codex" / "objects" / f"{old_digest}.json"
+            poisoned = {
+                "schema_version": 1,
+                "source": "codex",
+                "session_id": "same-session",
+                "installation": str(codex_root),
+                "messages": [
+                    {"role": "user", "content": "Bearer abcdefghijklmnop"}
+                ],
+            }
+            old_object.write_bytes(fleet.canonical_json(poisoned) + b"\n")
+            with session.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "agent_message",
+                                "message": "changed",
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            prior_index["conversations"][0]["source_sha256"] = fleet.file_sha256(
+                session
+            )
+            write_canonical_json(index_path, prior_index)
+            manifest_path = shard / "publish-manifest.json"
+            prior_manifest = json.loads(manifest_path.read_text())
+            prior_manifest["harnesses"]["codex"]["index_sha256"] = fleet.file_sha256(
+                index_path
+            )
+            write_canonical_json(manifest_path, prior_manifest)
+            state_path = root / "spool" / "state" / "test-mac" / "codex.json"
+            write_canonical_json(
+                state_path,
+                {
+                    "schema_version": 1,
+                    "extractor_sha256": fleet.extractor_sha256(),
+                    "sources": {},
+                },
+            )
+
+            real_write_manifest = fleet.write_publish_manifest
+            old_object_at_manifest = []
+
+            def observe_manifest_commit(*args, **kwargs):
+                old_object_at_manifest.append(old_object.is_file())
+                manifest = real_write_manifest(*args, **kwargs)
+                old_object_at_manifest.append(old_object.is_file())
+                return manifest
+
+            with mock.patch.object(
+                fleet,
+                "write_publish_manifest",
+                side_effect=observe_manifest_commit,
+            ), mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            current_index = json.loads(index_path.read_text())
+            current_manifest = json.loads(manifest_path.read_text())
+            current_digests = [
+                row["object_sha256"] for row in current_index["conversations"]
+            ]
+            self.assertEqual(old_object_at_manifest, [True, True])
+            self.assertEqual(len(current_digests), 1)
+            self.assertNotIn(old_digest, current_digests)
+            self.assertEqual(
+                current_manifest["harnesses"]["codex"]["object_sha256"],
+                current_digests,
+            )
+            self.assertFalse(old_object.exists())
+            self.assertTrue(
+                any(
+                    path.name == f"{old_digest}.json"
+                    for path in (root / "spool" / "quarantine" / "test-mac").rglob(
+                        "*.json"
+                    )
+                )
+            )
+            fleet.validated_shard_files(shard, "test-mac")
+
+    def test_same_session_replacement_cancellation_restores_last_good_snapshot(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            session = claude_root / "projects" / "sample" / "session.jsonl"
+            write_jsonl(
+                session,
+                [{"type": "user", "message": {"content": "first snapshot"}}],
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {"claude_roots": [str(claude_root)]},
+                    }
+                )
+            )
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            spool = root / "spool"
+            shard = spool / "hosts" / "test-mac"
+            manifest_path = shard / "publish-manifest.json"
+            index_path = shard / "claude" / "index.json"
+            state_path = spool / "state" / "test-mac" / "claude.json"
+            old_digest = json.loads(index_path.read_text())["conversations"][0][
+                "object_sha256"
+            ]
+            old_object = shard / "claude" / "objects" / f"{old_digest}.json"
+            poisoned_payload = fleet.canonical_json(
+                {
+                    "schema_version": 1,
+                    "source": "claude-code",
+                    "session_id": "session",
+                    "messages": [
+                        {"role": "user", "content": "Bearer abcdefghijklmnop"}
+                    ],
+                }
+            ) + b"\n"
+            old_object.write_bytes(poisoned_payload)
+            before = (
+                manifest_path.read_bytes(),
+                index_path.read_bytes(),
+                state_path.read_bytes(),
+            )
+            with session.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {"type": "assistant", "message": {"content": "changed"}}
+                    )
+                    + "\n"
+                )
+
+            with mock.patch.object(
+                fleet,
+                "write_publish_manifest",
+                side_effect=fleet.TerminationRequested,
+            ), mock.patch("builtins.print"), self.assertRaises(
+                fleet.TerminationRequested
+            ):
+                fleet.run_config(configured_args(config_path))
+
+            self.assertEqual(
+                (
+                    manifest_path.read_bytes(),
+                    index_path.read_bytes(),
+                    state_path.read_bytes(),
+                ),
+                before,
+            )
+            self.assertEqual(old_object.read_bytes(), poisoned_payload)
+            self.assertEqual(
+                [path.name for path in (shard / "claude" / "objects").glob("*.json")],
+                [old_object.name],
+            )
+            self.assertFalse((spool / "quarantine" / "test-mac").exists())
 
     def test_termination_during_first_manifest_write_restores_snapshot_and_retries(self):
         with safe_temporary_directory() as tmp:

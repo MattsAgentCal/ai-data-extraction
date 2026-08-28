@@ -1561,7 +1561,14 @@ def archive_conversations(
                         continue
                     cached = reusable_stable_sha256.get(candidate_path)
                     if cached is None:
-                        archived = validate_object_file(candidate_path)
+                        try:
+                            archived = validate_object_file(candidate_path)
+                        except ValueError:
+                            # A manifest-bound object can predate stricter
+                            # validation. Never reuse or cache an invalid body;
+                            # archive the freshly extracted conversation and
+                            # leave the prior object rollback-safe until commit.
+                            continue
                         cached = (
                             stable_codex_conversation_sha256(archived),
                             archived.get("source"),
@@ -2409,6 +2416,10 @@ def write_publish_manifest(
             source_root,
             receipt["host_id"],
             harness,
+            # A replacement transaction keeps the prior manifest's immutable
+            # objects live until this new authorization pointer commits. Only
+            # current index rows are bound into the new manifest.
+            require_exact_object_set=False,
             validation_proofs=validation_proofs,
         )
         manifest_harnesses[harness] = {
@@ -2860,6 +2871,7 @@ def validated_shard_files(
     host_id: str,
     *,
     require_healthy_receipt: bool = True,
+    allow_unindexed_objects: bool = False,
     validation_proofs: ObjectValidationProofCache | None = None,
 ) -> list[Path]:
     source_root = assert_no_symlink_components(source_root)
@@ -2947,6 +2959,7 @@ def validated_shard_files(
             source_root,
             host_id,
             harness,
+            require_exact_object_set=not allow_unindexed_objects,
             validation_proofs=validation_proofs,
         )
     return sorted(files)
@@ -3118,11 +3131,19 @@ def merge_index_values(source_index: dict, destination_index: dict | None) -> di
         or source_index.get("harness") != destination_index.get("harness")
     ):
         raise ValueError("refusing to merge indexes with different identities")
+    harness = source_index["harness"]
+    incoming_rows = source_index.get("conversations", [])
+    incoming_identities = {
+        (row.get("source"), harness, row.get("session_id"))
+        for row in incoming_rows
+    }
     merged = {
         row["object_sha256"]: row
         for row in destination_index.get("conversations", [])
+        if (row.get("source"), harness, row.get("session_id"))
+        not in incoming_identities
     }
-    for row in source_index.get("conversations", []):
+    for row in incoming_rows:
         merged[row["object_sha256"]] = row
     return {
         **destination_index,
@@ -3307,11 +3328,9 @@ def merge_host_shard(
 ) -> dict:
     source_root = assert_no_symlink_components(source_root)
     destination_root = destination_parent / "hosts" / host_id
-    quarantined_unindexed = (
-        0
-        if require_healthy_receipt
-        else quarantine_unindexed_objects(destination_parent, host_id)
-    )
+    # Local collection is a manifest transaction. Unindexed immutable objects
+    # remain rollback-safe until the replacement manifest commits.
+    quarantined_unindexed = 0
     files = validated_shard_files(
         source_root,
         host_id,
@@ -3452,6 +3471,7 @@ def merge_host_shard(
             destination_root,
             host_id,
             require_healthy_receipt=require_healthy_receipt,
+            allow_unindexed_objects=not require_healthy_receipt,
             validation_proofs=validation_proofs,
         )
     except BaseException:
@@ -4303,6 +4323,7 @@ def run_config(args: argparse.Namespace) -> int:
                         validation_proofs=validation_proofs,
                     )
                     manifest_committed = True
+                    quarantine_unindexed_objects(spool_root, host_id)
                     if drive_root is not None:
                         publication = publish_host_shard(
                             spool_root, drive_root, host_id
