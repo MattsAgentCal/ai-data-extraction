@@ -23,6 +23,8 @@ import extract_codex as codex_extractor  # noqa: E402
 import extract_hermes as hermes_extractor  # noqa: E402
 import extract_openclaw as openclaw_extractor  # noqa: E402
 
+TEST_RUN_ID = "20260827T000000.000000Z-deadbeef"
+
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,13 +69,13 @@ def write_archive_object(
 
 
 def write_healthy_receipt(shard: Path, harness: str = "claude") -> Path:
-    receipt = shard / "receipts" / "20260827T000000.000000Z-test.json"
+    receipt = shard / "receipts" / f"{TEST_RUN_ID}.json"
     receipt.parent.mkdir(parents=True, exist_ok=True)
     value = {
         "schema_version": 1,
         "extractor_sha256": "a" * 64,
         "config_sha256": "c" * 64,
-        "run_id": "healthy-test",
+        "run_id": TEST_RUN_ID,
         "collected_at": "2026-08-27T00:00:00+00:00",
         "host_id": shard.name,
         "collection_status": "completed",
@@ -99,6 +101,11 @@ def emulate_allowlisted_rsync(command: list[str], kwargs: dict, source: Path):
     """Copy only the NUL-delimited paths a remote rsync was asked to send."""
     destination = Path(command[-1].rstrip("/"))
     destination.mkdir(parents=True, exist_ok=True)
+    max_size = int(
+        next(item for item in command if item.startswith("--max-size=")).split(
+            "=", 1
+        )[1]
+    )
     relative_paths = [item for item in kwargs.get("input", "").split("\0") if item]
     for relative in relative_paths:
         source_path = source / relative
@@ -106,6 +113,8 @@ def emulate_allowlisted_rsync(command: list[str], kwargs: dict, source: Path):
             continue
         if not source_path.is_file():
             raise subprocess.CalledProcessError(23, command)
+        if source_path.stat().st_size > max_size:
+            continue
         destination_path = destination / relative
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         if destination_path.exists() or destination_path.is_symlink():
@@ -260,13 +269,14 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 )
                 + "\n"
             )
-            receipt = shard / "receipts" / "forged.json"
+            forged_run_id = "20260828T000000.000000Z-feedface"
+            receipt = shard / "receipts" / f"{forged_run_id}.json"
             receipt.parent.mkdir()
             receipt_value = {
                 "schema_version": 1,
                 "extractor_sha256": "a" * 64,
                 "config_sha256": "c" * 64,
-                "run_id": "forged",
+                "run_id": forged_run_id,
                 "host_id": "mini",
                 "collection_status": "completed",
                 "status": "completed",
@@ -276,12 +286,12 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             manifest = {
                 "schema_version": 1,
                 "host_id": "mini",
-                "run_id": "forged",
-                "generated_at": "2026-08-28T00:00:00+00:00",
+                "run_id": forged_run_id,
+                "generated_at": "2026-08-28T00:00:00.000000+00:00",
                 "extractor_sha256": "a" * 64,
                 "config_sha256": "c" * 64,
                 "receipt": {
-                    "path": "receipts/forged.json",
+                    "path": f"receipts/{forged_run_id}.json",
                     "sha256": fleet.file_sha256(receipt),
                 },
                 "harnesses": {
@@ -1522,6 +1532,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             shard = spool_root / "hosts" / "mini"
             shard.mkdir(parents=True)
             (spool_root / ".run.lock").touch()
+            (shard / "publish-manifest.json").write_text("{}\n")
             outside = Path(tmp) / "outside"
             outside.mkdir()
             (shard / "receipts").symlink_to(outside, target_is_directory=True)
@@ -1533,6 +1544,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                     fleet.REMOTE_RSYNC_GUARD,
                     str(spool_root),
                     "mini",
+                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
                     "--version",
                 ],
                 check=False,
@@ -1560,6 +1572,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                     fleet.REMOTE_RSYNC_GUARD,
                     str(spool_root),
                     "mini",
+                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
                     "--version",
                 ],
                 check=False,
@@ -1579,6 +1592,9 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             (spool_root / "hosts" / "mini").mkdir(parents=True)
             lock_path = spool_root / ".run.lock"
             lock_path.touch()
+            (
+                spool_root / "hosts" / "mini" / "publish-manifest.json"
+            ).write_text("{}\n")
             fake_bin = root / "bin"
             fake_bin.mkdir()
             (fake_bin / "rsync").symlink_to("/bin/sleep")
@@ -1592,6 +1608,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                     fleet.REMOTE_RSYNC_GUARD,
                     str(spool_root),
                     "mini",
+                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
                     "0.3",
                 ],
                 stdout=subprocess.PIPE,
@@ -1706,6 +1723,300 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             )
             self.assertNotIn(secret_body, result["remotes"]["mini"]["error"])
 
+    def test_remote_pull_rejects_private_text_in_run_metadata_before_receipts(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            receipt_path = write_healthy_receipt(remote_shard)
+            manifest_path = remote_shard / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            receipt = json.loads(receipt_path.read_text())
+            private_body = (
+                "private transcript line with body-shaped conversation text\n" * 80
+            )[:4096]
+            secret_token = "sk-" + "A" * 32
+            manifest["run_id"] = private_body
+            manifest["generated_at"] = secret_token
+            receipt["run_id"] = private_body
+            receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
+            manifest["receipt"]["sha256"] = fleet.file_sha256(receipt_path)
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+            requested: list[str] = []
+
+            def emulate_remote(command, **kwargs):
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                requested.extend(
+                    item for item in kwargs["input"].split("\0") if item
+                )
+                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess,
+                "run",
+                side_effect=emulate_remote,
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            remote_result = result["remotes"]["mini"]
+            self.assertEqual(requested, ["publish-manifest.json"])
+            self.assertEqual(remote_result["status"], "blocked_integrity_failure")
+            self.assertNotIn(private_body[:40], remote_result["error"])
+            self.assertNotIn(secret_token, remote_result["error"])
+            self.assertFalse((spool_root / "hosts" / "mini").exists())
+            self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+
+    def test_remote_manifest_transport_and_reader_enforce_the_byte_ceiling(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            write_healthy_receipt(remote_shard)
+            manifest_path = remote_shard / "publish-manifest.json"
+            with manifest_path.open("ab") as handle:
+                handle.truncate(fleet.MAX_PUBLISH_MANIFEST_BYTES + 1)
+            requested: list[str] = []
+            rsync_commands: list[list[str]] = []
+
+            with self.assertRaisesRegex(ValueError, "exceeds maximum"):
+                fleet.validate_publish_manifest_metadata(remote_shard, "mini")
+
+            def emulate_remote(command, **kwargs):
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                rsync_commands.append(command)
+                requested.extend(
+                    item for item in kwargs["input"].split("\0") if item
+                )
+                self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
+                self.assertIsInstance(kwargs["stderr"], int)
+                self.assertNotEqual(kwargs["stderr"], subprocess.PIPE)
+                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess,
+                "run",
+                side_effect=emulate_remote,
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertEqual(requested, ["publish-manifest.json"])
+            self.assertEqual(len(rsync_commands), 1)
+            self.assertIn(
+                f"--max-size={fleet.MAX_PUBLISH_MANIFEST_BYTES}",
+                rsync_commands[0],
+            )
+            self.assertEqual(
+                result["remotes"]["mini"]["status"],
+                "blocked_integrity_failure",
+            )
+            self.assertFalse((spool_root / "hosts" / "mini").exists())
+            self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+
+    def test_remote_sender_guard_rejects_an_oversized_manifest_before_rsync(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "remote-spool"
+            shard = spool_root / "hosts" / "mini"
+            shard.mkdir(parents=True)
+            (spool_root / ".run.lock").touch()
+            manifest_path = shard / "publish-manifest.json"
+            manifest_path.touch()
+            with manifest_path.open("r+b") as handle:
+                handle.truncate(fleet.MAX_PUBLISH_MANIFEST_BYTES + 1)
+
+            blocked = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    fleet.REMOTE_RSYNC_GUARD,
+                    str(spool_root),
+                    "mini",
+                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
+                    "--version",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertEqual(blocked.returncode, 42)
+            self.assertEqual(blocked.stdout, "")
+            self.assertEqual(blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR)
+
+    def test_manifest_rejects_per_harness_and_total_object_count_pathologies(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
+            manifest_path = shard / "publish-manifest.json"
+            baseline = json.loads(manifest_path.read_text())
+
+            per_harness = json.loads(json.dumps(baseline))
+            per_harness["harnesses"]["claude"]["object_sha256"] = [
+                "0" * 64
+            ] * (fleet.MAX_MANIFEST_OBJECTS_PER_HARNESS + 1)
+            manifest_path.write_text(json.dumps(per_harness, sort_keys=True) + "\n")
+            self.assertLess(manifest_path.stat().st_size, fleet.MAX_PUBLISH_MANIFEST_BYTES)
+            with self.assertRaisesRegex(ValueError, "invalid publish manifest binding"):
+                fleet.validate_publish_manifest_metadata(shard, "mini")
+
+            def digests(count: int) -> list[str]:
+                return [f"{index:064x}" for index in range(count)]
+
+            total = json.loads(json.dumps(baseline))
+            total["harnesses"] = {
+                "claude": {
+                    "index_sha256": "a" * 64,
+                    "object_sha256": digests(
+                        fleet.MAX_MANIFEST_OBJECTS_PER_HARNESS
+                    ),
+                },
+                "codex": {
+                    "index_sha256": "b" * 64,
+                    "object_sha256": digests(
+                        fleet.MAX_MANIFEST_OBJECTS_PER_HARNESS
+                    ),
+                },
+                "hermes": {
+                    "index_sha256": "c" * 64,
+                    "object_sha256": ["f" * 64],
+                },
+            }
+            manifest_path.write_text(json.dumps(total, sort_keys=True) + "\n")
+            self.assertLess(manifest_path.stat().st_size, fleet.MAX_PUBLISH_MANIFEST_BYTES)
+            with self.assertRaisesRegex(ValueError, "object count exceeds fleet limit"):
+                fleet.validate_publish_manifest_metadata(shard, "mini")
+
+    def test_manifest_rejects_noncanonical_run_ids_and_utc_timestamps(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
+            manifest_path = shard / "publish-manifest.json"
+            baseline = json.loads(manifest_path.read_text())
+            malformed = {
+                "run_id_missing_suffix": ("run_id", "20260827T000000.000000Z"),
+                "run_id_upper_hex": (
+                    "run_id",
+                    "20260827T000000.000000Z-DEADBEEF",
+                ),
+                "run_id_invalid_date": (
+                    "run_id",
+                    "20260230T000000.000000Z-deadbeef",
+                ),
+                "timestamp_zulu_alias": (
+                    "generated_at",
+                    "2026-08-27T00:00:00.000000Z",
+                ),
+                "timestamp_non_utc": (
+                    "generated_at",
+                    "2026-08-27T00:00:00.000000-04:00",
+                ),
+                "timestamp_invalid_date": (
+                    "generated_at",
+                    "2026-02-30T00:00:00.000000+00:00",
+                ),
+            }
+            for name, (field, value) in malformed.items():
+                with self.subTest(name=name):
+                    candidate = json.loads(json.dumps(baseline))
+                    candidate[field] = value
+                    manifest_path.write_text(
+                        json.dumps(candidate, sort_keys=True) + "\n"
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError, "invalid publish manifest identity"
+                    ):
+                        fleet.validate_publish_manifest_metadata(shard, "mini")
+
+    def test_manifest_rejects_extra_keys_at_every_schema_level(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
+            manifest_path = shard / "publish-manifest.json"
+            baseline = json.loads(manifest_path.read_text())
+            candidates = {}
+            top_level = json.loads(json.dumps(baseline))
+            top_level["messages"] = []
+            candidates["top_level"] = top_level
+            receipt_binding = json.loads(json.dumps(baseline))
+            receipt_binding["receipt"]["label"] = "private"
+            candidates["receipt"] = receipt_binding
+            harness_binding = json.loads(json.dumps(baseline))
+            harness_binding["harnesses"]["claude"]["label"] = "private"
+            candidates["harness"] = harness_binding
+
+            for name, candidate in candidates.items():
+                with self.subTest(name=name):
+                    manifest_path.write_text(
+                        json.dumps(candidate, sort_keys=True) + "\n"
+                    )
+                    with self.assertRaises(ValueError) as raised:
+                        fleet.validate_publish_manifest_metadata(shard, "mini")
+                    self.assertNotIn("private", str(raised.exception))
+
+    def test_manifest_rejects_loose_host_harness_path_and_hash_scalars(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
+            manifest_path = shard / "publish-manifest.json"
+            baseline = json.loads(manifest_path.read_text())
+            secret_token = "sk-" + "B" * 32
+            candidates = {}
+            bad_host = json.loads(json.dumps(baseline))
+            bad_host["host_id"] = secret_token
+            candidates["host"] = bad_host
+            bad_harness = json.loads(json.dumps(baseline))
+            bad_harness["harnesses"][secret_token] = bad_harness["harnesses"].pop(
+                "claude"
+            )
+            candidates["harness"] = bad_harness
+            bad_path = json.loads(json.dumps(baseline))
+            bad_path["receipt"]["path"] = f"receipts/{secret_token}.json"
+            candidates["path"] = bad_path
+            bad_receipt_hash = json.loads(json.dumps(baseline))
+            bad_receipt_hash["receipt"]["sha256"] = secret_token
+            candidates["receipt_hash"] = bad_receipt_hash
+            bad_index_hash = json.loads(json.dumps(baseline))
+            bad_index_hash["harnesses"]["claude"]["index_sha256"] = secret_token
+            candidates["index_hash"] = bad_index_hash
+            bad_object_hash = json.loads(json.dumps(baseline))
+            bad_object_hash["harnesses"]["claude"]["object_sha256"] = [
+                secret_token
+            ]
+            candidates["object_hash"] = bad_object_hash
+
+            for name, candidate in candidates.items():
+                with self.subTest(name=name):
+                    manifest_path.write_text(
+                        json.dumps(candidate, sort_keys=True) + "\n"
+                    )
+                    with self.assertRaises(ValueError) as raised:
+                        fleet.validate_publish_manifest_metadata(shard, "mini")
+                    self.assertNotIn(secret_token, str(raised.exception))
+
     def test_remote_pull_rejects_an_unbounded_timeout_before_network_access(self):
         with safe_temporary_directory() as tmp:
             spool_root = Path(tmp) / "spool"
@@ -1760,7 +2071,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             rsync_commands = [
                 command for command in commands if command[0] == "rsync"
             ]
-            self.assertEqual(len(rsync_commands), 3)
+            self.assertEqual(len(rsync_commands), 4)
             for rsync_command in rsync_commands:
                 self.assertEqual(rsync_command[0:2], ["rsync", "-rtz"])
                 self.assertIn("--checksum", rsync_command)
@@ -1780,7 +2091,9 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             write_healthy_receipt(cached_shard)
             manifest_path = cached_shard / "publish-manifest.json"
             original = manifest_path.read_bytes()
-            changed = original.replace(b"healthy-test", b"updated-test", 1)
+            changed_manifest = json.loads(original)
+            changed_manifest["config_sha256"] = "d" * 64
+            changed = fleet.canonical_json(changed_manifest) + b"\n"
             self.assertEqual(len(original), len(changed))
             original_times = manifest_path.stat()
             remote_shard = Path(tmp) / "remote" / "hosts" / "mini"

@@ -19,6 +19,7 @@ import subprocess
 import stat
 import sys
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,6 +132,17 @@ REGEX_CASE_TRANSLATION = str.maketrans(
 )
 OBJECT_NAME_RE = re.compile(r"[0-9a-f]{64}\.json\Z")
 RECEIPT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.json\Z")
+PIPELINE_RECEIPT_SUFFIXES = {
+    "",
+    "-published",
+    "-publication-blocked",
+    "-publication-failed",
+}
+RUN_ID_RE = re.compile(r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-[0-9a-f]{8}\Z")
+GENERATED_AT_RE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"\.[0-9]{6}\+00:00\Z"
+)
 APPROVED_HARNESSES = {"claude", "codex", "openclaw", "hermes"}
 HARNESS_SOURCES = {
     "claude": {"claude-code"},
@@ -148,6 +160,13 @@ EXTRACTOR_FILES = (
 MAX_SOURCE_BYTES = 1280 * 1024 * 1024
 MAX_OBJECT_BYTES = 1280 * 1024 * 1024
 MAX_REMOTE_TIMEOUT_SECONDS = 24 * 60 * 60
+MAX_PUBLISH_MANIFEST_BYTES = 4 * 1024 * 1024
+# The inspected 2026-08-28 fleet high-water marks were 1,129 objects in one
+# harness and 1,158 total. These leave substantial growth room without making
+# a manifest-controlled transfer or allocation unbounded.
+MAX_MANIFEST_OBJECTS_PER_HARNESS = 25_000
+MAX_MANIFEST_OBJECTS_TOTAL = 50_000
+MAX_TRANSFER_ERROR_BYTES = 4096
 CODEX_PATH_PROVENANCE_FIELDS = frozenset({"session_file"})
 
 # The remote rsync sender runs this guard before entering the rsync protocol.
@@ -220,11 +239,14 @@ def verify_tree(root_descriptor):
             os.close(descriptor)
 
 
-if len(sys.argv) < 4:
+if len(sys.argv) < 5:
     fail()
-spool_root, host_id = sys.argv[1:3]
+spool_root, host_id, manifest_limit_text = sys.argv[1:4]
 if not host_id or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in host_id):
     fail()
+if not manifest_limit_text.isdigit():
+    fail()
+manifest_limit = int(manifest_limit_text)
 
 spool_descriptor = open_absolute_directory(spool_root)
 try:
@@ -254,11 +276,25 @@ finally:
     os.close(hosts_descriptor)
 
 try:
+    manifest_descriptor = os.open(
+        "publish-manifest.json",
+        os.O_RDONLY | NOFOLLOW,
+        dir_fd=shard_descriptor,
+    )
+    try:
+        manifest_metadata = os.fstat(manifest_descriptor)
+        if (
+            not stat.S_ISREG(manifest_metadata.st_mode)
+            or manifest_metadata.st_size > manifest_limit
+        ):
+            fail()
+    finally:
+        os.close(manifest_descriptor)
     verify_tree(shard_descriptor)
 finally:
     os.close(shard_descriptor)
 
-raise SystemExit(subprocess.call(["rsync", *sys.argv[3:]]))
+raise SystemExit(subprocess.call(["rsync", *sys.argv[4:]]))
 '''.strip()
 
 
@@ -363,6 +399,48 @@ def open_regular_fd(path: Path) -> int:
     return descriptor
 
 
+def file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def read_bytes_nofollow(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+    size_label: str = "file",
+) -> bytes:
+    descriptor = open_regular_fd(path)
+    try:
+        initial_metadata = os.fstat(descriptor)
+        if max_bytes is not None and initial_metadata.st_size > max_bytes:
+            raise ValueError(f"{size_label} exceeds maximum of {max_bytes} bytes: {path}")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            payload = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+            final_metadata = os.fstat(handle.fileno())
+            if max_bytes is not None and (
+                len(payload) > max_bytes or final_metadata.st_size > max_bytes
+            ):
+                raise ValueError(
+                    f"{size_label} exceeds maximum of {max_bytes} bytes: {path}"
+                )
+            if (
+                file_identity(initial_metadata) != file_identity(final_metadata)
+                or len(payload) != final_metadata.st_size
+            ):
+                raise ValueError(f"{size_label} changed while reading: {path}")
+            return payload
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def read_json_nofollow(
     path: Path,
     *,
@@ -376,38 +454,32 @@ def read_json_nofollow(
             raise ValueError(f"{size_label} exceeds maximum of {max_bytes} bytes: {path}")
         with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
             descriptor = -1
-            value = json.load(handle)
+            if max_bytes is None:
+                json_source = handle
+            else:
+                class BoundedJSONSource:
+                    def read(self, size: int = -1) -> str:
+                        ceiling = max_bytes + 1
+                        return handle.read(
+                            ceiling if size < 0 or size > ceiling else size
+                        )
+
+                json_source = BoundedJSONSource()
+            value = json.load(json_source)
             final_metadata = os.fstat(handle.fileno())
-            initial_identity = (
-                initial_metadata.st_dev,
-                initial_metadata.st_ino,
-                initial_metadata.st_size,
-                initial_metadata.st_mtime_ns,
-                initial_metadata.st_ctime_ns,
-            )
-            final_identity = (
-                final_metadata.st_dev,
-                final_metadata.st_ino,
-                final_metadata.st_size,
-                final_metadata.st_mtime_ns,
-                final_metadata.st_ctime_ns,
-            )
             if (
-                initial_identity != final_identity
-                or (max_bytes is not None and final_metadata.st_size > max_bytes)
+                file_identity(initial_metadata) != file_identity(final_metadata)
                 or os.lseek(handle.fileno(), 0, os.SEEK_CUR) != final_metadata.st_size
             ):
                 raise ValueError(f"{size_label} changed while parsing: {path}")
+            if max_bytes is not None and final_metadata.st_size > max_bytes:
+                raise ValueError(
+                    f"{size_label} exceeds maximum of {max_bytes} bytes: {path}"
+                )
             return value
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-
-
-def read_bytes_nofollow(path: Path) -> bytes:
-    descriptor = open_regular_fd(path)
-    with os.fdopen(descriptor, "rb") as handle:
-        return handle.read()
 
 
 def secure_mkdir(path: Path) -> None:
@@ -1473,6 +1545,36 @@ def validate_index_file(
     return index
 
 
+def is_pipeline_run_id(value: object) -> bool:
+    if not isinstance(value, str) or not RUN_ID_RE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value[:22], "%Y%m%dT%H%M%S.%f")
+    except ValueError:
+        return False
+    return True
+
+
+def is_canonical_utc_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or not GENERATED_AT_RE.fullmatch(value):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    offset = parsed.utcoffset()
+    return offset is not None and offset.total_seconds() == 0
+
+
+def is_pipeline_receipt_path(value: object, run_id: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    return value in {
+        f"receipts/{run_id}{suffix}.json"
+        for suffix in PIPELINE_RECEIPT_SUFFIXES
+    }
+
+
 def write_publish_manifest(
     source_root: Path,
     receipt_path: Path,
@@ -1480,6 +1582,9 @@ def write_publish_manifest(
     config_sha256: str,
 ) -> dict:
     """Atomically bind a healthy receipt to one exact transferable snapshot."""
+    run_id = receipt.get("run_id")
+    if not is_pipeline_run_id(run_id):
+        raise ValueError("refusing to manifest an invalid pipeline run_id")
     collection_status = receipt.get("collection_status", receipt.get("status"))
     if collection_status not in {"completed", "completed_with_absent_harnesses"}:
         raise ValueError("refusing to manifest an incomplete collection")
@@ -1499,11 +1604,15 @@ def write_publish_manifest(
             ),
         }
     relative_receipt = receipt_path.relative_to(source_root)
+    if not is_pipeline_receipt_path(relative_receipt.as_posix(), run_id):
+        raise ValueError("refusing to manifest a receipt outside the pipeline path")
     manifest = {
         "schema_version": 1,
         "host_id": receipt["host_id"],
-        "run_id": receipt["run_id"],
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(
+            timespec="microseconds"
+        ),
         "extractor_sha256": receipt["extractor_sha256"],
         "config_sha256": config_sha256,
         "receipt": {
@@ -1512,7 +1621,24 @@ def write_publish_manifest(
         },
         "harnesses": manifest_harnesses,
     }
-    atomic_write_json(source_root / "publish-manifest.json", manifest)
+    manifest_object_counts = [
+        len(binding["object_sha256"])
+        for binding in manifest_harnesses.values()
+    ]
+    if (
+        any(
+            count > MAX_MANIFEST_OBJECTS_PER_HARNESS
+            for count in manifest_object_counts
+        )
+        or sum(manifest_object_counts) > MAX_MANIFEST_OBJECTS_TOTAL
+    ):
+        raise ValueError("refusing to write an oversized publish manifest object set")
+    manifest_payload = canonical_json(manifest) + b"\n"
+    if len(manifest_payload) > MAX_PUBLISH_MANIFEST_BYTES:
+        raise ValueError("refusing to write an oversized publish manifest")
+    if residual_secret_paths(manifest):
+        raise ValueError("refusing to write a publish manifest with a credential")
+    atomic_write_bytes(source_root / "publish-manifest.json", manifest_payload)
     return manifest
 
 
@@ -1521,7 +1647,11 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
     manifest_path = source_root / "publish-manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise ValueError(f"host shard has no publish manifest: {host_id}")
-    manifest = read_json_nofollow(manifest_path)
+    manifest = read_json_nofollow(
+        manifest_path,
+        max_bytes=MAX_PUBLISH_MANIFEST_BYTES,
+        size_label="publish manifest",
+    )
     if not isinstance(manifest, dict):
         raise ValueError(f"invalid publish manifest identity: {host_id}")
     harnesses = manifest.get("harnesses")
@@ -1545,10 +1675,8 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
         }
         or manifest.get("schema_version") != 1
         or manifest.get("host_id") != host_id
-        or not isinstance(manifest.get("run_id"), str)
-        or not manifest["run_id"]
-        or not isinstance(manifest.get("generated_at"), str)
-        or not manifest["generated_at"]
+        or not is_pipeline_run_id(manifest.get("run_id"))
+        or not is_canonical_utc_timestamp(manifest.get("generated_at"))
         or not all(
             isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
             for value in digest_fields
@@ -1565,11 +1693,13 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
     if (
         not isinstance(receipt_value, str)
         or receipt_relative.as_posix() != receipt_value
+        or not is_pipeline_receipt_path(receipt_value, manifest["run_id"])
         or len(receipt_relative.parts) != 2
         or receipt_relative.parts[0] != "receipts"
         or not RECEIPT_NAME_RE.fullmatch(receipt_relative.name)
     ):
         raise ValueError(f"invalid manifest receipt path: {host_id}")
+    total_objects = 0
     for harness, binding in harnesses.items():
         object_digests = (
             binding.get("object_sha256") if isinstance(binding, dict) else None
@@ -1580,6 +1710,10 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
             or not isinstance(binding.get("index_sha256"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", binding["index_sha256"])
             or not isinstance(object_digests, list)
+        ):
+            raise ValueError(f"invalid publish manifest binding for {harness}")
+        if (
+            len(object_digests) > MAX_MANIFEST_OBJECTS_PER_HARNESS
             or any(
                 not isinstance(item, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", item)
@@ -1588,6 +1722,11 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
             or object_digests != sorted(set(object_digests))
         ):
             raise ValueError(f"invalid publish manifest binding for {harness}")
+        total_objects += len(object_digests)
+        if total_objects > MAX_MANIFEST_OBJECTS_TOTAL:
+            raise ValueError("publish manifest object count exceeds fleet limit")
+    if residual_secret_paths(manifest):
+        raise ValueError("publish manifest contains a recognized credential")
     return manifest
 
 
@@ -2290,6 +2429,7 @@ def rsync_remote_allowlist(
     *,
     timeout_seconds: int,
     link_dest: Path | None,
+    max_file_bytes: int,
     remote_spool_root: str,
     remote_host_id: str,
 ) -> None:
@@ -2303,6 +2443,7 @@ def rsync_remote_allowlist(
         "--relative",
         "--from0",
         "--files-from=-",
+        f"--max-size={max_file_bytes}",
     ]
     if link_dest is not None:
         command.append(f"--link-dest={link_dest}")
@@ -2313,6 +2454,7 @@ def rsync_remote_allowlist(
             shlex.quote(REMOTE_RSYNC_GUARD),
             shlex.quote(remote_spool_root),
             shlex.quote(remote_host_id),
+            str(MAX_PUBLISH_MANIFEST_BYTES),
         )
     )
     command.append(f"--rsync-path={remote_guard}")
@@ -2324,19 +2466,49 @@ def rsync_remote_allowlist(
             str(destination) + "/",
         ]
     )
+    error_read_fd, error_write_fd = os.pipe()
+    error_sample = bytearray()
+
+    def drain_errors() -> None:
+        while True:
+            chunk = os.read(error_read_fd, 8192)
+            if not chunk:
+                return
+            remaining = MAX_TRANSFER_ERROR_BYTES - len(error_sample)
+            if remaining > 0:
+                error_sample.extend(chunk[:remaining])
+
+    error_thread = threading.Thread(target=drain_errors, daemon=True)
+    error_thread.start()
+    caught_error: subprocess.CalledProcessError | None = None
     try:
         subprocess.run(
             command,
             check=True,
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=error_write_fd,
             text=True,
             input="".join(f"{relative}\0" for relative in sorted(relative_paths)),
             timeout=timeout_seconds,
         )
     except subprocess.CalledProcessError as error:
-        if REMOTE_RSYNC_GUARD_ERROR in (error.stderr or ""):
-            raise ValueError("remote shard contains a symlink or unsafe entry") from error
-        raise
+        caught_error = error
+    finally:
+        os.close(error_write_fd)
+        error_thread.join()
+        os.close(error_read_fd)
+    if caught_error is not None:
+        supplied_error = caught_error.stderr or ""
+        if isinstance(supplied_error, bytes):
+            supplied_error = supplied_error.decode("utf-8", errors="replace")
+        bounded_error = supplied_error[:MAX_TRANSFER_ERROR_BYTES] + error_sample.decode(
+            "utf-8", errors="replace"
+        )
+        if REMOTE_RSYNC_GUARD_ERROR in bounded_error:
+            raise ValueError(
+                "remote shard contains a symlink or unsafe entry"
+            ) from caught_error
+        raise caught_error
 
 
 def assert_remote_transfer_paths_have_no_symlink_components(
@@ -2373,8 +2545,8 @@ def assert_remote_transfer_paths_have_no_symlink_components(
             *test_expression,
         ],
         check=False,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         timeout=timeout_seconds,
     )
     if completed.returncode == 1:
@@ -2443,8 +2615,8 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
             manifest_probe = subprocess.run(
                 ["ssh", *ssh_options, ssh_host, "test", "-f", manifest_path],
                 check=False,
-                capture_output=True,
-                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 timeout=min(timeout_value, 30),
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -2505,12 +2677,15 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     manifest_only,
                     timeout_seconds=timeout_seconds,
                     link_dest=link_dest,
+                    max_file_bytes=MAX_PUBLISH_MANIFEST_BYTES,
                     remote_spool_root=remote_spool_root,
                     remote_host_id=remote_host_id,
                 )
                 validate_staged_allowlist(incoming_path, manifest_only)
                 manifest_payload = read_bytes_nofollow(
-                    incoming_path / "publish-manifest.json"
+                    incoming_path / "publish-manifest.json",
+                    max_bytes=MAX_PUBLISH_MANIFEST_BYTES,
+                    size_label="publish manifest",
                 )
                 manifest = validate_publish_manifest_metadata(
                     incoming_path, remote_host_id
@@ -2532,12 +2707,15 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     metadata_paths,
                     timeout_seconds=timeout_seconds,
                     link_dest=link_dest,
+                    max_file_bytes=MAX_PUBLISH_MANIFEST_BYTES,
                     remote_spool_root=remote_spool_root,
                     remote_host_id=remote_host_id,
                 )
                 validate_staged_allowlist(incoming_path, metadata_paths)
                 if read_bytes_nofollow(
-                    incoming_path / "publish-manifest.json"
+                    incoming_path / "publish-manifest.json",
+                    max_bytes=MAX_PUBLISH_MANIFEST_BYTES,
+                    size_label="publish manifest",
                 ) != manifest_payload:
                     raise ValueError("remote publish manifest changed during pull")
                 validate_publish_manifest(
@@ -2548,21 +2726,48 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     require_objects=False,
                 )
 
-                # The final request contains only content-addressed objects from
-                # the pinned manifest (plus the manifest race sentinel).
+                # Fetch only content-addressed objects from the pinned manifest.
+                # The sender lock prevents a conforming publisher from changing
+                # the shard during this body transfer.
+                if object_paths:
+                    assert_remote_transfer_paths_have_no_symlink_components(
+                        ssh_options,
+                        ssh_host,
+                        remote_shard_path,
+                        object_paths,
+                        timeout_seconds=min(timeout_seconds, 30),
+                    )
+                    rsync_remote_allowlist(
+                        source,
+                        incoming_path,
+                        object_paths,
+                        timeout_seconds=timeout_seconds,
+                        link_dest=link_dest,
+                        max_file_bytes=MAX_OBJECT_BYTES,
+                        remote_spool_root=remote_spool_root,
+                        remote_host_id=remote_host_id,
+                    )
+                validate_staged_allowlist(
+                    incoming_path, metadata_paths | object_paths
+                )
+
+                # Re-fetch only the size-bounded manifest after all bodies. This
+                # is the final race sentinel and cannot inherit the object size
+                # allowance from the preceding transfer.
                 assert_remote_transfer_paths_have_no_symlink_components(
                     ssh_options,
                     ssh_host,
                     remote_shard_path,
-                    object_paths | manifest_only,
+                    manifest_only,
                     timeout_seconds=min(timeout_seconds, 30),
                 )
                 rsync_remote_allowlist(
                     source,
                     incoming_path,
-                    object_paths | manifest_only,
+                    manifest_only,
                     timeout_seconds=timeout_seconds,
                     link_dest=link_dest,
+                    max_file_bytes=MAX_PUBLISH_MANIFEST_BYTES,
                     remote_spool_root=remote_spool_root,
                     remote_host_id=remote_host_id,
                 )
@@ -2570,7 +2775,9 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     incoming_path, metadata_paths | object_paths
                 )
                 if read_bytes_nofollow(
-                    incoming_path / "publish-manifest.json"
+                    incoming_path / "publish-manifest.json",
+                    max_bytes=MAX_PUBLISH_MANIFEST_BYTES,
+                    size_label="publish manifest",
                 ) != manifest_payload:
                     raise ValueError("remote publish manifest changed during pull")
                 result = merge_host_shard(incoming_path, spool_root, remote_host_id)
