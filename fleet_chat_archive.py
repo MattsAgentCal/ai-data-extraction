@@ -252,6 +252,7 @@ class ObjectValidationProof:
     ctime_ns: int
     source: str
     session_id: str
+    installation: str | None
 
 
 ObjectValidationProofCache = dict[str, ObjectValidationProof]
@@ -2402,7 +2403,7 @@ def validated_object_provenance(
     digest = path.stem
     proof = validation_proofs.get(digest) if validation_proofs is not None else None
     metadata = None
-    if proof is not None and harness != "codex":
+    if proof is not None:
         descriptor = open_regular_fd(path)
         try:
             metadata = os.fstat(descriptor)
@@ -2418,15 +2419,17 @@ def validated_object_provenance(
                 proof.mtime_ns,
                 proof.ctime_ns,
             )
+            and (harness != "codex" or proof.installation == row.get("installation"))
         ):
             archived_source = proof.source
             archived_session_id = proof.session_id
+            archived_installation = proof.installation
             fully_validated = False
         else:
             validation_proofs.pop(digest, None)
             proof = None
 
-    if proof is None or harness == "codex":
+    if proof is None:
         archived = validate_object_file(path)
         proof_payload, metadata = read_bytes_snapshot_nofollow(
             path,
@@ -2438,9 +2441,8 @@ def validated_object_provenance(
             raise ValueError(f"archive object changed after validation: {digest}")
         archived_source = archived.get("source")
         archived_session_id = archived.get("session_id")
+        archived_installation = archived.get("installation")
         fully_validated = True
-        if harness == "codex" and archived.get("installation") != row.get("installation"):
-            raise ValueError(f"archive object provenance mismatch for {harness}: {digest}")
 
     if (
         not isinstance(archived_source, str)
@@ -2448,6 +2450,7 @@ def validated_object_provenance(
         or archived_source not in HARNESS_SOURCES[harness]
         or archived_source != row.get("source")
         or archived_session_id != row.get("session_id")
+        or (harness == "codex" and archived_installation != row.get("installation"))
     ):
         raise ValueError(f"archive object provenance mismatch for {harness}: {digest}")
 
@@ -2462,6 +2465,11 @@ def validated_object_provenance(
             ctime_ns=metadata.st_ctime_ns,
             source=archived_source,
             session_id=archived_session_id,
+            installation=(
+                archived_installation
+                if isinstance(archived_installation, str)
+                else None
+            ),
         )
     return archived_source, archived_session_id
 
@@ -4078,7 +4086,7 @@ def merge_host_shard(
                 require_healthy_receipt=True,
                 validation_proofs=validation_proofs,
             )
-        elif not defer_destination_validation:
+        else:
             # Each local staging shard is one collection harness. Validate the
             # merged index and every object it now authorizes, but leave other
             # harnesses for their own collection turn. The prior manifest stays
@@ -5579,6 +5587,7 @@ def run_config(args: argparse.Namespace) -> int:
                                 host_id,
                                 hermes_exports=hermes_exports,
                                 validation_proofs=validation_proofs,
+                                prior_manifest_snapshot=prior_snapshot,
                                 _transaction_token=_RUN_CONFIG_TRANSACTION,
                             )
                         )

@@ -16,7 +16,7 @@
     "extract_hermes.py"
   ],
   "runtime_sha256": {
-    "fleet_chat_archive.py": "6a457c2b9d2e5b4927b844e1f2a1f70edc2985f83af95616732d8a6fedd1066e",
+    "fleet_chat_archive.py": "7ebf2fa68a1d11dacc52e3638f87fc133129ce6b12f36e124ca76850c6aa6913",
     "archive_object_contract.py": "f31e840f49fcc9f35dc8223d1d0da3a479ae6da2de7fc62fac73ef6e8521825a",
     "extract_claude_code.py": "cc09aa37295d98572fdffcf6d8ef465d340e9154c1722f85871991aa9af8512e",
     "extract_codex.py": "0e1254d39dd9978ad6e2da72f3198f6edae27dcb101b7342c6feee4f71b825c0",

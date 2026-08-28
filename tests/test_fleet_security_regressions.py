@@ -956,14 +956,20 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                     _transaction_token=CounterfeitToken(),
                 )
 
-            deferred = fleet.merge_host_shard(
-                source_shard,
-                root / "transactional",
-                "test-mac",
-                require_healthy_receipt=False,
-                _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
-            )
+            with mock.patch.object(
+                fleet,
+                "validate_index_file",
+                wraps=fleet.validate_index_file,
+            ) as validate_transactional_index:
+                deferred = fleet.merge_host_shard(
+                    source_shard,
+                    root / "transactional",
+                    "test-mac",
+                    require_healthy_receipt=False,
+                    _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+                )
             self.assertEqual(deferred["status"], "pending_validation")
+            self.assertEqual(validate_transactional_index.call_count, 2)
 
             destination = root / "standalone"
             with mock.patch.object(
@@ -3307,6 +3313,7 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                     "ctime_ns",
                     "source",
                     "session_id",
+                    "installation",
                 },
             )
 
@@ -3382,6 +3389,53 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 validation_proofs[object_path.stem].inode,
                 original_proof.inode,
             )
+
+    def test_codex_run_cache_binds_installation_identity(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "test-mac"
+            fleet.archive_conversations(
+                Path(tmp),
+                "test-mac",
+                "codex",
+                [
+                    {
+                        "archive_schema_version": 2,
+                        "source": "codex",
+                        "session_id": "proof-installation",
+                        "messages": [{"role": "user", "content": "safe body"}],
+                        "cwd": "/synthetic",
+                        "session_file": "/synthetic/codex.jsonl",
+                        "timestamp": None,
+                        "installation": "/synthetic/codex-a",
+                        "_archive_source_sha256": "a" * 64,
+                    }
+                ],
+            )
+            index_path = shard / "codex" / "index.json"
+            validation_proofs = {}
+            fleet.validate_index_file(
+                index_path,
+                shard,
+                "test-mac",
+                "codex",
+                validation_proofs=validation_proofs,
+            )
+            index = json.loads(index_path.read_text())
+            index["conversations"][0]["installation"] = "/synthetic/codex-b"
+            write_canonical_json(index_path, index)
+
+            real_validate = fleet.validate_object_file
+            with mock.patch.object(
+                fleet, "validate_object_file", wraps=real_validate
+            ) as validate, self.assertRaisesRegex(ValueError, "provenance mismatch"):
+                fleet.validate_index_file(
+                    index_path,
+                    shard,
+                    "test-mac",
+                    "codex",
+                    validation_proofs=validation_proofs,
+                )
+            self.assertEqual(validate.call_count, 1)
 
     def test_residual_credential_never_enters_cache_or_advances_manifest(self):
         with safe_temporary_directory() as tmp:
