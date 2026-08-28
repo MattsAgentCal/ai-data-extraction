@@ -15,6 +15,12 @@ import os
 import errno
 import stat
 
+from archive_object_contract import (
+    ARCHIVE_OBJECT_SCHEMA_VERSION,
+    event_envelope,
+    validate_archive_object,
+)
+
 
 _MACOS_COMPATIBILITY_SYMLINKS = {
     Path("/etc"): Path("/private/etc"),
@@ -364,10 +370,22 @@ def extract_claude_session(
                     messages[-1].setdefault("tool_results", []).append(tool_result)
             elif _is_strict_auxiliary_record(obj):
                 recognized_lines += 1
-                auxiliary_events.append(obj)
+                auxiliary_events.append(
+                    event_envelope(
+                        msg_type,
+                        {key: value for key, value in obj.items() if key not in {"type", "timestamp"}},
+                        obj.get("timestamp"),
+                    )
+                )
             elif msg_type in CLAUDE_IGNORED_RECORD_TYPES:
                 recognized_lines += 1
-                auxiliary_events.append(obj)
+                auxiliary_events.append(
+                    event_envelope(
+                        msg_type,
+                        {key: value for key, value in obj.items() if key not in {"type", "timestamp"}},
+                        obj.get("timestamp"),
+                    )
+                )
             else:
                 failed_lines += 1
         _verify_parsed_source(
@@ -395,6 +413,7 @@ def extract_claude_session(
     if not messages and not auxiliary_events:
         return None
     conversation = {
+        "archive_schema_version": ARCHIVE_OBJECT_SCHEMA_VERSION,
         "messages": messages,
         "source": "claude-code",
         "session_id": session_id,
@@ -406,7 +425,7 @@ def extract_claude_session(
         conversation["events"] = auxiliary_events
     if installation is not None:
         conversation["installation"] = str(installation)
-    return conversation
+    return validate_archive_object(conversation, harness="claude")
 
 
 def extract_claude_project_conversations(project_dir, *, quality_out=None):

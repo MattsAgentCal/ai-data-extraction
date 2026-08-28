@@ -22,13 +22,18 @@ def safe_temporary_directory():
     return tempfile.TemporaryDirectory(prefix="trusted-stream-", dir=Path.home())
 
 
-def make_shard(spool: Path, host_id: str = "mini") -> tuple[Path, str, bytes]:
+def make_shard(
+    spool: Path, host_id: str = "mini", session_id: str = "session-1"
+) -> tuple[Path, str, bytes]:
     shard = spool / "hosts" / host_id
     conversation = {
-        "schema_version": 1,
+        "archive_schema_version": 2,
         "source": "claude-code",
-        "session_id": "session-1",
+        "session_id": session_id,
         "messages": [{"role": "user", "content": "authorized body"}],
+        "project_path": None,
+        "project_name": None,
+        "source_file": "/synthetic/session.jsonl",
     }
     canonical = fleet.canonical_json(conversation)
     digest = hashlib.sha256(canonical).hexdigest()
@@ -45,7 +50,7 @@ def make_shard(spool: Path, host_id: str = "mini") -> tuple[Path, str, bytes]:
             "conversations": [
                 {
                     "object_sha256": digest,
-                    "session_id": "session-1",
+                    "session_id": session_id,
                     "source": "claude-code",
                 }
             ],
@@ -91,6 +96,73 @@ def make_shard(spool: Path, host_id: str = "mini") -> tuple[Path, str, bytes]:
     return shard, digest, object_payload
 
 
+def replace_only_object(shard: Path, value: dict, *, old_digest: str) -> str:
+    canonical = fleet.canonical_json(value)
+    digest = hashlib.sha256(canonical).hexdigest()
+    old_path = shard / "claude" / "objects" / f"{old_digest}.json"
+    if old_path.exists():
+        old_path.unlink()
+    (shard / "claude" / "objects" / f"{digest}.json").write_bytes(canonical + b"\n")
+    index_path = shard / "claude" / "index.json"
+    index = json.loads(index_path.read_text())
+    index["conversations"][0].update(
+        {
+            "object_sha256": digest,
+            "session_id": value.get("session_id"),
+            "source": value.get("source"),
+        }
+    )
+    fleet.atomic_write_json(index_path, index)
+    manifest_path = shard / "publish-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["harnesses"]["claude"] = {
+        "index_sha256": fleet.file_sha256(index_path),
+        "object_sha256": [digest],
+    }
+    fleet.atomic_write_json(manifest_path, manifest)
+    return digest
+
+
+def make_codex_shard(
+    spool: Path, *, session_id: str, installation: str
+) -> tuple[Path, str]:
+    conversation = {
+        "archive_schema_version": 2,
+        "source": "codex",
+        "session_id": session_id,
+        "messages": [{"role": "user", "content": "codex body"}],
+        "cwd": "/synthetic/project",
+        "session_file": "/synthetic/rollout.jsonl",
+        "timestamp": "2026-08-28T00:00:00Z",
+        "installation": installation,
+        "_archive_source_sha256": "d" * 64,
+    }
+    fleet.archive_conversations(spool, "mini", "codex", [conversation])
+    shard = spool / "hosts" / "mini"
+    receipt_path = shard / "receipts" / "healthy-codex.json"
+    receipt = {
+        "schema_version": 1,
+        "extractor_sha256": "a" * 64,
+        "config_sha256": "c" * 64,
+        "run_id": "healthy-codex-test",
+        "collected_at": "2026-08-28T00:00:00+00:00",
+        "host_id": "mini",
+        "collection_status": "completed",
+        "status": "completed",
+        "harnesses": {"codex": {"status": "collected"}},
+        "hub": {"remotes": {}},
+        "publication": {"status": "blocked_no_drive_root", "files_copied": 0},
+        "errors": [],
+        "receipt_path": str(receipt_path),
+    }
+    fleet.atomic_write_json(receipt_path, receipt)
+    fleet.write_publish_manifest(shard, receipt_path, receipt, "c" * 64)
+    digest = json.loads((shard / "codex" / "index.json").read_text())[
+        "conversations"
+    ][0]["object_sha256"]
+    return shard, digest
+
+
 def frames(payload: bytes) -> list[tuple[str, bytes]]:
     stream = io.BytesIO(payload)
     if stream.read(len(fleet.STREAM_MAGIC)) != fleet.STREAM_MAGIC:
@@ -118,6 +190,161 @@ def one_frame(path: str, payload: bytes) -> bytes:
 
 
 class TrustedRemoteStreamTests(unittest.TestCase):
+    def test_transport_projection_hides_native_id_and_round_trips_it(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            native_id = "native-session-id-never-in-metadata"
+            source_spool = root / "source"
+            make_shard(source_spool, session_id=native_id)
+            output = io.BytesIO()
+            fleet.stream_shard_to(output, source_spool, "mini")
+            streamed = frames(output.getvalue())
+            metadata = b"".join(
+                payload for path, payload in streamed if "/objects/" not in path
+            )
+            self.assertNotIn(native_id.encode(), metadata)
+            self.assertTrue(any(path == "transport-index/claude.json" for path, _ in streamed))
+            self.assertFalse(any(path == "claude/index.json" for path, _ in streamed))
+
+            incoming = root / "incoming"
+            incoming.mkdir()
+            fleet.receive_stream_to_directory(
+                io.BytesIO(output.getvalue()),
+                incoming,
+                "mini",
+                str(source_spool),
+                time.monotonic() + 10,
+            )
+            index = json.loads((incoming / "claude" / "index.json").read_text())
+            self.assertEqual(index["conversations"][0]["session_id"], native_id)
+
+    def test_codex_projection_hashes_and_binds_installation(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            native_id = "codex-native-private-id"
+            installation = "/Users/synthetic/.codex-private-installation"
+            source_spool = root / "source"
+            make_codex_shard(
+                source_spool, session_id=native_id, installation=installation
+            )
+            output = io.BytesIO()
+            fleet.stream_shard_to(output, source_spool, "mini")
+            streamed = frames(output.getvalue())
+            metadata = b"".join(
+                payload for path, payload in streamed if "/objects/" not in path
+            )
+            self.assertNotIn(native_id.encode(), metadata)
+            self.assertNotIn(installation.encode(), metadata)
+            projection = json.loads(
+                dict(streamed)["transport-index/codex.json"]
+            )
+            self.assertEqual(
+                set(projection["conversations"][0]),
+                {
+                    "transport_schema",
+                    "object_sha256",
+                    "source",
+                    "session_id_sha256",
+                    "source_sha256",
+                    "installation_sha256",
+                },
+            )
+
+            incoming = root / "incoming"
+            incoming.mkdir()
+            fleet.receive_stream_to_directory(
+                io.BytesIO(output.getvalue()),
+                incoming,
+                "mini",
+                str(source_spool),
+                time.monotonic() + 10,
+            )
+            row = json.loads((incoming / "codex" / "index.json").read_text())[
+                "conversations"
+            ][0]
+            self.assertEqual(row["session_id"], native_id)
+            self.assertEqual(row["installation"], installation)
+
+    def test_legacy_v1_and_unknown_v2_shapes_fail_before_magic(self):
+        mutations = (
+            lambda value: {**value, "archive_schema_version": 1},
+            lambda value: {**value, "future_metadata": "private"},
+            lambda value: {
+                **value,
+                "messages": [
+                    {"role": "user", "content": "authorized body", "future": "private"}
+                ],
+            },
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), safe_temporary_directory() as tmp:
+                spool = Path(tmp) / "source"
+                shard, digest, payload = make_shard(spool)
+                replace_only_object(
+                    shard, mutate(json.loads(payload)), old_digest=digest
+                )
+                output = io.BytesIO()
+                with self.assertRaises((fleet.LegacyArchiveSchemaError, ValueError)):
+                    fleet.stream_shard_to(output, spool, "mini")
+                self.assertEqual(output.getvalue(), b"")
+
+    def test_nonfinite_and_excessively_deep_objects_fail_before_magic(self):
+        with safe_temporary_directory() as tmp:
+            spool = Path(tmp) / "source"
+            shard, digest, payload = make_shard(spool)
+            value = json.loads(payload)
+            nested = "body"
+            for _ in range(70):
+                nested = [nested]
+            value["messages"][0]["content"] = nested
+            replace_only_object(shard, value, old_digest=digest)
+            output = io.BytesIO()
+            with self.assertRaises(ValueError):
+                fleet.stream_shard_to(output, spool, "mini")
+            self.assertEqual(output.getvalue(), b"")
+
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            fleet.exact_json_loads(b'{"value":NaN}', label="synthetic")
+
+    def test_later_invalid_object_keeps_entire_stdout_empty(self):
+        with safe_temporary_directory() as tmp:
+            spool = Path(tmp) / "source"
+            shard, first_digest, first_payload = make_shard(spool)
+            second = json.loads(first_payload)
+            second["session_id"] = "session-2"
+            second_canonical = fleet.canonical_json(second)
+            second_digest = hashlib.sha256(second_canonical).hexdigest()
+            object_root = shard / "claude" / "objects"
+            (object_root / f"{second_digest}.json").write_bytes(second_canonical + b"\n")
+            index_path = shard / "claude" / "index.json"
+            index = json.loads(index_path.read_text())
+            index["conversations"].append(
+                {
+                    "object_sha256": second_digest,
+                    "session_id": "session-2",
+                    "source": "claude-code",
+                }
+            )
+            index["conversations"].sort(
+                key=lambda row: (str(row["session_id"]), row["object_sha256"])
+            )
+            fleet.atomic_write_json(index_path, index)
+            invalid_digest = max(first_digest, second_digest)
+            (object_root / f"{invalid_digest}.json").write_bytes(
+                b"private invalid later object\n"
+            )
+            manifest_path = shard / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["harnesses"]["claude"] = {
+                "index_sha256": fleet.file_sha256(index_path),
+                "object_sha256": sorted([first_digest, second_digest]),
+            }
+            fleet.atomic_write_json(manifest_path, manifest)
+            output = io.BytesIO()
+            with self.assertRaises(ValueError):
+                fleet.stream_shard_to(output, spool, "mini")
+            self.assertEqual(output.getvalue(), b"")
+
     def test_valid_stream_round_trip(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -185,6 +412,68 @@ class TrustedRemoteStreamTests(unittest.TestCase):
                 fleet.stream_shard_to(output, spool, "mini")
             self.assertEqual(output.getvalue(), b"")
 
+    def test_exact_body_free_hub_failure_receipt_is_transferable(self):
+        with safe_temporary_directory() as tmp:
+            spool = Path(tmp) / "source"
+            shard, _digest, _payload = make_shard(spool)
+            manifest_path = shard / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            receipt_path = shard / manifest["receipt"]["path"]
+            receipt = json.loads(receipt_path.read_text())
+            receipt["hub"] = {
+                "remotes": {},
+                "status": "failed",
+                "error_type": "ValueError",
+            }
+            receipt["status"] = "failed"
+            receipt["errors"] = [
+                {"component": "hub", "error_type": "ValueError"}
+            ]
+            fleet.atomic_write_json(receipt_path, receipt)
+            manifest["receipt"]["sha256"] = fleet.file_sha256(receipt_path)
+            fleet.atomic_write_json(manifest_path, manifest)
+
+            output = io.BytesIO()
+            fleet.stream_shard_to(output, spool, "mini")
+            self.assertTrue(output.getvalue().startswith(fleet.STREAM_MAGIC))
+
+    def test_hub_failure_receipt_rejects_extras_and_free_text(self):
+        invalid_hubs = (
+            {
+                "remotes": {},
+                "status": "failed",
+                "error_type": "ValueError",
+                "error": "private body",
+            },
+            {
+                "remotes": {"mini": {"status": "unreachable", "files_copied": 0}},
+                "status": "failed",
+                "error_type": "ValueError",
+            },
+            {"remotes": {}, "status": "failed", "error_type": "private body"},
+            {"remotes": {}, "status": "failed", "error_type": ""},
+        )
+        for hub in invalid_hubs:
+            with self.subTest(hub=hub), safe_temporary_directory() as tmp:
+                spool = Path(tmp) / "source"
+                shard, _digest, _payload = make_shard(spool)
+                manifest_path = shard / "publish-manifest.json"
+                manifest = json.loads(manifest_path.read_text())
+                receipt_path = shard / manifest["receipt"]["path"]
+                receipt = json.loads(receipt_path.read_text())
+                receipt["hub"] = hub
+                receipt["status"] = "failed"
+                receipt["errors"] = [
+                    {"component": "hub", "error_type": "ValueError"}
+                ]
+                fleet.atomic_write_json(receipt_path, receipt)
+                manifest["receipt"]["sha256"] = fleet.file_sha256(receipt_path)
+                fleet.atomic_write_json(manifest_path, manifest)
+                output = io.BytesIO()
+                with self.assertRaises(ValueError):
+                    fleet.stream_shard_to(output, spool, "mini")
+                self.assertEqual(output.getvalue(), b"")
+
     def test_symlink_parent_and_leaf_never_emit_outside_body(self):
         for kind in ("parent", "leaf"):
             with self.subTest(kind=kind), safe_temporary_directory() as tmp:
@@ -210,7 +499,7 @@ class TrustedRemoteStreamTests(unittest.TestCase):
                     fleet.stream_shard_to(output, spool, "mini")
                 self.assertNotIn(private, output.getvalue())
 
-    def test_replacement_after_validation_emits_validated_snapshot(self):
+    def test_replacement_after_preflight_is_revalidated_before_body_emission(self):
         with safe_temporary_directory() as tmp:
             spool = Path(tmp) / "source"
             _shard, digest, original = make_shard(spool)
@@ -222,10 +511,10 @@ class TrustedRemoteStreamTests(unittest.TestCase):
                     path.write_bytes(replacement)
 
             output = io.BytesIO()
-            fleet.stream_shard_to(output, spool, "mini", after_validate=replace)
-            emitted = dict(frames(output.getvalue()))
-            self.assertEqual(emitted[f"claude/objects/{digest}.json"], original)
+            with self.assertRaises(ValueError):
+                fleet.stream_shard_to(output, spool, "mini", after_validate=replace)
             self.assertNotIn(replacement, output.getvalue())
+            self.assertNotIn(original, output.getvalue())
 
     def test_unmanifested_object_is_never_emitted(self):
         with safe_temporary_directory() as tmp:
@@ -482,6 +771,7 @@ class TrustedRemoteStreamTests(unittest.TestCase):
     def test_pull_status_classification_is_specific(self):
         cases = {
             fleet.PendingManifestError("pending"): "pending_manifest",
+            fleet.LegacyArchiveSchemaError("legacy"): "legacy_schema",
             fleet.RemoteUnreachableError("down"): "unreachable",
             fleet.RemoteTimeoutError("slow"): "timeout",
             fleet.RemoteIntegrityError("remote"): "remote_integrity_rejection",

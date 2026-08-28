@@ -30,10 +30,13 @@ def write_archive_object(
     shard: Path, harness: str = "claude", host_id: str | None = None
 ) -> tuple[Path, bytes]:
     conversation = {
-        "schema_version": 1,
+        "archive_schema_version": 2,
         "source": "claude-code",
         "session_id": "cached-session",
         "messages": [{"role": "user", "content": "cached body"}],
+        "project_path": None,
+        "project_name": None,
+        "source_file": "/synthetic/session.jsonl",
     }
     canonical = fleet.canonical_json(conversation)
     digest = hashlib.sha256(canonical).hexdigest()
@@ -187,9 +190,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 "claude",
                 [
                     {
+                        "archive_schema_version": 2,
                         "source": "claude-code",
                         "session_id": "unbound-newer",
                         "messages": [{"role": "user", "content": "newer"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/unbound.jsonl",
                     }
                 ],
             )
@@ -210,9 +217,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
         with safe_temporary_directory() as tmp:
             shard = Path(tmp) / "hosts" / "mini"
             archived = {
+                "archive_schema_version": 2,
                 "source": "imessage",
                 "session_id": "body-session",
                 "messages": [],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/forged.jsonl",
             }
             payload = fleet.canonical_json(archived)
             digest = hashlib.sha256(payload).hexdigest()
@@ -273,7 +284,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 json.dumps(manifest, sort_keys=True) + "\n"
             )
 
-            with self.assertRaisesRegex(ValueError, "provenance mismatch"):
+            with self.assertRaisesRegex(ValueError, "source/harness|provenance mismatch"):
                 fleet.validated_shard_files(shard, "mini")
 
     def test_immutable_copy_does_not_overwrite_a_racing_destination(self):
@@ -311,9 +322,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 "claude",
                 [
                     {
+                        "archive_schema_version": 2,
                         "source": "claude-code",
                         "session_id": "newer-session",
                         "messages": [{"role": "user", "content": "newer"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/newer.jsonl",
                     }
                 ],
             )
@@ -402,9 +417,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             destination = root / "destination"
             fleet.merge_host_shard(source_shard, destination, "mini")
             newer = {
+                "archive_schema_version": 2,
                 "source": "claude-code",
                 "session_id": "newer-session",
                 "messages": [{"role": "user", "content": "newer"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/newer.jsonl",
             }
             fleet.archive_conversations(
                 destination, "mini", "claude", [newer]
@@ -1330,14 +1349,22 @@ class FleetSecurityRegressionTests(unittest.TestCase):
         with safe_temporary_directory() as tmp:
             archive_root = Path(tmp) / "archive"
             first = {
-                "source": "test",
+                "archive_schema_version": 2,
+                "source": "claude-code",
                 "session_id": "session-a",
                 "messages": [{"role": "user", "content": "first"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/a.jsonl",
             }
             second = {
-                "source": "test",
+                "archive_schema_version": 2,
+                "source": "claude-code",
                 "session_id": "session-b",
                 "messages": [{"role": "user", "content": "second"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/b.jsonl",
             }
             fleet.archive_conversations(
                 archive_root, "test-mac", "claude", [first, second]
@@ -1615,9 +1642,13 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 "claude",
                 [
                     {
+                        "archive_schema_version": 2,
                         "source": "claude-code",
                         "session_id": "interrupted",
                         "messages": [{"role": "user", "content": "first new body"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/interrupted.jsonl",
                     }
                 ],
             )
@@ -1638,9 +1669,13 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 "claude",
                 [
                     {
+                        "archive_schema_version": 2,
                         "source": "claude-code",
                         "session_id": "changed-retry",
                         "messages": [{"role": "user", "content": "changed body"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/retry.jsonl",
                     }
                 ],
             )
@@ -2417,10 +2452,13 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
             conversation = {
-                "schema_version": 1,
+                "archive_schema_version": 2,
                 "source": "claude-code",
                 "session_id": "object-race",
                 "messages": [{"role": "user", "content": "safe body"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/race.jsonl",
             }
             canonical = fleet.canonical_json(conversation)
             digest = hashlib.sha256(canonical).hexdigest()
@@ -2474,19 +2512,44 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                                     "host_id": "mini",
                                     "ssh_host": "mini.test",
                                     "remote_spool_root": "/remote/spool",
+                                    "remote_pipeline_path": "/safe/fleet_chat_archive.py",
                                 }
                             ]
                         },
                     }
                 )
             )
-            failure = subprocess.CalledProcessError(255, ["rsync"])
+            real_popen = subprocess.Popen
+
+            def unreachable_ssh(command, **kwargs):
+                self.assertIn("stream-shard", command)
+                self.assertIn("StrictHostKeyChecking=yes", command)
+                return real_popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; sys.stdin.buffer.read(); raise SystemExit(255)",
+                    ],
+                    **kwargs,
+                )
+
             with mock.patch.object(fleet.Path, "home", return_value=fake_home), mock.patch.object(
                 fleet, "is_google_drive_path", return_value=True
             ), mock.patch.object(
-                fleet.subprocess, "run", side_effect=failure
+                fleet.subprocess, "Popen", side_effect=unreachable_ssh
             ), mock.patch("builtins.print"):
                 fleet.run_config(configured_args(config_path))
+
+            latest_receipt = max(
+                (spool_root / "hosts" / "studio" / "receipts").glob("*.json"),
+                key=lambda path: path.stat().st_mtime_ns,
+            )
+            self.assertEqual(
+                json.loads(latest_receipt.read_text())["hub"]["remotes"]["mini"][
+                    "status"
+                ],
+                "unreachable",
+            )
 
             published = (
                 drive_root

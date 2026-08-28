@@ -7,6 +7,12 @@ import os
 import stat
 from pathlib import Path
 
+from archive_object_contract import (
+    ARCHIVE_OBJECT_SCHEMA_VERSION,
+    event_envelope,
+    validate_archive_object,
+)
+
 
 _MACOS_COMPATIBILITY_SYMLINKS = {
     Path("/etc"): Path("/private/etc"),
@@ -196,13 +202,17 @@ def extract_openclaw_session(
                 if role in {"user", "assistant", "system", "developer"}:
                     text_parts.append(content)
                 elif role == "toolResult":
-                    tool_results.append({
-                        "type": "toolResult",
-                        "tool": native.get("toolName"),
-                        "content": content,
-                        "message_id": row.get("id"),
-                        "timestamp": timestamp,
-                    })
+                    tool_results.append(
+                        event_envelope(
+                            "toolResult",
+                            {
+                                "tool": native.get("toolName"),
+                                "content": content,
+                                "message_id": row.get("id"),
+                            },
+                            timestamp,
+                        )
+                    )
             elif isinstance(content, list):
                 if any(not isinstance(item, dict) for item in content):
                     failed_lines += 1
@@ -211,21 +221,39 @@ def extract_openclaw_session(
                 for item in content:
                     if item.get("type") == "text" and isinstance(item.get("text"), str):
                         if role == "toolResult":
-                            tool_results.append({
-                                "type": "toolResult",
-                                "tool": native.get("toolName"),
-                                "content": item["text"],
-                                "message_id": row.get("id"),
-                                "timestamp": timestamp,
-                            })
+                            tool_results.append(
+                                event_envelope(
+                                    "toolResult",
+                                    {
+                                        "tool": native.get("toolName"),
+                                        "content": item["text"],
+                                        "message_id": row.get("id"),
+                                    },
+                                    timestamp,
+                                )
+                            )
                         else:
                             text_parts.append(item["text"])
                     else:
-                        event = dict(item)
-                        event.setdefault("type", role or "event")
-                        event["message_id"] = row.get("id")
-                        event["timestamp"] = timestamp
-                        tool_results.append(event)
+                        event_type = item.get("type")
+                        if not isinstance(event_type, str) or not event_type:
+                            failed_lines += 1
+                            recognized_lines -= 1
+                            text_parts = []
+                            tool_results = tool_results[:]
+                            break
+                        tool_results.append(
+                            event_envelope(
+                                event_type,
+                                {
+                                    "message_id": row.get("id"),
+                                    "content": {
+                                        key: value for key, value in item.items() if key != "type"
+                                    },
+                                },
+                                timestamp,
+                            )
+                        )
 
             if role in {"user", "assistant", "system", "developer"} and text_parts:
                 messages.append({
@@ -247,9 +275,10 @@ def extract_openclaw_session(
     quality["recognized_lines"] = recognized_lines
     quality["discovered_files"] = 1
     _publish_quality(quality_out, quality)
-    if not messages and not tool_results:
+    if not session_version_valid or (not messages and not tool_results):
         return None
     conversation = {
+        "archive_schema_version": ARCHIVE_OBJECT_SCHEMA_VERSION,
         "messages": messages,
         "session_id": session_meta.get("id") or session_file.stem,
         "cwd": session_meta.get("cwd"),
@@ -260,7 +289,7 @@ def extract_openclaw_session(
     }
     if tool_results:
         conversation["tool_results"] = tool_results
-    return conversation
+    return validate_archive_object(conversation, harness="openclaw")
 
 
 def find_all_openclaw_sessions(root):

@@ -14,6 +14,12 @@ import os
 import errno
 import stat
 
+from archive_object_contract import (
+    ARCHIVE_OBJECT_SCHEMA_VERSION,
+    event_envelope,
+    validate_archive_object,
+)
+
 
 _MACOS_COMPATIBILITY_SYMLINKS = {
     Path("/etc"): Path("/private/etc"),
@@ -345,43 +351,38 @@ def extract_codex_session(
                     elif payload_type == 'tool_use':
                         recognized_lines += 1
                         # Code execution, file edits, etc.
-                        tool_use = {
-                            'type': 'tool_use',
-                            'tool': payload.get('tool'),
-                            'input': payload.get('input'),
-                            'timestamp': obj.get('timestamp')
-                        }
+                        tool_use = event_envelope(
+                            "tool_use",
+                            {"tool": payload.get("tool"), "input": payload.get("input")},
+                            obj.get("timestamp"),
+                        )
                         tool_results.append(tool_use)
 
                     elif payload_type == 'tool_result':
                         recognized_lines += 1
                         # Results from tool execution (diffs, outputs, etc.)
-                        tool_result = {
-                            'type': 'tool_result',
-                            'tool': payload.get('tool'),
-                            'output': payload.get('output'),
-                            'timestamp': obj.get('timestamp')
-                        }
+                        tool_result = event_envelope(
+                            "tool_result",
+                            {"tool": payload.get("tool"), "output": payload.get("output")},
+                            obj.get("timestamp"),
+                        )
                         tool_results.append(tool_result)
 
                     elif payload_type == 'diff':
                         recognized_lines += 1
                         # Code diffs
-                        diff = {
-                            'type': 'diff',
-                            'file': payload.get('file'),
-                            'diff': payload.get('diff'),
-                            'timestamp': obj.get('timestamp')
-                        }
+                        diff = event_envelope(
+                            "diff",
+                            {"file": payload.get("file"), "diff": payload.get("diff")},
+                            obj.get("timestamp"),
+                        )
                         tool_results.append(diff)
                     elif payload_type in known_event_payloads:
                         recognized_lines += 1
                         tool_results.append(
-                            {
-                                "type": f"event_msg:{payload_type}",
-                                "payload": payload,
-                                "timestamp": obj.get("timestamp"),
-                            }
+                            event_envelope(
+                                f"event_msg:{payload_type}", payload, obj.get("timestamp")
+                            )
                         )
                     else:
                         failed_lines += 1
@@ -440,11 +441,9 @@ def extract_codex_session(
                             }, "response_item")
                         else:
                             tool_results.append(
-                                {
-                                    "type": "response_item:message_empty",
-                                    "payload": payload,
-                                    "timestamp": obj.get("timestamp"),
-                                }
+                                event_envelope(
+                                    "response_item:message_empty", payload, obj.get("timestamp")
+                                )
                             )
 
                     elif payload_type in {
@@ -452,33 +451,29 @@ def extract_codex_session(
                         'function_call', 'function_call_output'
                     }:
                         recognized_lines += 1
-                        tool_event = {
-                            'type': payload_type,
+                        tool_payload = {
                             'id': payload.get('id'),
                             'call_id': payload.get('call_id'),
-                            'timestamp': obj.get('timestamp')
                         }
                         for key in ('name', 'input', 'arguments', 'output', 'status'):
                             if key in payload:
-                                tool_event[key] = payload[key]
-                        tool_results.append(tool_event)
+                                tool_payload[key] = payload[key]
+                        tool_results.append(
+                            event_envelope(payload_type, tool_payload, obj.get("timestamp"))
+                        )
                     elif payload_type in {'reasoning', 'agent_message'}:
                         recognized_lines += 1
                         tool_results.append(
-                            {
-                                "type": f"response_item:{payload_type}",
-                                "payload": payload,
-                                "timestamp": obj.get("timestamp"),
-                            }
+                            event_envelope(
+                                f"response_item:{payload_type}", payload, obj.get("timestamp")
+                            )
                         )
                     elif payload_type in known_response_payloads:
                         recognized_lines += 1
                         tool_results.append(
-                            {
-                                "type": f"response_item:{payload_type}",
-                                "payload": payload,
-                                "timestamp": obj.get("timestamp"),
-                            }
+                            event_envelope(
+                                f"response_item:{payload_type}", payload, obj.get("timestamp")
+                            )
                         )
                     else:
                         failed_lines += 1
@@ -490,11 +485,7 @@ def extract_codex_session(
                 }:
                     recognized_lines += 1
                     tool_results.append(
-                        {
-                            "type": event_type,
-                            "payload": obj.get("payload"),
-                            "timestamp": obj.get("timestamp"),
-                        }
+                        event_envelope(event_type, obj.get("payload"), obj.get("timestamp"))
                     )
                 else:
                     failed_lines += 1
@@ -516,6 +507,7 @@ def extract_codex_session(
     _publish_quality(quality_out, quality)
     if messages or tool_results:
         conv = {
+            'archive_schema_version': ARCHIVE_OBJECT_SCHEMA_VERSION,
             'messages': messages,
             'session_id': session_meta.get('id'),
             'cwd': session_meta.get('cwd'),
@@ -527,7 +519,7 @@ def extract_codex_session(
         if tool_results:
             conv['tool_results'] = tool_results
 
-        return conv
+        return validate_archive_object(conv, harness="codex")
 
     return None
 

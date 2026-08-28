@@ -25,6 +25,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from archive_object_contract import (
+    ARCHIVE_OBJECT_SCHEMA_VERSION,
+    validate_archive_object,
+)
+
 from extract_claude_code import extract_claude_session, find_all_claude_sessions
 from extract_codex import extract_codex_session, find_all_codex_sessions
 from extract_hermes import extract_hermes_export, iter_hermes_export
@@ -145,6 +150,7 @@ HARNESS_SOURCES = {
 }
 EXTRACTOR_FILES = (
     "fleet_chat_archive.py",
+    "archive_object_contract.py",
     "extract_claude_code.py",
     "extract_codex.py",
     "extract_openclaw.py",
@@ -157,19 +163,25 @@ CODEX_PATH_PROVENANCE_FIELDS = frozenset({"session_file"})
 # The SSH transport authenticates an owned source host through its pinned
 # known_hosts entry, then invokes this exact deployed helper.  The helper is the
 # trust boundary; shard files themselves do not need a second signing key.
-STREAM_MAGIC = b"FLEET-CHAT-SHARD\x00\x01"
+STREAM_MAGIC = b"FLEET-CHAT-SHARD\x00\x02"
 STREAM_FRAME_HEADER = struct.Struct(">IQ")
 MAX_STREAM_PATH_BYTES = 512
 MAX_STREAM_FILES = 1_000_000
-MAX_STREAM_METADATA_BYTES = 512 * 1024 * 1024
+MAX_STREAM_METADATA_BYTES = 16 * 1024 * 1024
+MAX_STREAM_METADATA_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_STREAM_TOTAL_BYTES = 4 * 1024 * 1024 * 1024 * 1024
 MAX_CACHE_HINT_BYTES = 65 * MAX_STREAM_FILES
 STREAM_EXIT_PENDING_MANIFEST = 3
 STREAM_EXIT_INTEGRITY_REJECTION = 4
+STREAM_EXIT_LEGACY_SCHEMA = 5
 
 
 class PendingManifestError(Exception):
     """The source host has not committed a transferable manifest yet."""
+
+
+class LegacyArchiveSchemaError(ValueError):
+    """The source shard predates the trusted v2 archive-object contract."""
 
 
 class RemoteUnreachableError(Exception):
@@ -723,6 +735,20 @@ def archive_conversations(
         assert_no_symlink_components(index_path)
         prior_index = read_json_nofollow(index_path)
         prior_rows = list(prior_index.get("conversations", []))
+        for row in prior_rows:
+            digest = row.get("object_sha256") if isinstance(row, dict) else None
+            candidate = objects_root / f"{digest}.json"
+            try:
+                prior_value = read_json_nofollow(candidate)
+            except (FileNotFoundError, ValueError):
+                # Regeneration is replacement, not a migration of arbitrary v1
+                # bodies. A run transaction preserves the old manifested index
+                # until the new v2 manifest commits.
+                prior_rows = []
+                break
+            if prior_value.get("archive_schema_version") != ARCHIVE_OBJECT_SCHEMA_VERSION:
+                prior_rows = []
+                break
     index_by_digest = {
         row["object_sha256"]: row
         for row in prior_rows
@@ -750,6 +776,7 @@ def archive_conversations(
     for conversation in conversations:
         conversation_count += 1
         source_sha256 = conversation.pop("_archive_source_sha256", None)
+        validate_archive_object(conversation, harness=harness)
         conversation, conversation_redactions = redact_value(conversation)
         redaction_count += conversation_redactions
         if conversation_redactions:
@@ -760,6 +787,7 @@ def archive_conversations(
                 "recognized credential remained after redaction at "
                 + ", ".join(residuals[:5])
             )
+        validate_archive_object(conversation, harness=harness)
         digest = None
         stable_sha256 = None
         if harness == "codex":
@@ -786,7 +814,12 @@ def archive_conversations(
                         continue
                     cached = reusable_stable_sha256.get(candidate_path)
                     if cached is None:
-                        archived = validate_object_file(candidate_path)
+                        try:
+                            archived = validate_object_file(candidate_path)
+                        except (FileNotFoundError, ValueError):
+                            # Extractor hash drift triggers regeneration. Legacy
+                            # v1 bodies are not migrated or trusted for reuse.
+                            continue
                         cached = (
                             stable_codex_conversation_sha256(archived),
                             archived.get("source"),
@@ -1352,7 +1385,7 @@ def descriptor_sha256(descriptor: int) -> str:
 
 
 def exact_json_loads(payload: bytes, *, label: str):
-    """Parse UTF-8 JSON while rejecting duplicate object keys."""
+    """Parse UTF-8 JSON while rejecting duplicates and non-finite numbers."""
 
     def reject_duplicates(pairs):
         result = {}
@@ -1363,9 +1396,37 @@ def exact_json_loads(payload: bytes, *, label: str):
         return result
 
     try:
-        return json.loads(payload.decode("utf-8"), object_pairs_hook=reject_duplicates)
+        return json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda constant: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON constant in {label}: {constant}")
+            ),
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"invalid JSON in {label}") from error
+
+
+def require_redaction_idempotence(value: object) -> None:
+    """Prove the current redactor would not change any part of an object."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            cleaned, count = redact_text(item)
+            if count or cleaned != item:
+                raise ValueError("archive object is not redaction-idempotent")
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                if isinstance(key, str):
+                    cleaned_key, key_count = redact_text(key)
+                    if key_count or cleaned_key != key:
+                        raise ValueError("archive object key is not redaction-idempotent")
+                if is_sensitive_key(key) and child not in (None, "", "[REDACTED]"):
+                    raise ValueError("archive object is not redaction-idempotent")
+                stack.append(child)
 
 
 def require_exact_keys(
@@ -1553,10 +1614,8 @@ def validate_index_value(index: object, host_id: str, harness: str) -> dict:
         if digest in seen:
             raise ValueError(f"duplicate archive index row: {digest}")
         seen.add(digest)
-        if row["session_id"] is not None:
-            require_bounded_string(
-                row["session_id"], label="index session_id", maximum=4096
-            )
+        if row["session_id"] is not None and not isinstance(row["session_id"], str):
+            raise ValueError("invalid index session_id")
         if row["source"] not in HARNESS_SOURCES[harness]:
             raise ValueError(f"unauthorized source in {harness} index")
         if "source_sha256" in row:
@@ -1571,7 +1630,6 @@ def validate_index_value(index: object, host_id: str, harness: str) -> dict:
             )
             if not Path(installation).is_absolute():
                 raise ValueError("invalid Codex installation identity: index.json")
-    reject_metadata_secrets(index, label=f"{harness} index")
     return index
 
 
@@ -1601,6 +1659,7 @@ REMOTE_RECEIPT_STATUSES = {
     "published",
     "pending_validation",
     "pending_manifest",
+    "legacy_schema",
     "unreachable",
     "timeout",
     "remote_integrity_rejection",
@@ -1762,13 +1821,23 @@ def validate_receipt_value(
         if "quality" in result:
             validate_quality_value(result["quality"], harness)
     if "hub" in receipt:
-        hub = require_exact_keys(
-            receipt["hub"],
-            required={"remotes"},
-            label="receipt hub",
-        )
+        hub = receipt["hub"]
+        if not isinstance(hub, dict) or set(hub) not in (
+            {"remotes"},
+            {"remotes", "status", "error_type"},
+        ):
+            raise ValueError("invalid receipt hub schema")
         if not isinstance(hub["remotes"], dict):
             raise ValueError("invalid receipt hub remotes")
+        if set(hub) == {"remotes", "status", "error_type"}:
+            if hub["remotes"] or hub["status"] != "failed":
+                raise ValueError("invalid receipt hub failure schema")
+            require_bounded_string(
+                hub["error_type"],
+                label="receipt hub failure error_type",
+                maximum=128,
+                pattern=re.compile(r"[A-Za-z][A-Za-z0-9_]*\Z"),
+            )
         for remote_id, status in hub["remotes"].items():
             validate_host_id(remote_id)
             validate_status_record(
@@ -1816,18 +1885,24 @@ def validate_object_payload(
     *,
     digest: str,
     harness: str,
-    row: dict,
+    row: dict | None,
 ) -> dict:
     value = exact_json_loads(payload, label=f"archive object {digest}")
-    if not isinstance(value, dict):
-        raise ValueError(f"archive object must be a JSON object: {digest}.json")
-    canonical = canonical_json(value) + b"\n"
-    if payload != canonical or hashlib.sha256(canonical_json(value)).hexdigest() != digest:
-        raise ValueError(f"archive object hash/canonical JSON mismatch: {digest}.json")
     if (
-        value.get("source") not in HARNESS_SOURCES[harness]
-        or value.get("source") != row["source"]
-        or value.get("session_id") != row["session_id"]
+        not isinstance(value, dict)
+        or value.get("archive_schema_version") != ARCHIVE_OBJECT_SCHEMA_VERSION
+    ):
+        raise LegacyArchiveSchemaError("archive object requires v2 regeneration")
+    validate_archive_object(value, harness=harness)
+    canonical_body = canonical_json(value)
+    if payload != canonical_body + b"\n" or hashlib.sha256(canonical_body).hexdigest() != digest:
+        raise ValueError(f"archive object hash/canonical JSON mismatch: {digest}.json")
+    if value.get("source") not in HARNESS_SOURCES[harness] or (
+        row is not None
+        and (
+            value.get("source") != row["source"]
+            or value.get("session_id") != row["session_id"]
+        )
     ):
         raise ValueError(f"archive object provenance mismatch for {harness}: {digest}")
     residuals = residual_secret_paths(value)
@@ -1835,6 +1910,7 @@ def validate_object_payload(
         raise ValueError(
             "recognized credential in archive object at " + ", ".join(residuals[:5])
         )
+    require_redaction_idempotence(value)
     return value
 
 
@@ -1848,12 +1924,11 @@ def validate_object_file(path: Path) -> dict:
         size_label="object",
     )
     value = exact_json_loads(payload, label=f"archive object {path.name}")
-    if not isinstance(value, dict):
-        raise ValueError(f"archive object must be a JSON object: {path.name}")
+    validate_archive_object(value)
     expected = path.stem
     if (
-        payload != canonical_json(value) + b"\n"
-        or hashlib.sha256(canonical_json(value)).hexdigest() != expected
+        payload != (canonical_body := canonical_json(value)) + b"\n"
+        or hashlib.sha256(canonical_body).hexdigest() != expected
     ):
         raise ValueError(f"archive object hash/canonical JSON mismatch: {path.name}")
     residuals = residual_secret_paths(value)
@@ -1861,6 +1936,7 @@ def validate_object_file(path: Path) -> dict:
         raise ValueError(
             "recognized credential in archive object at " + ", ".join(residuals[:5])
         )
+    require_redaction_idempotence(value)
     return value
 
 
@@ -1938,7 +2014,13 @@ def write_publish_manifest(
     manifest_harnesses = {}
     for harness in present_harnesses:
         index_path = source_root / harness / "index.json"
-        index = validate_index_file(index_path, source_root, receipt["host_id"], harness)
+        index = validate_index_file(
+            index_path,
+            source_root,
+            receipt["host_id"],
+            harness,
+            require_exact_object_set=False,
+        )
         manifest_harnesses[harness] = {
             "index_sha256": file_sha256(index_path),
             "object_sha256": sorted(
@@ -1959,6 +2041,19 @@ def write_publish_manifest(
         },
         "harnesses": manifest_harnesses,
     }
+    receipt_payload = read_bytes_snapshot_nofollow(
+        receipt_path,
+        max_bytes=MAX_STREAM_METADATA_BYTES,
+        size_label="candidate receipt",
+    )
+    if hashlib.sha256(receipt_payload).hexdigest() != manifest["receipt"]["sha256"]:
+        raise ValueError("candidate receipt changed before manifest commit")
+    validate_receipt_value(
+        exact_json_loads(receipt_payload, label="candidate receipt"),
+        receipt["host_id"],
+        manifest,
+        expected_receipt_path=receipt_path,
+    )
     atomic_write_json(source_root / "publish-manifest.json", manifest)
     return manifest
 
@@ -2296,6 +2391,22 @@ def merge_index_file(source: Path, destination: Path) -> bool:
         or source_index.get("harness") != destination_index.get("harness")
     ):
         raise ValueError("refusing to merge indexes with different identities")
+    destination_objects = destination.parent / "objects"
+    for row in destination_index.get("conversations", []):
+        digest = row.get("object_sha256") if isinstance(row, dict) else None
+        try:
+            destination_value = read_json_nofollow(
+                destination_objects / f"{digest}.json"
+            )
+        except (FileNotFoundError, ValueError):
+            atomic_write_json(destination, source_index)
+            return True
+        if (
+            destination_value.get("archive_schema_version")
+            != ARCHIVE_OBJECT_SCHEMA_VERSION
+        ):
+            atomic_write_json(destination, source_index)
+            return True
     merged = {
         row["object_sha256"]: row
         for row in destination_index.get("conversations", [])
@@ -2540,6 +2651,65 @@ def merge_host_shard(
                 destination_manifest["generated_at"]
             )
 
+    if require_healthy_receipt:
+        if not source_wins:
+            return {
+                "status": "published",
+                "files_copied": 0,
+                "files_verified": len(files),
+                "quarantined_unindexed_objects": quarantined_unindexed,
+            }
+        merge_parent = destination_parent / ".merge"
+        secure_mkdir(merge_parent)
+        backup_root = destination_parent / "hosts" / (
+            f".{host_id}.last-good-{uuid.uuid4().hex}"
+        )
+        backup_created = False
+        published_candidate = False
+        with tempfile.TemporaryDirectory(
+            dir=merge_parent, prefix=f"{host_id}-"
+        ) as staged_directory:
+            candidate_root = Path(staged_directory) / host_id
+            copied = 0
+            verified = 0
+            for source in files:
+                relative = source.relative_to(source_root)
+                immutable = "objects" in relative.parts or "receipts" in relative.parts
+                if copy_verified_file(
+                    source,
+                    candidate_root / relative,
+                    immutable=immutable,
+                ):
+                    copied += 1
+                verified += 1
+            validated_shard_files(
+                candidate_root, host_id, require_healthy_receipt=True
+            )
+            secure_mkdir(destination_root.parent)
+            try:
+                if destination_root.exists():
+                    os.replace(destination_root, backup_root)
+                    backup_created = True
+                os.replace(candidate_root, destination_root)
+                published_candidate = True
+                validated_shard_files(
+                    destination_root, host_id, require_healthy_receipt=True
+                )
+            except BaseException:
+                if published_candidate and destination_root.exists():
+                    shutil.rmtree(destination_root)
+                if backup_created and backup_root.exists():
+                    os.replace(backup_root, destination_root)
+                raise
+            if backup_created:
+                shutil.rmtree(backup_root)
+            return {
+                "status": "published",
+                "files_copied": copied,
+                "files_verified": verified,
+                "quarantined_unindexed_objects": quarantined_unindexed,
+            }
+
     copied = 0
     verified = 0
     # Bodies first, indexes second, receipts third, manifest last. The manifest
@@ -2646,17 +2816,100 @@ def publish_host_shard(
         }
 
 
-def manifest_transfer_paths(manifest: dict) -> tuple[set[str], set[str]]:
-    """Return exact metadata and object paths authorized by a valid manifest."""
-    metadata = {"publish-manifest.json", manifest["receipt"]["path"]}
-    objects: set[str] = set()
-    for harness, binding in manifest["harnesses"].items():
-        metadata.add(f"{harness}/index.json")
-        objects.update(
-            f"{harness}/objects/{digest}.json"
-            for digest in binding["object_sha256"]
+def transport_identity_sha256(value: object) -> str:
+    return hashlib.sha256(canonical_json(value)).hexdigest()
+
+
+def transport_projection_path(harness: str) -> str:
+    return f"transport-index/{harness}.json"
+
+
+def build_transport_projection(index: dict, harness: str) -> dict:
+    rows = []
+    for row in index["conversations"]:
+        projected = {
+            "transport_schema": "base-v1",
+            "object_sha256": row["object_sha256"],
+            "source": row["source"],
+            "session_id_sha256": transport_identity_sha256(row["session_id"]),
+        }
+        if harness == "codex" and "source_sha256" in row:
+            projected.update(
+                {
+                    "transport_schema": "codex-current-v1",
+                    "source_sha256": row["source_sha256"],
+                    "installation_sha256": transport_identity_sha256(
+                        row["installation"]
+                    ),
+                }
+            )
+        rows.append(projected)
+    rows.sort(key=lambda row: row["object_sha256"])
+    return {
+        "schema_version": 1,
+        "host_id": index["host_id"],
+        "harness": harness,
+        "conversations": rows,
+    }
+
+
+def validate_transport_projection_value(
+    projection: object, host_id: str, harness: str
+) -> dict:
+    projection = require_exact_keys(
+        projection,
+        required={"schema_version", "host_id", "harness", "conversations"},
+        label=f"{harness} transport projection",
+    )
+    if (
+        projection["schema_version"] != 1
+        or projection["host_id"] != host_id
+        or projection["harness"] != harness
+        or not isinstance(projection["conversations"], list)
+    ):
+        raise ValueError(f"invalid {harness} transport projection identity")
+    digest_pattern = re.compile(r"[0-9a-f]{64}\Z")
+    seen = set()
+    for raw_row in projection["conversations"]:
+        if not isinstance(raw_row, dict):
+            raise ValueError(f"invalid {harness} transport projection row")
+        schema = raw_row.get("transport_schema")
+        required = {
+            "transport_schema",
+            "object_sha256",
+            "source",
+            "session_id_sha256",
+        }
+        if schema == "codex-current-v1" and harness == "codex":
+            required |= {"source_sha256", "installation_sha256"}
+        elif schema != "base-v1":
+            raise ValueError(f"invalid {harness} transport projection schema")
+        row = require_exact_keys(
+            raw_row,
+            required=required,
+            label=f"{harness} transport projection row",
         )
-    return metadata, objects
+        digest = row["object_sha256"]
+        for key in (
+            "object_sha256",
+            "session_id_sha256",
+            "source_sha256",
+            "installation_sha256",
+        ):
+            if key in row:
+                require_bounded_string(
+                    row[key],
+                    label=f"projection {key}",
+                    maximum=64,
+                    pattern=digest_pattern,
+                )
+        if digest in seen or row["source"] not in HARNESS_SOURCES[harness]:
+            raise ValueError(f"invalid {harness} transport projection provenance")
+        seen.add(digest)
+    if [row["object_sha256"] for row in projection["conversations"]] != sorted(seen):
+        raise ValueError(f"invalid {harness} transport projection order")
+    reject_metadata_secrets(projection, label=f"{harness} transport projection")
+    return projection
 
 
 def load_stream_metadata(
@@ -2715,11 +2968,17 @@ def load_stream_metadata(
             host_id,
             harness,
         )
+        if index_payload != canonical_json(index) + b"\n":
+            raise ValueError(f"manifest-bound index is not canonical for {harness}")
         rows = {row["object_sha256"]: row for row in index["conversations"]}
         if sorted(rows) != binding["object_sha256"]:
             raise ValueError(f"manifest-bound object set mismatch for {harness}")
         rows_by_harness[harness] = rows
-        frames.append((index_relative, index_payload))
+        projection = build_transport_projection(index, harness)
+        validate_transport_projection_value(projection, host_id, harness)
+        frames.append(
+            (transport_projection_path(harness), canonical_json(projection) + b"\n")
+        )
     return source_root, manifest, frames, rows_by_harness
 
 
@@ -2784,18 +3043,18 @@ def stream_shard_to(
             spool_root, host_id
         )
         file_count = len(metadata_frames)
-        total_bytes = sum(len(payload) for _, payload in metadata_frames)
-        if file_count > MAX_STREAM_FILES or total_bytes > MAX_STREAM_TOTAL_BYTES:
+        metadata_bytes = sum(len(payload) for _, payload in metadata_frames)
+        total_bytes = metadata_bytes
+        if (
+            file_count > MAX_STREAM_FILES
+            or metadata_bytes > MAX_STREAM_METADATA_TOTAL_BYTES
+            or total_bytes > MAX_STREAM_TOTAL_BYTES
+        ):
             raise ValueError("stream metadata exceeds transfer bounds")
 
-        # No stdout byte is written until every metadata schema and binding has
-        # passed, so a private field cannot use metadata to cross hosts.
-        output.write(STREAM_MAGIC)
-        for relative, payload in metadata_frames:
-            if after_validate is not None:
-                after_validate(source_root / relative, relative, payload)
-            write_stream_frame(output, relative, payload)
-
+        # Whole-snapshot preflight. This intentionally retains no parsed object
+        # tree and emits no stdout byte, including magic, until every authorized
+        # object (including cache-hinted objects) has passed the v2 contract.
         for harness in sorted(manifest["harnesses"]):
             for digest in manifest["harnesses"][harness]["object_sha256"]:
                 relative = f"{harness}/objects/{digest}.json"
@@ -2816,10 +3075,32 @@ def stream_shard_to(
                     raise ValueError("stream shard exceeds transfer bounds")
                 if after_validate is not None:
                     after_validate(source_root / relative, relative, payload)
+                del payload
+
+        output.write(STREAM_MAGIC)
+        for relative, payload in metadata_frames:
+            if after_validate is not None:
+                after_validate(source_root / relative, relative, payload)
+            write_stream_frame(output, relative, payload)
+
+        for harness in sorted(manifest["harnesses"]):
+            for digest in manifest["harnesses"][harness]["object_sha256"]:
+                relative = f"{harness}/objects/{digest}.json"
+                payload = read_bytes_snapshot_nofollow(
+                    source_root / relative,
+                    max_bytes=MAX_OBJECT_BYTES,
+                    size_label="manifest-bound object",
+                )
+                validate_object_payload(
+                    payload,
+                    digest=digest,
+                    harness=harness,
+                    row=rows_by_harness[harness][digest],
+                )
                 if digest in skip_object_digests:
                     continue
-                # The path is never reopened after validation; this exact in-memory
-                # snapshot is the only body that can reach stdout.
+                # Re-read and revalidate immediately before emitting this exact
+                # snapshot. A post-preflight replacement cannot cross stdout.
                 write_stream_frame(output, relative, payload)
         output.write(STREAM_FRAME_HEADER.pack(0, 0))
         output.flush()
@@ -2838,6 +3119,9 @@ def stream_shard_command(args: argparse.Namespace) -> int:
     except PendingManifestError:
         print("pending_manifest", file=sys.stderr)
         return STREAM_EXIT_PENDING_MANIFEST
+    except LegacyArchiveSchemaError:
+        print("legacy_schema", file=sys.stderr)
+        return STREAM_EXIT_LEGACY_SCHEMA
     except (FileNotFoundError, OSError, ValueError):
         # Do not echo exception text: paths and parser details are not part of
         # the protocol and stdout must remain binary-only.
@@ -2930,6 +3214,89 @@ def receive_payload_to_file(
         os.close(directory_fd)
 
 
+def reconstruct_indexes_from_transport(
+    incoming_root: Path,
+    manifest: dict,
+    host_id: str,
+) -> None:
+    for harness in sorted(manifest["harnesses"]):
+        projection_relative = transport_projection_path(harness)
+        projection_payload = read_bytes_snapshot_nofollow(
+            incoming_root / projection_relative,
+            max_bytes=MAX_STREAM_METADATA_BYTES,
+            size_label=f"{harness} transport projection",
+        )
+        projection = validate_transport_projection_value(
+            exact_json_loads(
+                projection_payload, label=f"{harness} transport projection"
+            ),
+            host_id,
+            harness,
+        )
+        expected_digests = manifest["harnesses"][harness]["object_sha256"]
+        if [row["object_sha256"] for row in projection["conversations"]] != sorted(
+            expected_digests
+        ):
+            raise LocalStreamIntegrityError("transport projection object set mismatch")
+        reconstructed_rows = []
+        for projected in projection["conversations"]:
+            digest = projected["object_sha256"]
+            object_payload = read_bytes_snapshot_nofollow(
+                incoming_root / harness / "objects" / f"{digest}.json",
+                max_bytes=MAX_OBJECT_BYTES,
+                size_label="received archive object",
+            )
+            value = validate_object_payload(
+                object_payload,
+                digest=digest,
+                harness=harness,
+                row=None,
+            )
+            session_id = value.get("session_id")
+            if transport_identity_sha256(session_id) != projected["session_id_sha256"]:
+                raise LocalStreamIntegrityError("transport session identity mismatch")
+            row = {
+                "object_sha256": digest,
+                "session_id": session_id,
+                "source": projected["source"],
+            }
+            if value.get("source") != projected["source"]:
+                raise LocalStreamIntegrityError("transport source identity mismatch")
+            if projected["transport_schema"] == "codex-current-v1":
+                installation = value.get("installation")
+                if (
+                    not isinstance(installation, str)
+                    or transport_identity_sha256(installation)
+                    != projected["installation_sha256"]
+                ):
+                    raise LocalStreamIntegrityError("Codex installation identity mismatch")
+                row["source_sha256"] = projected["source_sha256"]
+                row["installation"] = installation
+            reconstructed_rows.append(row)
+        reconstructed_rows.sort(
+            key=lambda row: (str(row["session_id"]), row["object_sha256"])
+        )
+        index = {
+            "schema_version": 1,
+            "host_id": host_id,
+            "harness": harness,
+            "conversations": reconstructed_rows,
+        }
+        validate_index_value(index, host_id, harness)
+        index_payload = canonical_json(index) + b"\n"
+        if (
+            hashlib.sha256(index_payload).hexdigest()
+            != manifest["harnesses"][harness]["index_sha256"]
+        ):
+            raise LocalStreamIntegrityError("reconstructed index hash mismatch")
+        atomic_write_bytes(incoming_root / harness / "index.json", index_payload)
+
+    transport_root = incoming_root / "transport-index"
+    for harness in sorted(manifest["harnesses"]):
+        (transport_root / f"{harness}.json").unlink()
+    transport_root.rmdir()
+
+
 def receive_stream_to_directory(
     stream,
     incoming_root: Path,
@@ -2947,6 +3314,7 @@ def receive_stream_to_directory(
     cache_hints = set() if cache_hints is None else cache_hints
     received_paths: set[str] = set()
     total_bytes = 0
+    metadata_bytes = 0
     file_count = 0
     object_count = 0
     while True:
@@ -2982,8 +3350,12 @@ def receive_stream_to_directory(
         total_bytes += payload_length
         if "/objects/" in relative:
             object_count += 1
+        else:
+            metadata_bytes += payload_length
         if file_count > MAX_STREAM_FILES or total_bytes > MAX_STREAM_TOTAL_BYTES:
             raise LocalStreamIntegrityError("stream exceeds aggregate bounds")
+        if metadata_bytes > MAX_STREAM_METADATA_TOTAL_BYTES:
+            raise LocalStreamIntegrityError("stream metadata exceeds aggregate bounds")
         receive_payload_to_file(
             stream,
             incoming_root / relative,
@@ -2996,7 +3368,10 @@ def receive_stream_to_directory(
             all_paths = [
                 "publish-manifest.json",
                 manifest["receipt"]["path"],
-                *(f"{harness}/index.json" for harness in sorted(manifest["harnesses"])),
+                *(
+                    transport_projection_path(harness)
+                    for harness in sorted(manifest["harnesses"])
+                ),
                 *(
                     f"{harness}/objects/{digest}.json"
                     for harness in sorted(manifest["harnesses"])
@@ -3052,6 +3427,7 @@ def receive_stream_to_directory(
         manifest,
         expected_receipt_path=remote_receipt_path,
     )
+    reconstruct_indexes_from_transport(incoming_root, manifest, host_id)
     validated_shard_files(incoming_root, host_id, require_healthy_receipt=True)
     return {
         "stream_files_received": file_count,
@@ -3151,6 +3527,8 @@ def raise_for_remote_exit(returncode: int, *, stream_complete: bool) -> None:
         return
     if returncode == STREAM_EXIT_PENDING_MANIFEST:
         raise PendingManifestError("remote manifest is pending")
+    if returncode == STREAM_EXIT_LEGACY_SCHEMA:
+        raise LegacyArchiveSchemaError("remote shard requires v2 regeneration")
     if returncode == 255:
         raise RemoteUnreachableError("SSH transport was unreachable")
     raise RemoteIntegrityError("trusted remote helper rejected the shard")
@@ -3244,13 +3622,26 @@ def pull_remote_stream(
             result = merge_host_shard(Path(incoming), spool_root, remote_host_id)
             result.update(transfer)
             return result
-        except (LocalStreamIntegrityError, RemoteTimeoutError, RemoteIntegrityError):
+        except BaseException:
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
             if process.poll() is None:
                 terminate_remote_process(process)
+            else:
+                try:
+                    process.wait(timeout=0)
+                except (subprocess.TimeoutExpired, AttributeError):
+                    terminate_remote_process(process)
             raise
         finally:
             if process.stdout is not None:
-                process.stdout.close()
+                try:
+                    process.stdout.close()
+                except (OSError, ValueError):
+                    pass
 
 
 def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
@@ -3280,13 +3671,21 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     "files_copied": 0,
                 }
                 continue
-            source_spool = assert_no_symlink_components(Path(remote["source_spool_root"]))
             try:
+                source_spool = assert_no_symlink_components(
+                    Path(remote["source_spool_root"])
+                )
                 result = merge_host_shard(
                     source_spool / "hosts" / remote_host_id,
                     spool_root,
                     remote_host_id,
                 )
+            except LegacyArchiveSchemaError:
+                statuses[remote_host_id] = {
+                    "status": "legacy_schema",
+                    "files_copied": 0,
+                }
+                continue
             except (FileNotFoundError, ValueError):
                 statuses[remote_host_id] = {
                     "status": "local_integrity_rejection",
@@ -3325,16 +3724,35 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
         except ValueError:
             statuses[remote_host_id] = {"status": "invalid_remote", "files_copied": 0}
             continue
+        timeout_seconds = remote.get("timeout_seconds", 300)
+        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86400:
+            statuses[remote_host_id] = {
+                "status": "invalid_remote",
+                "files_copied": 0,
+            }
+            continue
         cached_shard = spool_root / "hosts" / remote_host_id
         validated_cache: Path | None = None
         cache_hints: set[str] = set()
-        if cached_shard.exists():
+        if cached_shard.exists() and not (
+            cached_shard / "publish-manifest.json"
+        ).exists():
+            # A cancelled first import has no authorization pointer. Treat it as
+            # an untrusted partial cache; the transactional merge will replace it.
+            validated_cache = None
+        elif cached_shard.exists():
             try:
                 cached_files = validated_shard_files(
                     cached_shard,
                     remote_host_id,
                     require_healthy_receipt=True,
                 )
+            except LegacyArchiveSchemaError:
+                statuses[remote_host_id] = {
+                    "status": "legacy_schema",
+                    "files_copied": 0,
+                }
+                continue
             except (FileNotFoundError, ValueError):
                 statuses[remote_host_id] = {
                     "status": "local_integrity_rejection",
@@ -3362,6 +3780,8 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
             }
         except PendingManifestError:
             statuses[remote_host_id] = {"status": "pending_manifest", "files_copied": 0}
+        except LegacyArchiveSchemaError:
+            statuses[remote_host_id] = {"status": "legacy_schema", "files_copied": 0}
         except RemoteTimeoutError:
             statuses[remote_host_id] = {"status": "timeout", "files_copied": 0}
         except RemoteUnreachableError:
