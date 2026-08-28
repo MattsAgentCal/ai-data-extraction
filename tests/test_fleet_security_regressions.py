@@ -539,9 +539,34 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 "status": "completed",
                 "errors": [],
                 "harnesses": {
-                    "claude": {"status": "collected"},
-                    "openclaw": {"status": "collected"},
+                    harness: {
+                        "status": "collected",
+                        "conversations": 1,
+                        "new_objects": 1,
+                        "redactions": 0,
+                        "index_conversations": 1,
+                        "publishable": True,
+                        "quality": {
+                            "discovered_lines": 1,
+                            "parsed_lines": 1,
+                            "failed_lines": 0,
+                            "recognized_lines": 1,
+                            "discovered_files": 1,
+                            "processed_files": 1,
+                            "skipped_unchanged_files": 0,
+                            "status": "complete",
+                        },
+                    }
+                    for harness in ("claude", "openclaw")
                 },
+                "hub": {"remotes": {}},
+                "publication": {
+                    "status": "blocked_no_drive_root",
+                    "files_copied": 0,
+                },
+                "receipt_path": (
+                    f"/archive/hosts/mini/receipts/{source_run_id}.json"
+                ),
             }
             write_canonical_json(source_receipt, source_receipt_value)
             fleet.write_publish_manifest(
