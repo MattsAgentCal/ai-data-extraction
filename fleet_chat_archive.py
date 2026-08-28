@@ -210,6 +210,8 @@ MAX_STREAM_METADATA_BYTES = 16 * 1024 * 1024
 MAX_STREAM_METADATA_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_STREAM_TOTAL_BYTES = 4 * 1024 * 1024 * 1024 * 1024
 MAX_CACHE_HINT_BYTES = 65 * MAX_STREAM_FILES
+MAX_REMOTE_TIMEOUT_SECONDS = 24 * 60 * 60
+REMOTE_PROCESS_REAP_SECONDS = 2
 STREAM_EXIT_PENDING_MANIFEST = 3
 STREAM_EXIT_INTEGRITY_REJECTION = 4
 STREAM_EXIT_LEGACY_SCHEMA = 5
@@ -803,10 +805,12 @@ def remove_file_if_present(path: Path) -> None:
 
 
 @contextlib.contextmanager
-def defer_sigterm_during_rollback():
+def defer_termination_signals_during_rollback():
     previous_mask = None
     if hasattr(signal, "pthread_sigmask"):
-        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        previous_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM}
+        )
     try:
         yield
     finally:
@@ -994,7 +998,7 @@ def archive_conversations(
             candidate = objects_root / f"{digest}.json"
             try:
                 prior_value = read_json_nofollow(candidate)
-            except (FileNotFoundError, ValueError):
+            except (OSError, ValueError):
                 # Regeneration is replacement, not a migration of arbitrary v1
                 # bodies. A run transaction preserves the old manifested index
                 # until the new v2 manifest commits.
@@ -3769,10 +3773,29 @@ def merge_host_shard(
                     destination_root, host_id, require_healthy_receipt=True
                 )
             except BaseException:
-                if published_candidate and destination_root.exists():
-                    shutil.rmtree(destination_root)
-                if backup_created and backup_root.exists():
-                    os.replace(backup_root, destination_root)
+                try:
+                    with defer_termination_signals_during_rollback():
+                        if published_candidate and destination_root.exists():
+                            try:
+                                shutil.rmtree(destination_root)
+                            except BaseException:
+                                pass
+                        if (
+                            backup_created
+                            and backup_root.exists()
+                            and not destination_root.exists()
+                        ):
+                            try:
+                                os.replace(backup_root, destination_root)
+                                validated_shard_files(
+                                    destination_root,
+                                    host_id,
+                                    require_healthy_receipt=True,
+                                )
+                            except BaseException:
+                                pass
+                except BaseException:
+                    pass
                 raise
             if backup_created:
                 if stale_destination_objects:
@@ -3809,6 +3832,8 @@ def merge_host_shard(
     rollback_payloads: dict[Path, bytes | None] = {}
     attempted_payloads: dict[Path, bytes] = {}
     touched_mutable_destinations: list[Path] = []
+    newly_created_paths: dict[Path, str] = {}
+    newly_created_directories: set[Path] = set()
 
     def mutable_destination_payload(destination: Path) -> bytes | None:
         if not destination.exists() and not destination.is_symlink():
@@ -3843,6 +3868,17 @@ def merge_host_shard(
             if not source_wins and "receipts" not in relative.parts:
                 continue
             destination = destination_root / relative
+            if not destination.exists() and not destination.is_symlink():
+                newly_created_paths[destination] = file_sha256(source)
+                directory = destination.parent
+                while (
+                    directory == destination_root
+                    or destination_root in directory.parents
+                ):
+                    if directory.exists() or directory.is_symlink():
+                        break
+                    newly_created_directories.add(directory)
+                    directory = directory.parent
             immutable = "objects" in relative.parts or "receipts" in relative.parts
             if destination in rollback_payloads:
                 if (
@@ -3875,22 +3911,66 @@ def merge_host_shard(
                 validation_proofs=validation_proofs,
             )
     except BaseException:
-        for destination in touched_mutable_destinations:
-            try:
-                current_payload = mutable_destination_payload(destination)
-            except (OSError, ValueError):
-                # A path we wrote was replaced with unrelated or unsafe data.
-                # Do not let rollback turn that race into a destructive unlink.
-                continue
-            previous_payload = rollback_payloads[destination]
-            if current_payload == previous_payload:
-                continue
-            if current_payload != attempted_payloads[destination]:
-                continue
-            if previous_payload is None:
-                remove_file_if_present(destination)
-            else:
-                atomic_write_bytes(destination, previous_payload)
+        try:
+            with defer_termination_signals_during_rollback():
+                for destination in touched_mutable_destinations:
+                    try:
+                        current_payload = mutable_destination_payload(destination)
+                    except (OSError, ValueError):
+                        # A path we wrote was replaced with unrelated or unsafe data.
+                        # Do not let rollback turn that race into a destructive unlink.
+                        continue
+                    previous_payload = rollback_payloads[destination]
+                    if current_payload == previous_payload:
+                        continue
+                    if current_payload != attempted_payloads[destination]:
+                        continue
+                    try:
+                        if previous_payload is None:
+                            remove_file_if_present(destination)
+                        else:
+                            atomic_write_bytes(destination, previous_payload)
+                    except BaseException:
+                        pass
+
+                mutable_metadata_restored = True
+                for destination, previous_payload in rollback_payloads.items():
+                    try:
+                        current_payload = mutable_destination_payload(destination)
+                    except BaseException:
+                        mutable_metadata_restored = False
+                        continue
+                    mutable_metadata_restored = (
+                        mutable_metadata_restored
+                        and current_payload == previous_payload
+                    )
+
+                if mutable_metadata_restored:
+                    for destination, expected_digest in sorted(
+                        newly_created_paths.items(),
+                        key=lambda item: len(item[0].parts),
+                        reverse=True,
+                    ):
+                        try:
+                            if (
+                                destination.is_file()
+                                and not destination.is_symlink()
+                                and file_sha256(destination) == expected_digest
+                            ):
+                                remove_file_if_present(destination)
+                        except BaseException:
+                            pass
+                    for directory in sorted(
+                        newly_created_directories,
+                        key=lambda path: len(path.parts),
+                        reverse=True,
+                    ):
+                        try:
+                            directory.rmdir()
+                        except OSError:
+                            pass
+        except BaseException:
+            pass
         raise
     return {
         "status": (
@@ -4678,6 +4758,39 @@ def validate_remote_absolute_path_token(value: object, *, label: str) -> str:
     return value
 
 
+def quarantine_invalid_cached_shard(
+    spool_root: Path, host_id: str, *, incomplete: bool
+) -> Path:
+    """Atomically remove an unusable cache from the live host namespace."""
+    spool_root = assert_no_symlink_components(spool_root)
+    host_id = validate_host_id(host_id)
+    source = assert_no_symlink_components(spool_root / "hosts" / host_id)
+    if not source.is_dir():
+        raise ValueError("invalid cached shard")
+    quarantine_parent = spool_root / "quarantine" / host_id
+    secure_mkdir(quarantine_parent)
+    label = "incomplete-cache" if incomplete else "invalid-cache"
+    target = quarantine_parent / (
+        f"{label}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}"
+        f"-{uuid.uuid4().hex[:8]}"
+    )
+    _, source_parent_fd = open_directory_fd(source.parent)
+    _, target_parent_fd = open_directory_fd(target.parent)
+    try:
+        os.rename(
+            source.name,
+            target.name,
+            src_dir_fd=source_parent_fd,
+            dst_dir_fd=target_parent_fd,
+        )
+        os.fsync(source_parent_fd)
+        os.fsync(target_parent_fd)
+    finally:
+        os.close(source_parent_fd)
+        os.close(target_parent_fd)
+    return target
+
+
 def write_before_deadline(stream, payload: bytes, deadline: float) -> None:
     view = memoryview(payload)
     offset = 0
@@ -4695,29 +4808,64 @@ def write_before_deadline(stream, payload: bytes, deadline: float) -> None:
         offset += written
 
 
-def terminate_remote_process(process) -> None:
+def bounded_remote_process_wait(process, deadline: float) -> int:
+    remaining = max(0.0, deadline - time.monotonic())
+    return process.wait(timeout=remaining)
+
+
+def terminate_remote_process(process, deadline: float) -> None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except (AttributeError, ProcessLookupError, PermissionError):
+    except (AttributeError, OSError):
         try:
             process.kill()
-        except (AttributeError, ProcessLookupError):
+        except (AttributeError, OSError):
             pass
     try:
-        process.wait(timeout=5)
-    except (subprocess.TimeoutExpired, AttributeError):
+        now = time.monotonic()
+        reap_deadline = min(
+            deadline + REMOTE_PROCESS_REAP_SECONDS,
+            now + REMOTE_PROCESS_REAP_SECONDS,
+        )
+        bounded_remote_process_wait(process, reap_deadline)
+    except BaseException:
+        pass
+
+
+def cleanup_failed_remote_process(process, deadline: float) -> None:
+    """Close pipes and reap a failed SSH helper without masking its exception."""
+    try:
+        if process.stdin is not None:
+            process.stdin.close()
+    except BaseException:
+        pass
+    try:
+        try:
+            live = process.poll() is None
+        except BaseException:
+            live = True
+        if live:
+            terminate_remote_process(process, deadline)
+        else:
+            bounded_remote_process_wait(process, deadline)
+    except BaseException:
+        pass
+    try:
+        if process.stdout is not None:
+            process.stdout.close()
+    except BaseException:
         pass
 
 
 def wait_remote_process(process, deadline: float) -> int:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        terminate_remote_process(process)
+        terminate_remote_process(process, deadline)
         raise RemoteTimeoutError("remote stream timed out")
     try:
         return process.wait(timeout=remaining)
     except subprocess.TimeoutExpired as error:
-        terminate_remote_process(process)
+        terminate_remote_process(process, deadline)
         raise RemoteTimeoutError("remote stream timed out") from error
 
 
@@ -4746,7 +4894,10 @@ def pull_remote_stream(
     remote_spool_root = remote["remote_spool_root"]
     remote_pipeline_path = remote["remote_pipeline_path"]
     timeout_seconds = remote.get("timeout_seconds", 300)
-    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86400:
+    if (
+        type(timeout_seconds) is not int
+        or not 1 <= timeout_seconds <= MAX_REMOTE_TIMEOUT_SECONDS
+    ):
         raise ValueError("invalid remote timeout_seconds")
     command = [
         "ssh",
@@ -4790,6 +4941,7 @@ def pull_remote_stream(
         except OSError as error:
             raise RemoteUnreachableError("could not start SSH transport") from error
         stream_complete = False
+        failure_cleaned_up = False
         try:
             assert process.stdin is not None and process.stdout is not None
             try:
@@ -4824,21 +4976,11 @@ def pull_remote_stream(
             result.update(transfer)
             return result
         except BaseException:
-            if process.stdin is not None:
-                try:
-                    process.stdin.close()
-                except (OSError, ValueError):
-                    pass
-            if process.poll() is None:
-                terminate_remote_process(process)
-            else:
-                try:
-                    process.wait(timeout=0)
-                except (subprocess.TimeoutExpired, AttributeError):
-                    terminate_remote_process(process)
+            failure_cleaned_up = True
+            cleanup_failed_remote_process(process, deadline)
             raise
         finally:
-            if process.stdout is not None:
+            if not failure_cleaned_up and process.stdout is not None:
                 try:
                     process.stdout.close()
                 except (OSError, ValueError):
@@ -4916,6 +5058,16 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
         ):
             statuses[remote_host_id] = {"status": "invalid_remote", "files_copied": 0}
             continue
+        timeout_seconds = remote.get("timeout_seconds", 300)
+        if (
+            type(timeout_seconds) is not int
+            or not 1 <= timeout_seconds <= MAX_REMOTE_TIMEOUT_SECONDS
+        ):
+            statuses[remote_host_id] = {
+                "status": "invalid_remote",
+                "files_copied": 0,
+            }
+            continue
         try:
             remote_spool_root = validate_remote_absolute_path_token(
                 remote.get("remote_spool_root"), label="remote_spool_root"
@@ -4926,48 +5078,65 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
         except ValueError:
             statuses[remote_host_id] = {"status": "invalid_remote", "files_copied": 0}
             continue
-        timeout_seconds = remote.get("timeout_seconds", 300)
-        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86400:
-            statuses[remote_host_id] = {
-                "status": "invalid_remote",
-                "files_copied": 0,
-            }
-            continue
         cached_shard = spool_root / "hosts" / remote_host_id
         validated_cache: Path | None = None
         cache_hints: set[str] = set()
-        if cached_shard.exists() and not (
-            cached_shard / "publish-manifest.json"
-        ).exists():
-            # A cancelled first import has no authorization pointer. Treat it as
-            # an untrusted partial cache; the transactional merge will replace it.
-            validated_cache = None
-        elif cached_shard.exists():
+        if cached_shard.exists() or cached_shard.is_symlink():
             try:
-                cached_files = validated_shard_files(
-                    cached_shard,
-                    remote_host_id,
-                    require_healthy_receipt=True,
-                    validation_proofs=None,
+                cached_shard = assert_no_symlink_components(cached_shard)
+                manifest_path = cached_shard / "publish-manifest.json"
+                manifest_absent = (
+                    not manifest_path.is_file() or manifest_path.is_symlink()
                 )
-            except LegacyArchiveSchemaError:
-                statuses[remote_host_id] = {
-                    "status": "legacy_schema",
-                    "files_copied": 0,
+                if manifest_absent:
+                    quarantine_invalid_cached_shard(
+                        spool_root, remote_host_id, incomplete=True
+                    )
+                    cached_shard = spool_root / "hosts" / remote_host_id
+                    cached_files = []
+                else:
+                    try:
+                        cached_files = validated_shard_files(
+                            cached_shard,
+                            remote_host_id,
+                            require_healthy_receipt=True,
+                            validation_proofs=None,
+                        )
+                    except (OSError, ValueError):
+                        try:
+                            restored = restore_indexes_to_manifest(
+                                cached_shard, remote_host_id
+                            )
+                        except (OSError, ValueError):
+                            restored = False
+                        if not restored:
+                            raise ValueError("invalid cached shard")
+                        cached_files = validated_shard_files(
+                            cached_shard,
+                            remote_host_id,
+                            require_healthy_receipt=True,
+                            validation_proofs=None,
+                        )
+            except (OSError, ValueError):
+                try:
+                    quarantine_invalid_cached_shard(
+                        spool_root, remote_host_id, incomplete=False
+                    )
+                except (OSError, ValueError):
+                    statuses[remote_host_id] = {
+                        "status": "local_integrity_rejection",
+                        "files_copied": 0,
+                    }
+                    continue
+                cached_shard = spool_root / "hosts" / remote_host_id
+                cached_files = []
+            if cached_files:
+                validated_cache = cached_shard
+                cache_hints = {
+                    path.stem
+                    for path in cached_files
+                    if path.parent.name == "objects"
                 }
-                continue
-            except (FileNotFoundError, ValueError):
-                statuses[remote_host_id] = {
-                    "status": "local_integrity_rejection",
-                    "files_copied": 0,
-                }
-                continue
-            validated_cache = assert_no_symlink_components(cached_shard)
-            cache_hints = {
-                path.stem
-                for path in cached_files
-                if path.parent.name == "objects"
-            }
         try:
             result = pull_remote_stream(
                 remote,
@@ -5128,7 +5297,7 @@ def run_config(args: argparse.Namespace) -> int:
     def rollback_uncommitted_collection() -> None:
         if not transaction_snapshots_ready:
             return
-        with defer_sigterm_during_rollback():
+        with defer_termination_signals_during_rollback():
             for index_path, payload in prior_index_payloads.items():
                 if payload is None:
                     remove_file_if_present(index_path)

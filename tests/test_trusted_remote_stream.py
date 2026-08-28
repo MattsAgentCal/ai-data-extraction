@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -101,6 +102,52 @@ def make_shard(
     return shard, digest, object_payload
 
 
+def make_superset_shard(spool: Path, host_id: str = "mini") -> Path:
+    shard, _digest, _payload = make_shard(spool, host_id)
+    fleet.archive_conversations(
+        spool,
+        host_id,
+        "claude",
+        [
+            {
+                "archive_schema_version": 2,
+                "source": "claude-code",
+                "session_id": "session-2",
+                "messages": [{"role": "user", "content": "second authorized body"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/session-2.jsonl",
+            }
+        ],
+    )
+    receipt_path = shard / "receipts" / f"{TEST_RUN_ID}.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["harnesses"]["claude"]["conversations"] = 2
+    receipt["harnesses"]["claude"]["new_objects"] = 2
+    receipt["harnesses"]["claude"]["index_conversations"] = 2
+    fleet.atomic_write_json(receipt_path, receipt)
+    fleet.write_publish_manifest(shard, receipt_path, receipt, "c" * 64)
+    return shard
+
+
+def tree_snapshot(root: Path) -> dict[str, tuple]:
+    snapshot = {}
+    for path in [root, *sorted(root.rglob("*"))]:
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        metadata = path.lstat()
+        if path.is_dir():
+            snapshot[relative] = ("directory", metadata.st_mode & 0o777)
+        elif path.is_file():
+            snapshot[relative] = (
+                "file",
+                metadata.st_mode & 0o777,
+                path.read_bytes(),
+            )
+        else:
+            snapshot[relative] = ("other", metadata.st_mode)
+    return snapshot
+
+
 def replace_only_object(shard: Path, value: dict, *, old_digest: str) -> str:
     canonical = fleet.canonical_json(value)
     digest = hashlib.sha256(canonical).hexdigest()
@@ -195,6 +242,325 @@ def one_frame(path: str, payload: bytes) -> bytes:
 
 
 class TrustedRemoteStreamTests(unittest.TestCase):
+    def test_stream_holds_archive_run_lock_through_preflight_and_emission(self):
+        with safe_temporary_directory() as tmp:
+            spool = Path(tmp) / "spool"
+            make_shard(spool)
+            locked = False
+
+            @fleet.contextlib.contextmanager
+            def tracked_lock(_spool_root):
+                nonlocal locked
+                self.assertFalse(locked)
+                locked = True
+                try:
+                    yield
+                finally:
+                    locked = False
+
+            class LockCheckingOutput(io.BytesIO):
+                def write(self, payload):
+                    self.assert_locked()
+                    return super().write(payload)
+
+                def assert_locked(self):
+                    if not locked:
+                        raise AssertionError("stream output escaped archive run lock")
+
+            output = LockCheckingOutput()
+
+            def after_validate(*_args):
+                self.assertTrue(locked)
+
+            with mock.patch.object(fleet, "archive_run_lock", tracked_lock):
+                fleet.stream_shard_to(
+                    output, spool, "mini", after_validate=after_validate
+                )
+
+            self.assertFalse(locked)
+            self.assertGreater(len(output.getvalue()), len(fleet.STREAM_MAGIC))
+
+    def test_fresh_merge_cancellation_leaves_no_partial_and_retry_succeeds(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source = make_shard(root / "source")[0]
+            destination = root / "destination"
+            real_copy = fleet.copy_verified_file
+
+            def cancel_after_manifest(source_path, destination_path, *, immutable):
+                changed = real_copy(source_path, destination_path, immutable=immutable)
+                if source_path.name == "publish-manifest.json":
+                    raise fleet.TerminationRequested
+                return changed
+
+            with mock.patch.object(
+                fleet, "copy_verified_file", side_effect=cancel_after_manifest
+            ), self.assertRaises(fleet.TerminationRequested):
+                fleet.merge_host_shard(source, destination, "mini")
+
+            final_shard = destination / "hosts" / "mini"
+            self.assertFalse(final_shard.exists())
+            result = fleet.merge_host_shard(source, destination, "mini")
+            self.assertEqual(result["status"], "published")
+            fleet.validated_shard_files(final_shard, "mini")
+
+    def test_merge_cancellation_preserves_exact_last_good_and_retry_succeeds(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination = root / "destination"
+            final_shard = make_shard(destination)[0]
+            source = make_superset_shard(root / "source")
+            prior_tree = tree_snapshot(final_shard)
+            real_copy = fleet.copy_verified_file
+
+            def cancel_after_manifest(source_path, destination_path, *, immutable):
+                changed = real_copy(source_path, destination_path, immutable=immutable)
+                if source_path.name == "publish-manifest.json":
+                    raise KeyboardInterrupt
+                return changed
+
+            with mock.patch.object(
+                fleet, "copy_verified_file", side_effect=cancel_after_manifest
+            ), self.assertRaises(KeyboardInterrupt):
+                fleet.merge_host_shard(source, destination, "mini")
+
+            self.assertEqual(tree_snapshot(final_shard), prior_tree)
+            result = fleet.merge_host_shard(source, destination, "mini")
+            self.assertEqual(result["status"], "published")
+            manifest = json.loads((final_shard / "publish-manifest.json").read_text())
+            self.assertEqual(
+                len(manifest["harnesses"]["claude"]["object_sha256"]), 2
+            )
+
+    def test_rollback_context_blocks_and_restores_sigint_and_sigterm(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("pthread signal masks are unavailable")
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        try:
+            with fleet.defer_termination_signals_during_rollback():
+                current = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                self.assertIn(signal.SIGINT, current)
+                self.assertIn(signal.SIGTERM, current)
+            restored = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+            self.assertEqual(restored, previous)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+    def test_failed_metadata_restore_keeps_new_immutable_files(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination = root / "destination"
+            final_shard = destination / "hosts" / "mini"
+            fleet.archive_conversations(
+                destination,
+                "mini",
+                "claude",
+                [{
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": "original",
+                    "messages": [{"role": "user", "content": "original"}],
+                    "project_path": None,
+                    "project_name": None,
+                    "source_file": "/synthetic/original.jsonl",
+                }],
+            )
+            prior_index = (final_shard / "claude" / "index.json").read_bytes()
+            source_parent = root / "source"
+            fleet.archive_conversations(
+                source_parent,
+                "mini",
+                "claude",
+                [{
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": "new",
+                    "messages": [{"role": "user", "content": "new"}],
+                    "project_path": None,
+                    "project_name": None,
+                    "source_file": "/synthetic/new.jsonl",
+                }],
+            )
+            source = source_parent / "hosts" / "mini"
+            new_digest = json.loads((source / "claude" / "index.json").read_text())[
+                "conversations"
+            ][0]["object_sha256"]
+            real_merge_index = fleet.merge_index_file
+            real_atomic_write = fleet.atomic_write_bytes
+
+            def merge_then_fail(source_path, destination_path):
+                real_merge_index(source_path, destination_path)
+                raise ValueError("initiating merge failure")
+
+            def fail_original_restore(path, payload):
+                if path.name == "index.json" and payload == prior_index:
+                    raise KeyboardInterrupt
+                return real_atomic_write(path, payload)
+
+            with mock.patch.object(
+                fleet, "merge_index_file", side_effect=merge_then_fail
+            ), mock.patch.object(
+                fleet, "atomic_write_bytes", side_effect=fail_original_restore
+            ), self.assertRaisesRegex(ValueError, "initiating merge failure"):
+                fleet.merge_host_shard(
+                    source,
+                    destination,
+                    "mini",
+                    require_healthy_receipt=False,
+                )
+
+            self.assertTrue(
+                (final_shard / "claude" / "objects" / f"{new_digest}.json").is_file()
+            )
+
+    def test_cancellation_during_rollback_preserves_original_and_exact_tree(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination = root / "destination"
+            fleet.archive_conversations(
+                destination,
+                "mini",
+                "claude",
+                [{
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": "original",
+                    "messages": [{"role": "user", "content": "original"}],
+                    "project_path": None,
+                    "project_name": None,
+                    "source_file": "/synthetic/original.jsonl",
+                }],
+            )
+            final_shard = destination / "hosts" / "mini"
+            prior_tree = tree_snapshot(final_shard)
+            source_parent = root / "source"
+            fleet.archive_conversations(
+                source_parent,
+                "mini",
+                "claude",
+                [{
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": "new",
+                    "messages": [{"role": "user", "content": "new"}],
+                    "project_path": None,
+                    "project_name": None,
+                    "source_file": "/synthetic/new.jsonl",
+                }],
+            )
+            source = source_parent / "hosts" / "mini"
+            real_merge_index = fleet.merge_index_file
+            real_atomic_write = fleet.atomic_write_bytes
+            rollback_phase = False
+            interrupted_rollback = False
+
+            def merge_then_interrupt(source_path, destination_path):
+                nonlocal rollback_phase
+                real_merge_index(source_path, destination_path)
+                rollback_phase = True
+                raise KeyboardInterrupt
+
+            def cancel_during_restore(path, payload):
+                nonlocal interrupted_rollback
+                real_atomic_write(path, payload)
+                if rollback_phase and not interrupted_rollback:
+                    interrupted_rollback = True
+                    raise fleet.TerminationRequested
+
+            with mock.patch.object(
+                fleet, "merge_index_file", side_effect=merge_then_interrupt
+            ), mock.patch.object(
+                fleet, "atomic_write_bytes", side_effect=cancel_during_restore
+            ), self.assertRaises(KeyboardInterrupt):
+                fleet.merge_host_shard(
+                    source,
+                    destination,
+                    "mini",
+                    require_healthy_receipt=False,
+                )
+
+            self.assertTrue(interrupted_rollback)
+            self.assertEqual(tree_snapshot(final_shard), prior_tree)
+            result = fleet.merge_host_shard(
+                source,
+                destination,
+                "mini",
+                require_healthy_receipt=False,
+            )
+            self.assertEqual(result["status"], "published")
+
+    def test_actual_sigint_before_rollback_write_is_deferred_until_restored(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("pthread signal masks are unavailable")
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination = root / "destination"
+            fleet.archive_conversations(
+                destination,
+                "mini",
+                "claude",
+                [{
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": "original",
+                    "messages": [{"role": "user", "content": "original"}],
+                    "project_path": None,
+                    "project_name": None,
+                    "source_file": "/synthetic/original.jsonl",
+                }],
+            )
+            final_shard = destination / "hosts" / "mini"
+            prior_tree = tree_snapshot(final_shard)
+            source_parent = root / "source"
+            fleet.archive_conversations(
+                source_parent,
+                "mini",
+                "claude",
+                [{
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": "new",
+                    "messages": [{"role": "user", "content": "new"}],
+                    "project_path": None,
+                    "project_name": None,
+                    "source_file": "/synthetic/new.jsonl",
+                }],
+            )
+            source = source_parent / "hosts" / "mini"
+            real_merge_index = fleet.merge_index_file
+            real_atomic_write = fleet.atomic_write_bytes
+            rollback_phase = False
+            sent_sigint = False
+
+            def merge_then_fail(source_path, destination_path):
+                nonlocal rollback_phase
+                real_merge_index(source_path, destination_path)
+                rollback_phase = True
+                raise ValueError("initiating merge failure")
+
+            def signal_before_restore(path, payload):
+                nonlocal sent_sigint
+                if rollback_phase and not sent_sigint:
+                    sent_sigint = True
+                    os.kill(os.getpid(), signal.SIGINT)
+                    self.assertIn(signal.SIGINT, signal.sigpending())
+                real_atomic_write(path, payload)
+
+            with mock.patch.object(
+                fleet, "merge_index_file", side_effect=merge_then_fail
+            ), mock.patch.object(
+                fleet, "atomic_write_bytes", side_effect=signal_before_restore
+            ), self.assertRaisesRegex(ValueError, "initiating merge failure"):
+                fleet.merge_host_shard(
+                    source,
+                    destination,
+                    "mini",
+                    require_healthy_receipt=False,
+                )
+
+            self.assertTrue(sent_sigint)
+            self.assertEqual(tree_snapshot(final_shard), prior_tree)
+
     def test_two_codex_rollouts_without_session_meta_have_stable_private_identities(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -1092,6 +1458,117 @@ class TrustedRemoteStreamTests(unittest.TestCase):
             self.assertEqual(second["stream_objects_received"], 0)
             self.assertEqual(second["status"], "published")
 
+    def test_manifest_absent_partial_cache_is_quarantined_and_retried_fresh(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            spool = root / "destination"
+            cached = make_shard(spool)[0]
+            (cached / "publish-manifest.json").unlink()
+            remote = {
+                "host_id": "mini",
+                "ssh_host": "mini.test",
+                "remote_spool_root": "/remote/spool",
+                "remote_pipeline_path": "/safe/helper.py",
+            }
+            with mock.patch.object(
+                fleet,
+                "pull_remote_stream",
+                return_value={
+                    "status": "published",
+                    "files_copied": 4,
+                    "files_verified": 4,
+                },
+            ) as pull:
+                result = fleet.pull_hub_remotes({"remotes": [remote]}, spool)
+
+            self.assertEqual(result["remotes"]["mini"]["status"], "pulled")
+            self.assertFalse(cached.exists())
+            self.assertEqual(
+                len(list((spool / "quarantine" / "mini").glob("incomplete-cache-*"))),
+                1,
+            )
+            self.assertIsNone(pull.call_args.args[3])
+            self.assertEqual(pull.call_args.args[4], set())
+
+    def test_corrupt_manifest_cache_is_quarantined_and_retried_fresh(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source_spool = root / "source"
+            make_shard(source_spool)
+            spool = root / "destination"
+            cached = make_shard(spool)[0]
+            (cached / "publish-manifest.json").write_text("{}\n")
+            remote = {
+                "host_id": "mini",
+                "ssh_host": "mini.test",
+                "remote_spool_root": str(source_spool),
+                "remote_pipeline_path": str(CLI),
+                "timeout_seconds": 10,
+            }
+            real_popen = subprocess.Popen
+
+            def run_helper_locally(command, **kwargs):
+                remote_python = command.index("python3")
+                return real_popen(
+                    [sys.executable, *command[remote_python + 1 :]], **kwargs
+                )
+
+            with mock.patch.object(
+                fleet.subprocess, "Popen", side_effect=run_helper_locally
+            ):
+                result = fleet.pull_hub_remotes({"remotes": [remote]}, spool)
+
+            self.assertEqual(result["remotes"]["mini"]["status"], "pulled")
+            quarantined = list(
+                (spool / "quarantine" / "mini").glob("invalid-cache-*")
+            )
+            self.assertEqual(len(quarantined), 1)
+            self.assertEqual(
+                (quarantined[0] / "publish-manifest.json").read_text(), "{}\n"
+            )
+            fleet.validated_shard_files(spool / "hosts" / "mini", "mini")
+
+    def test_interrupted_cache_index_is_restored_to_last_good_manifest(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            spool = root / "destination"
+            cached = make_shard(spool)[0]
+            fleet.archive_conversations(
+                spool,
+                "mini",
+                "claude",
+                [{
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": "interrupted-row",
+                    "messages": [{"role": "user", "content": "uncommitted"}],
+                    "project_path": None,
+                    "project_name": None,
+                    "source_file": "/synthetic/interrupted.jsonl",
+                }],
+            )
+            remote = {
+                "host_id": "mini",
+                "ssh_host": "mini.test",
+                "remote_spool_root": "/remote/spool",
+                "remote_pipeline_path": "/safe/helper.py",
+            }
+            with mock.patch.object(
+                fleet,
+                "pull_remote_stream",
+                return_value={
+                    "status": "published",
+                    "files_copied": 0,
+                    "files_verified": 4,
+                },
+            ) as pull:
+                result = fleet.pull_hub_remotes({"remotes": [remote]}, spool)
+
+            self.assertEqual(result["remotes"]["mini"]["status"], "pulled")
+            self.assertEqual(pull.call_args.args[3], cached)
+            fleet.validated_shard_files(cached, "mini")
+            self.assertFalse((spool / "quarantine").exists())
+
     def test_interrupted_and_timeout_streams_leave_no_final_shard(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -1133,6 +1610,197 @@ class TrustedRemoteStreamTests(unittest.TestCase):
                             remote, destination, "mini", None, set()
                         )
                     self.assertFalse((destination / "hosts" / "mini").exists())
+
+    def test_local_validation_failure_kills_and_reaps_process_group(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = mock.Mock()
+                self.stdout = mock.Mock()
+                self.pid = 4321
+                self.waited = False
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout):
+                self.waited = True
+                return -signal.SIGKILL
+
+        with safe_temporary_directory() as tmp:
+            process = FakeProcess()
+            remote = {
+                "host_id": "mini",
+                "ssh_host": "mini.test",
+                "remote_spool_root": "/remote/spool",
+                "remote_pipeline_path": "/safe/helper.py",
+                "timeout_seconds": 10,
+            }
+            with mock.patch.object(
+                fleet.subprocess, "Popen", return_value=process
+            ), mock.patch.object(
+                fleet, "write_before_deadline"
+            ), mock.patch.object(
+                fleet,
+                "receive_stream_to_directory",
+                side_effect=ValueError("synthetic local validation failure"),
+            ), mock.patch.object(fleet.os, "killpg") as killpg, self.assertRaisesRegex(
+                ValueError, "synthetic local validation failure"
+            ):
+                fleet.pull_remote_stream(
+                    remote, Path(tmp) / "destination", "mini", None, set()
+                )
+
+            process.stdin.close.assert_called()
+            killpg.assert_called_once_with(process.pid, signal.SIGKILL)
+            self.assertTrue(process.waited)
+            process.stdout.close.assert_called()
+
+    def test_cleanup_preserves_original_when_kill_and_bounded_wait_fail(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = mock.Mock()
+                self.stdout = mock.Mock()
+                self.pid = 4321
+                self.kill = mock.Mock(side_effect=PermissionError("kill denied"))
+                self.wait_timeouts = []
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout):
+                self.wait_timeouts.append(timeout)
+                raise subprocess.TimeoutExpired("ssh", timeout)
+
+        with safe_temporary_directory() as tmp:
+            process = FakeProcess()
+            remote = {
+                "host_id": "mini",
+                "ssh_host": "mini.test",
+                "remote_spool_root": "/remote/spool",
+                "remote_pipeline_path": "/safe/helper.py",
+                "timeout_seconds": 10,
+            }
+            original = OSError("original local failure")
+            with mock.patch.object(
+                fleet.subprocess, "Popen", return_value=process
+            ), mock.patch.object(
+                fleet, "write_before_deadline"
+            ), mock.patch.object(
+                fleet, "receive_stream_to_directory", side_effect=original
+            ), mock.patch.object(
+                fleet.os,
+                "killpg",
+                side_effect=PermissionError("killpg denied"),
+            ) as killpg, self.assertRaises(OSError) as raised:
+                fleet.pull_remote_stream(
+                    remote, Path(tmp) / "destination", "mini", None, set()
+                )
+
+            self.assertIs(raised.exception, original)
+            killpg.assert_called_once_with(process.pid, signal.SIGKILL)
+            process.kill.assert_called_once_with()
+            self.assertEqual(len(process.wait_timeouts), 1)
+            self.assertGreater(process.wait_timeouts[0], 0)
+            self.assertLessEqual(
+                process.wait_timeouts[0], fleet.REMOTE_PROCESS_REAP_SECONDS
+            )
+            process.stdin.close.assert_called()
+            process.stdout.close.assert_called()
+
+    def test_baseexceptions_after_popen_are_cleaned_and_preserved(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = mock.Mock()
+                self.stdout = mock.Mock()
+                self.pid = 4321
+                self.waited = False
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout):
+                self.waited = True
+                return -signal.SIGKILL
+
+        remote = {
+            "host_id": "mini",
+            "ssh_host": "mini.test",
+            "remote_spool_root": "/remote/spool",
+            "remote_pipeline_path": "/safe/helper.py",
+            "timeout_seconds": 10,
+        }
+        for original in (fleet.TerminationRequested(), KeyboardInterrupt()):
+            with self.subTest(
+                error=type(original).__name__
+            ), safe_temporary_directory() as tmp:
+                process = FakeProcess()
+                with mock.patch.object(
+                    fleet.subprocess, "Popen", return_value=process
+                ), mock.patch.object(
+                    fleet, "write_before_deadline"
+                ), mock.patch.object(
+                    fleet, "receive_stream_to_directory", side_effect=original
+                ), mock.patch.object(fleet.os, "killpg"), self.assertRaises(
+                    type(original)
+                ) as raised:
+                    fleet.pull_remote_stream(
+                        remote, Path(tmp) / "destination", "mini", None, set()
+                    )
+
+                self.assertIs(raised.exception, original)
+                self.assertTrue(process.waited)
+                process.stdin.close.assert_called()
+                process.stdout.close.assert_called()
+
+    def test_local_source_failure_does_not_abort_other_remotes(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            unsafe_target = root / "unsafe-target"
+            unsafe_target.mkdir()
+            unsafe_source = root / "unsafe-source"
+            unsafe_source.symlink_to(unsafe_target, target_is_directory=True)
+            valid_source = root / "valid-source"
+            make_shard(valid_source, "studio")
+
+            result = fleet.pull_hub_remotes(
+                {
+                    "remotes": [
+                        {"host_id": "mini", "source_spool_root": str(unsafe_source)},
+                        {"host_id": "studio", "source_spool_root": str(valid_source)},
+                    ]
+                },
+                root / "destination",
+            )
+
+            self.assertEqual(
+                result["remotes"]["mini"],
+                {"status": "local_integrity_rejection", "files_copied": 0},
+            )
+            self.assertEqual(result["remotes"]["studio"]["status"], "pulled")
+
+    def test_invalid_timeout_is_invalid_remote_before_popen(self):
+        for timeout_seconds in (True, 0, 86401, "10"):
+            with self.subTest(
+                timeout_seconds=timeout_seconds
+            ), safe_temporary_directory() as tmp:
+                hub = {
+                    "remotes": [
+                        {
+                            "host_id": "mini",
+                            "ssh_host": "mini.test",
+                            "remote_spool_root": "/remote/spool",
+                            "remote_pipeline_path": "/safe/helper.py",
+                            "timeout_seconds": timeout_seconds,
+                        }
+                    ]
+                }
+                with mock.patch.object(fleet.subprocess, "Popen") as popen:
+                    status = fleet.pull_hub_remotes(hub, Path(tmp) / "spool")
+                self.assertEqual(
+                    status["remotes"]["mini"],
+                    {"status": "invalid_remote", "files_copied": 0},
+                )
+                popen.assert_not_called()
 
     def test_argv_path_injection_is_rejected_before_popen(self):
         with safe_temporary_directory() as tmp:

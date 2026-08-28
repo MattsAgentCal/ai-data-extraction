@@ -3334,7 +3334,7 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             self.assertFalse((escaped / source_object.name).exists())
             self.assertEqual((held_target / source_object.name).read_bytes(), payload)
 
-    def test_interrupted_local_link_retry_retains_orphan_until_manifest_commit(self):
+    def test_interrupted_local_link_retry_leaves_no_orphan(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
             destination_parent = root / "spool"
@@ -3408,7 +3408,7 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             )
 
             self.assertEqual(result["quarantined_unindexed_objects"], 0)
-            self.assertTrue(interrupted_object.is_file())
+            self.assertFalse(interrupted_object.exists())
             fleet.validated_shard_files(
                 destination_shard,
                 "test-mac",
