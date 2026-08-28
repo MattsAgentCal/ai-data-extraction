@@ -2288,6 +2288,14 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             self.assertFalse(any((codex_harness / "objects").glob("*.json")))
             fleet.validated_shard_files(shard, "test-mac")
 
+            del config["sources"]["codex_roots"]
+            config_path.write_text(json.dumps(config))
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+            manifest = json.loads(manifest_path.read_text())
+            self.assertEqual(set(manifest["harnesses"]), {"claude"})
+            fleet.validated_shard_files(shard, "test-mac")
+
     def test_manifest_validation_failure_restores_prior_snapshot_and_state(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)

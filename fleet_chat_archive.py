@@ -1360,7 +1360,15 @@ def write_publish_manifest(
     present_harnesses = sorted(
         path.name
         for path in source_root.iterdir()
-        if path.is_dir() and path.name in APPROVED_HARNESSES
+        if (
+            path.is_dir()
+            and not path.is_symlink()
+            and path.name in APPROVED_HARNESSES
+            and (
+                (path / "index.json").exists()
+                or (path / "index.json").is_symlink()
+            )
+        )
     )
     manifest_harnesses = {}
     for harness in present_harnesses:
