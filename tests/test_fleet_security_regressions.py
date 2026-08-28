@@ -1078,9 +1078,80 @@ class FleetSecurityRegressionTests(unittest.TestCase):
         redactable.subn.assert_not_called()
         residual.search.assert_not_called()
 
+    def test_private_key_begin_scanner_fails_closed_for_pem_edge_cases(self):
+        samples = (
+            "-----BEGIN PRIVATE KEY-----\nbody\n-----END PRIVATE KEY-----",
+            "-----BEGIN RSA PRIVATE KEY-----\nbody",
+            (
+                "-----BEGIN RSA PRIVATE KEY-----\n"
+                "-----BEGIN PRIVATE KEY-----\n"
+                "-----END PRIVATE KEY-----\n"
+                "-----END RSA PRIVATE KEY-----"
+            ),
+            (
+                "-----BEGIN RSA PRIVATE KEY-----\n"
+                "body\n-----END EC PRIVATE KEY-----"
+            ),
+            "-----BEGİN PRİVATE KEY-----\nbody",
+            "-----BEGIN RſA PRIVATE KEY-----\nbody",
+        )
+        for sample in samples:
+            with self.subTest(sample=sample[:40]):
+                self.assertTrue(fleet.has_private_key_begin(sample))
+                self.assertEqual(fleet.redact_text(sample), ("[REDACTED]", 1))
+                self.assertEqual(fleet.residual_secret_paths(sample), ["$"])
+
+        public_key = "-----BEGIN PUBLIC KEY-----\nbody\n-----END PUBLIC KEY-----"
+        self.assertFalse(fleet.has_private_key_begin(public_key))
+        self.assertEqual(fleet.redact_text(public_key), (public_key, 0))
+
+    def test_repeated_unmatched_private_key_begins_are_bounded(self):
+        script = """
+import fleet_chat_archive as fleet
+value = "-----BEGIN PRIVATE KEY-----\\n" * 50000
+assert fleet.redact_text(value) == ("[REDACTED]", 1)
+assert fleet.residual_secret_paths(value) == ["$"]
+assert "PRIVATE KEY" not in fleet.REDACTABLE_SECRET_PATTERN.upper()
+"""
+        subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+
+    def test_huge_private_key_label_has_bounded_peak_memory(self):
+        script = """
+import resource
+import sys
+import fleet_chat_archive as fleet
+
+def peak_rss_bytes():
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return value if sys.platform == "darwin" else value * 1024
+
+label_size = 16 * 1024 * 1024
+value = "-----BEGIN " + ("A" * label_size) + " PRIVATE KEY-----"
+baseline = peak_rss_bytes()
+assert fleet.has_private_key_begin(value)
+peak = peak_rss_bytes()
+growth = peak - baseline
+assert growth < 24 * 1024 * 1024, growth
+assert peak < 80 * 1024 * 1024, peak
+"""
+        subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+
     def test_marker_prefilter_covers_every_secret_pattern_branch(self):
         examples = [
-            "-----BEGIN PRIVATE KEY-----\nbody\n-----END PRIVATE KEY-----",
             "sk-" + "a" * 20,
             "ghp_" + "a" * 20,
             "AKIA" + "A" * 16,
@@ -1637,6 +1708,303 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                     shard, "test-mac", require_healthy_receipt=False
                 )
             self.assertEqual(validate.call_count, 1)
+
+    def test_run_cache_fully_validates_each_local_object_once(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination_parent = root / "spool"
+            validation_proofs = {}
+            harnesses = (
+                ("claude", "claude-code"),
+                ("openclaw", "openclaw"),
+            )
+            for harness, source in harnesses:
+                fleet.archive_conversations(
+                    destination_parent,
+                    "test-mac",
+                    harness,
+                    [
+                        {
+                            "source": source,
+                            "session_id": f"{harness}-session",
+                            "messages": [
+                                {"role": "user", "content": f"{harness} body"}
+                            ],
+                        }
+                    ],
+                )
+            real_validate = fleet.validate_object_file
+            with mock.patch.object(
+                fleet, "validate_object_file", wraps=real_validate
+            ) as validate:
+                for harness, source in harnesses:
+                    staged = root / f"staged-{harness}"
+                    fleet.archive_conversations(
+                        staged,
+                        "test-mac",
+                        harness,
+                        [],
+                    )
+                    fleet.merge_host_shard(
+                        staged / "hosts" / "test-mac",
+                        destination_parent,
+                        "test-mac",
+                        require_healthy_receipt=False,
+                        validation_proofs=validation_proofs,
+                    )
+
+                shard = destination_parent / "hosts" / "test-mac"
+                receipt = shard / "receipts" / "run.json"
+                receipt.parent.mkdir(parents=True)
+                receipt_value = {
+                    "schema_version": 1,
+                    "extractor_sha256": "a" * 64,
+                    "config_sha256": "c" * 64,
+                    "run_id": "run-cache-test",
+                    "host_id": "test-mac",
+                    "collection_status": "completed",
+                    "harnesses": {
+                        harness: {"status": "collected"}
+                        for harness, _source in harnesses
+                    },
+                }
+                receipt.write_text(json.dumps(receipt_value, sort_keys=True) + "\n")
+                fleet.write_publish_manifest(
+                    shard,
+                    receipt,
+                    receipt_value,
+                    "c" * 64,
+                    validation_proofs=validation_proofs,
+                )
+
+            self.assertEqual(validate.call_count, 2)
+            self.assertEqual(len(validation_proofs), 2)
+            self.assertEqual(
+                set(vars(next(iter(validation_proofs.values())))),
+                {
+                    "digest",
+                    "device",
+                    "inode",
+                    "size",
+                    "mtime_ns",
+                    "ctime_ns",
+                    "source",
+                    "session_id",
+                },
+            )
+
+    def test_run_cache_rejects_equal_size_rewrite_with_restored_mtime(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "test-mac"
+            object_path, payload = write_archive_object(shard, host_id="test-mac")
+            index_path = shard / "claude" / "index.json"
+            validation_proofs = {}
+            fleet.validate_index_file(
+                index_path,
+                shard,
+                "test-mac",
+                "claude",
+                validation_proofs=validation_proofs,
+            )
+            original_proof = validation_proofs[object_path.stem]
+            original = object_path.stat()
+            changed = payload.replace(b"cached body", b"stolen body")
+            self.assertEqual(len(changed), len(payload))
+            object_path.write_bytes(changed)
+            os.utime(
+                object_path,
+                ns=(original.st_atime_ns, original.st_mtime_ns),
+            )
+
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                fleet.validate_index_file(
+                    index_path,
+                    shard,
+                    "test-mac",
+                    "claude",
+                    validation_proofs=validation_proofs,
+                )
+            self.assertNotIn(object_path.stem, validation_proofs)
+            self.assertNotEqual(object_path.stat().st_ctime_ns, original_proof.ctime_ns)
+
+    def test_run_cache_revalidates_a_distinct_inode(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "test-mac"
+            object_path, payload = write_archive_object(shard, host_id="test-mac")
+            index_path = shard / "claude" / "index.json"
+            validation_proofs = {}
+            fleet.validate_index_file(
+                index_path,
+                shard,
+                "test-mac",
+                "claude",
+                validation_proofs=validation_proofs,
+            )
+            original_proof = validation_proofs[object_path.stem]
+            replacement = object_path.parent / "replacement.tmp"
+            replacement.write_bytes(payload)
+            os.utime(
+                replacement,
+                ns=(original_proof.mtime_ns, original_proof.mtime_ns),
+            )
+            os.replace(replacement, object_path)
+
+            real_validate = fleet.validate_object_file
+            with mock.patch.object(
+                fleet, "validate_object_file", wraps=real_validate
+            ) as validate:
+                fleet.validate_index_file(
+                    index_path,
+                    shard,
+                    "test-mac",
+                    "claude",
+                    validation_proofs=validation_proofs,
+                )
+            self.assertEqual(validate.call_count, 1)
+            self.assertNotEqual(
+                validation_proofs[object_path.stem].inode,
+                original_proof.inode,
+            )
+
+    def test_residual_credential_never_enters_cache_or_advances_manifest(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "test-mac"
+            conversation = {
+                "schema_version": 1,
+                "source": "claude-code",
+                "session_id": "residual-session",
+                "messages": [
+                    {"role": "user", "content": "Bearer abcdefghijklmnop"}
+                ],
+            }
+            digest = hashlib.sha256(fleet.canonical_json(conversation)).hexdigest()
+            object_path = shard / "claude" / "objects" / f"{digest}.json"
+            object_path.parent.mkdir(parents=True)
+            object_path.write_bytes(fleet.canonical_json(conversation) + b"\n")
+            index_path = shard / "claude" / "index.json"
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "harness": "claude",
+                        "conversations": [
+                            {
+                                "object_sha256": digest,
+                                "source": "claude-code",
+                                "session_id": "residual-session",
+                            }
+                        ],
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            receipt = shard / "receipts" / "run.json"
+            receipt.parent.mkdir(parents=True)
+            receipt_value = {
+                "schema_version": 1,
+                "extractor_sha256": "a" * 64,
+                "config_sha256": "c" * 64,
+                "run_id": "residual-run",
+                "host_id": "test-mac",
+                "collection_status": "completed",
+                "harnesses": {"claude": {"status": "collected"}},
+            }
+            receipt.write_text(json.dumps(receipt_value, sort_keys=True) + "\n")
+            validation_proofs = {}
+
+            with self.assertRaisesRegex(ValueError, "recognized credential"):
+                fleet.write_publish_manifest(
+                    shard,
+                    receipt,
+                    receipt_value,
+                    "c" * 64,
+                    validation_proofs=validation_proofs,
+                )
+            self.assertEqual(validation_proofs, {})
+            self.assertFalse((shard / "publish-manifest.json").exists())
+
+    def test_run_cache_cannot_launder_provenance_into_a_manifest(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "test-mac"
+            fleet.archive_conversations(
+                Path(tmp),
+                "test-mac",
+                "openclaw",
+                [
+                    {
+                        "source": "openclaw",
+                        "session_id": "shared-inode",
+                        "messages": [{"role": "user", "content": "safe body"}],
+                    }
+                ],
+            )
+            validation_proofs = {}
+            fleet.validate_index_file(
+                shard / "openclaw" / "index.json",
+                shard,
+                "test-mac",
+                "openclaw",
+                validation_proofs=validation_proofs,
+            )
+            openclaw_object = next((shard / "openclaw" / "objects").iterdir())
+            claude_object_root = shard / "claude" / "objects"
+            claude_object_root.mkdir(parents=True)
+            claude_object = claude_object_root / openclaw_object.name
+            os.link(openclaw_object, claude_object)
+            (shard / "claude" / "index.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "harness": "claude",
+                        "conversations": [
+                            {
+                                "object_sha256": openclaw_object.stem,
+                                "source": "claude-code",
+                                "session_id": "shared-inode",
+                            }
+                        ],
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            # Creating the hard link changes ctime. Revalidate the legitimate
+            # OpenClaw path so the forged Claude path exercises a cache hit.
+            fleet.validate_index_file(
+                shard / "openclaw" / "index.json",
+                shard,
+                "test-mac",
+                "openclaw",
+                validation_proofs=validation_proofs,
+            )
+            receipt = shard / "receipts" / "run.json"
+            receipt.parent.mkdir(parents=True)
+            receipt_value = {
+                "schema_version": 1,
+                "extractor_sha256": "a" * 64,
+                "config_sha256": "c" * 64,
+                "run_id": "provenance-run",
+                "host_id": "test-mac",
+                "collection_status": "completed",
+                "harnesses": {
+                    "claude": {"status": "collected"},
+                    "openclaw": {"status": "collected"},
+                },
+            }
+            receipt.write_text(json.dumps(receipt_value, sort_keys=True) + "\n")
+
+            with self.assertRaisesRegex(ValueError, "provenance mismatch"):
+                fleet.write_publish_manifest(
+                    shard,
+                    receipt,
+                    receipt_value,
+                    "c" * 64,
+                    validation_proofs=validation_proofs,
+                )
+            self.assertFalse((shard / "publish-manifest.json").exists())
 
     def test_local_staging_merge_links_objects_without_duplicate_disk_blocks(self):
         with safe_temporary_directory() as tmp:
@@ -2286,6 +2654,14 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             self.assertFalse((codex_harness / "index.json").exists())
             self.assertFalse(codex_state.exists())
             self.assertFalse(any((codex_harness / "objects").glob("*.json")))
+            fleet.validated_shard_files(shard, "test-mac")
+
+            del config["sources"]["codex_roots"]
+            config_path.write_text(json.dumps(config))
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+            manifest = json.loads(manifest_path.read_text())
+            self.assertEqual(set(manifest["harnesses"]), {"claude"})
             fleet.validated_shard_files(shard, "test-mac")
 
     def test_manifest_validation_failure_restores_prior_snapshot_and_state(self):

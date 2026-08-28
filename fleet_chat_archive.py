@@ -19,6 +19,7 @@ import stat
 import sys
 import tempfile
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,9 +45,6 @@ APPROVED_SOURCE_KEYS = {
     "hermes_exports",
     "hermes_instances",
 }
-PRIVATE_KEY_PATTERN = (
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
-)
 PROVIDER_TOKEN_PATTERN = (
     r"\b(?:sk-[A-Za-z0-9_-]{20,}|gh[opusr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b"
 )
@@ -56,10 +54,6 @@ JWT_PATTERN = (
 AUTH_HEADER_PATTERN = r"\b(?:authorization|proxy-authorization)\s*:\s*[^\r\n]+"
 COOKIE_HEADER_PATTERN = r"\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+"
 GENERIC_BEARER_PATTERN = r"\b(?:bearer|basic)\s+[A-Za-z0-9+/=_-]{8,}"
-PRIVATE_KEY_RE = re.compile(
-    PRIVATE_KEY_PATTERN,
-    re.IGNORECASE | re.DOTALL,
-)
 PROVIDER_TOKEN_RE = re.compile(
     PROVIDER_TOKEN_PATTERN
 )
@@ -69,7 +63,6 @@ COOKIE_HEADER_RE = re.compile(COOKIE_HEADER_PATTERN, re.IGNORECASE)
 GENERIC_BEARER_RE = re.compile(GENERIC_BEARER_PATTERN, re.IGNORECASE)
 REDACTABLE_SECRET_PATTERN = "|".join(
     (
-        f"(?is:{PRIVATE_KEY_PATTERN})",
         f"(?:{PROVIDER_TOKEN_PATTERN})",
         f"(?:{JWT_PATTERN})",
         f"(?i:{AUTH_HEADER_PATTERN})",
@@ -145,7 +138,25 @@ EXTRACTOR_FILES = (
 )
 MAX_SOURCE_BYTES = 1280 * 1024 * 1024
 MAX_OBJECT_BYTES = 1280 * 1024 * 1024
+MAX_PRIVATE_KEY_LABEL_CHARS = 64
 CODEX_PATH_PROVENANCE_FIELDS = frozenset({"session_file"})
+
+
+@dataclass(frozen=True)
+class ObjectValidationProof:
+    """Body-free proof that one exact object inode passed full validation."""
+
+    digest: str
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    source: str
+    session_id: str
+
+
+ObjectValidationProofCache = dict[str, ObjectValidationProof]
 
 
 def canonical_json(value: object) -> bytes:
@@ -358,12 +369,67 @@ def has_residual_assignment(value: str, lowered: str | None = None) -> bool:
     return False
 
 
+def has_private_key_begin(value: str, lowered: str | None = None) -> bool:
+    """Recognize a PEM private-key BEGIN header in one forward scan."""
+    lowered = regex_compatible_lower(value) if lowered is None else lowered
+    prefix = "-----begin "
+    suffix = "-----"
+    search_from = 0
+    length = len(lowered)
+    while True:
+        begin = lowered.find(prefix, search_from)
+        if begin < 0:
+            return False
+        label_start = begin + len(prefix)
+        cursor = label_start
+        while cursor < length:
+            if lowered.startswith(suffix, cursor):
+                # This slice and split are safe because the forward scan below
+                # fails closed before a label can exceed the strict PEM bound.
+                words = lowered[label_start:cursor].split(" ")
+                if (
+                    len(words) >= 2
+                    and words[-2:] == ["private", "key"]
+                    and all(
+                        word and all("a" <= character <= "z" for character in word)
+                        for word in words
+                    )
+                ):
+                    return True
+                search_from = (
+                    cursor
+                    if lowered.startswith(prefix, cursor)
+                    else cursor + len(suffix)
+                )
+                break
+            character = lowered[cursor]
+            if character != " " and not "a" <= character <= "z":
+                search_from = cursor
+                break
+            if cursor - label_start >= MAX_PRIVATE_KEY_LABEL_CHARS:
+                # An overlong letters/spaces label is begin-like but cannot be
+                # safely classified as a bounded PEM label. Treat the entire
+                # containing string as sensitive without scanning or slicing it.
+                return True
+            cursor += 1
+        else:
+            return False
+        # The label scan stopped at the first byte that cannot belong to this
+        # header. Resume there so adversarial repeated BEGIN fragments remain
+        # linear instead of rescanning an ever-shrinking suffix.
+
+
 def redact_text(value: str) -> tuple[str, int]:
     lowered = regex_compatible_lower(value)
     # Assignment values can be multiline YAML blocks, shell $'...' strings, or
     # escaped serialized JSON. Redact the containing string as one unit rather
     # than risk preserving a suffix the parser cannot safely delimit.
     if has_residual_assignment(value, lowered):
+        return "[REDACTED]", 1
+    # A valid private-key BEGIN header makes the entire containing string
+    # sensitive. This intentionally fails closed for missing, mismatched, or
+    # nested END blocks without searching arbitrarily far for a terminator.
+    if has_private_key_begin(value, lowered):
         return "[REDACTED]", 1
     if not any(marker in lowered for marker in REDACTABLE_TEXT_MARKERS):
         return value, 0
@@ -409,12 +475,16 @@ def residual_secret_paths(value: object, path: str = "$") -> list[str]:
             key_has_secret = False
             if isinstance(key, str):
                 lowered_key = regex_compatible_lower(key)
-                key_has_secret = has_residual_assignment(key, lowered_key) or (
-                    any(
-                        marker in lowered_key
-                        for marker in REDACTABLE_TEXT_MARKERS
+                key_has_secret = (
+                    has_residual_assignment(key, lowered_key)
+                    or has_private_key_begin(key, lowered_key)
+                    or (
+                        any(
+                            marker in lowered_key
+                            for marker in REDACTABLE_TEXT_MARKERS
+                        )
+                        and bool(RESIDUAL_SECRET_RE.search(key))
                     )
-                    and bool(RESIDUAL_SECRET_RE.search(key))
                 )
             child_path = f"{path}.<sensitive-key>" if key_has_secret else f"{path}.{key}"
             if key_has_secret:
@@ -427,9 +497,13 @@ def residual_secret_paths(value: object, path: str = "$") -> list[str]:
             findings.extend(residual_secret_paths(item, f"{path}[{index}]"))
     elif isinstance(value, str):
         lowered = regex_compatible_lower(value)
-        if has_residual_assignment(value, lowered) or (
-            any(marker in lowered for marker in REDACTABLE_TEXT_MARKERS)
-            and RESIDUAL_SECRET_RE.search(value)
+        if (
+            has_residual_assignment(value, lowered)
+            or has_private_key_begin(value, lowered)
+            or (
+                any(marker in lowered for marker in REDACTABLE_TEXT_MARKERS)
+                and RESIDUAL_SECRET_RE.search(value)
+            )
         ):
             findings.append(path)
     return findings
@@ -856,6 +930,7 @@ def collect_sources(
     codex_roots=(),
     openclaw_roots=(),
     hermes_exports=(),
+    validation_proofs: ObjectValidationProofCache | None = None,
 ) -> dict:
     archive_root = validate_output_root(archive_root)
     secure_mkdir(archive_root)
@@ -941,6 +1016,7 @@ def collect_sources(
                     archive_root,
                     host_id,
                     require_healthy_receipt=False,
+                    validation_proofs=validation_proofs,
                 )
                 live_index = read_json_nofollow(
                     archive_root / "hosts" / host_id / harness / "index.json"
@@ -1265,15 +1341,44 @@ def descriptor_sha256(descriptor: int) -> str:
     return digest.hexdigest()
 
 
-def validate_object_file(path: Path) -> dict:
+def object_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def validate_object_file(
+    path: Path, *, _return_metadata: bool = False
+) -> dict | tuple[dict, os.stat_result]:
     assert_no_symlink_components(path)
     if not OBJECT_NAME_RE.fullmatch(path.name):
         raise ValueError(f"invalid archive object filename: {path.name}")
-    value = read_json_nofollow(
-        path,
-        max_bytes=MAX_OBJECT_BYTES,
-        size_label="object",
-    )
+    descriptor = open_regular_fd(path)
+    try:
+        initial_metadata = os.fstat(descriptor)
+        if initial_metadata.st_size > MAX_OBJECT_BYTES:
+            raise ValueError(
+                f"object exceeds maximum of {MAX_OBJECT_BYTES} bytes: {path}"
+            )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            value = json.load(handle)
+            final_metadata = os.fstat(handle.fileno())
+            if (
+                object_file_identity(initial_metadata)
+                != object_file_identity(final_metadata)
+                or final_metadata.st_size > MAX_OBJECT_BYTES
+                or os.lseek(handle.fileno(), 0, os.SEEK_CUR)
+                != final_metadata.st_size
+            ):
+                raise ValueError(f"object changed while parsing: {path}")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     expected = path.stem
     actual = hashlib.sha256(canonical_json(value)).hexdigest()
     if actual != expected:
@@ -1285,7 +1390,76 @@ def validate_object_file(path: Path) -> dict:
         raise ValueError(
             "recognized credential in archive object at " + ", ".join(residuals[:5])
         )
+    if _return_metadata:
+        return value, final_metadata
     return value
+
+
+def validated_object_provenance(
+    path: Path,
+    harness: str,
+    row: dict,
+    validation_proofs: ObjectValidationProofCache | None,
+) -> tuple[str, str]:
+    """Validate one indexed object, reusing only an exact run-local proof."""
+    assert_no_symlink_components(path)
+    if not OBJECT_NAME_RE.fullmatch(path.name):
+        raise ValueError(f"invalid archive object filename: {path.name}")
+    digest = path.stem
+    proof = validation_proofs.get(digest) if validation_proofs is not None else None
+    metadata = None
+    if proof is not None:
+        descriptor = open_regular_fd(path)
+        try:
+            metadata = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if (
+            proof.digest == digest
+            and object_file_identity(metadata)
+            == (
+                proof.device,
+                proof.inode,
+                proof.size,
+                proof.mtime_ns,
+                proof.ctime_ns,
+            )
+        ):
+            archived_source = proof.source
+            archived_session_id = proof.session_id
+            fully_validated = False
+        else:
+            validation_proofs.pop(digest, None)
+            proof = None
+
+    if proof is None:
+        archived, metadata = validate_object_file(path, _return_metadata=True)
+        archived_source = archived.get("source")
+        archived_session_id = archived.get("session_id")
+        fully_validated = True
+
+    if (
+        not isinstance(archived_source, str)
+        or not isinstance(archived_session_id, str)
+        or archived_source not in HARNESS_SOURCES[harness]
+        or archived_source != row.get("source")
+        or archived_session_id != row.get("session_id")
+    ):
+        raise ValueError(f"archive object provenance mismatch for {harness}: {digest}")
+
+    if fully_validated and validation_proofs is not None:
+        assert metadata is not None
+        validation_proofs[digest] = ObjectValidationProof(
+            digest=digest,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+            size=metadata.st_size,
+            mtime_ns=metadata.st_mtime_ns,
+            ctime_ns=metadata.st_ctime_ns,
+            source=archived_source,
+            session_id=archived_session_id,
+        )
+    return archived_source, archived_session_id
 
 
 def validate_index_file(
@@ -1295,6 +1469,7 @@ def validate_index_file(
     harness: str,
     *,
     require_exact_object_set: bool = True,
+    validation_proofs: ObjectValidationProofCache | None = None,
 ) -> dict:
     index = read_json_nofollow(index_path)
     if (
@@ -1328,13 +1503,12 @@ def validate_index_file(
         object_path = source_root / harness / "objects" / f"{digest}.json"
         if not object_path.is_file() or object_path.is_symlink():
             raise ValueError(f"archive index references missing object: {digest}")
-        archived = validate_object_file(object_path)
-        if (
-            archived.get("source") not in HARNESS_SOURCES[harness]
-            or archived.get("source") != row.get("source")
-            or archived.get("session_id") != row.get("session_id")
-        ):
-            raise ValueError(f"archive object provenance mismatch for {harness}: {digest}")
+        validated_object_provenance(
+            object_path,
+            harness,
+            row,
+            validation_proofs,
+        )
         referenced.add(digest)
     object_root = source_root / harness / "objects"
     object_digests = (
@@ -1352,6 +1526,8 @@ def write_publish_manifest(
     receipt_path: Path,
     receipt: dict,
     config_sha256: str,
+    *,
+    validation_proofs: ObjectValidationProofCache | None = None,
 ) -> dict:
     """Atomically bind a healthy receipt to one exact transferable snapshot."""
     collection_status = receipt.get("collection_status", receipt.get("status"))
@@ -1360,12 +1536,26 @@ def write_publish_manifest(
     present_harnesses = sorted(
         path.name
         for path in source_root.iterdir()
-        if path.is_dir() and path.name in APPROVED_HARNESSES
+        if (
+            path.is_dir()
+            and not path.is_symlink()
+            and path.name in APPROVED_HARNESSES
+            and (
+                (path / "index.json").exists()
+                or (path / "index.json").is_symlink()
+            )
+        )
     )
     manifest_harnesses = {}
     for harness in present_harnesses:
         index_path = source_root / harness / "index.json"
-        index = validate_index_file(index_path, source_root, receipt["host_id"], harness)
+        index = validate_index_file(
+            index_path,
+            source_root,
+            receipt["host_id"],
+            harness,
+            validation_proofs=validation_proofs,
+        )
         manifest_harnesses[harness] = {
             "index_sha256": file_sha256(index_path),
             "object_sha256": sorted(
@@ -1395,6 +1585,8 @@ def validate_publish_manifest(
     host_id: str,
     present_harnesses: set[str],
     receipt_paths: list[Path],
+    *,
+    validation_proofs: ObjectValidationProofCache | None = None,
 ) -> dict:
     manifest_path = source_root / "publish-manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
@@ -1466,6 +1658,7 @@ def validate_publish_manifest(
             host_id,
             harness,
             require_exact_object_set=False,
+            validation_proofs=validation_proofs,
         )
         actual_digests = sorted(row["object_sha256"] for row in index["conversations"])
         if (
@@ -1486,6 +1679,7 @@ def validated_shard_files(
     host_id: str,
     *,
     require_healthy_receipt: bool = True,
+    validation_proofs: ObjectValidationProofCache | None = None,
 ) -> list[Path]:
     source_root = assert_no_symlink_components(source_root)
     if not source_root.is_dir():
@@ -1540,7 +1734,11 @@ def validated_shard_files(
         raise ValueError(f"host shard is empty: {source_root}")
     if require_healthy_receipt:
         manifest = validate_publish_manifest(
-            source_root, host_id, present_harnesses, receipt_paths
+            source_root,
+            host_id,
+            present_harnesses,
+            receipt_paths,
+            validation_proofs=validation_proofs,
         )
         authorized = {
             source_root / "publish-manifest.json",
@@ -1559,7 +1757,13 @@ def validated_shard_files(
         index_path = source_root / harness / "index.json"
         if not index_path.is_file() or index_path.is_symlink():
             raise ValueError(f"host shard is missing {harness} index")
-        validate_index_file(index_path, source_root, host_id, harness)
+        validate_index_file(
+            index_path,
+            source_root,
+            host_id,
+            harness,
+            validation_proofs=validation_proofs,
+        )
     return sorted(files)
 
 
@@ -1900,6 +2104,7 @@ def merge_host_shard(
     host_id: str,
     *,
     require_healthy_receipt: bool = True,
+    validation_proofs: ObjectValidationProofCache | None = None,
 ) -> dict:
     source_root = assert_no_symlink_components(source_root)
     destination_root = destination_parent / "hosts" / host_id
@@ -1909,7 +2114,10 @@ def merge_host_shard(
         else quarantine_unindexed_objects(destination_parent, host_id)
     )
     files = validated_shard_files(
-        source_root, host_id, require_healthy_receipt=require_healthy_receipt
+        source_root,
+        host_id,
+        require_healthy_receipt=require_healthy_receipt,
+        validation_proofs=validation_proofs,
     )
     source_wins = True
     if (
@@ -1918,11 +2126,21 @@ def merge_host_shard(
         and (destination_root / "publish-manifest.json").is_file()
     ):
         try:
-            validated_shard_files(destination_root, host_id, require_healthy_receipt=True)
+            validated_shard_files(
+                destination_root,
+                host_id,
+                require_healthy_receipt=True,
+                validation_proofs=validation_proofs,
+            )
         except ValueError:
             if not restore_indexes_to_manifest(destination_root, host_id):
                 raise
-            validated_shard_files(destination_root, host_id, require_healthy_receipt=True)
+            validated_shard_files(
+                destination_root,
+                host_id,
+                require_healthy_receipt=True,
+                validation_proofs=validation_proofs,
+            )
         source_manifest = read_json_nofollow(source_root / "publish-manifest.json")
         destination_manifest = read_json_nofollow(
             destination_root / "publish-manifest.json"
@@ -2003,6 +2221,7 @@ def merge_host_shard(
             destination_root,
             host_id,
             require_healthy_receipt=require_healthy_receipt,
+            validation_proofs=validation_proofs,
         )
     except BaseException:
         for destination, payload in rollback_payloads.items():
@@ -2041,11 +2260,13 @@ def publish_host_shard(
 
     source_root = spool_root / "hosts" / host_id
     try:
+        # Publication is a trust boundary: never reuse local-run proofs here.
         return merge_host_shard(
             source_root,
             drive_root,
             host_id,
             require_healthy_receipt=require_healthy_receipt,
+            validation_proofs=None,
         )
     except FileNotFoundError:
         return {"status": "blocked_source_missing", "files_copied": 0}
@@ -2069,6 +2290,7 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     source_spool / "hosts" / remote_host_id,
                     spool_root,
                     remote_host_id,
+                    validation_proofs=None,
                 )
             except (FileNotFoundError, ValueError) as error:
                 statuses[remote_host_id] = {
@@ -2141,6 +2363,7 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     cached_shard,
                     remote_host_id,
                     require_healthy_receipt=True,
+                    validation_proofs=None,
                 )
             except (FileNotFoundError, ValueError) as error:
                 statuses[remote_host_id] = {
@@ -2188,7 +2411,10 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     timeout=int(remote.get("timeout_seconds", 300)),
                 )
                 result = merge_host_shard(
-                    Path(incoming), spool_root, remote_host_id
+                    Path(incoming),
+                    spool_root,
+                    remote_host_id,
+                    validation_proofs=None,
                 )
             statuses[remote_host_id] = {
                 "status": "pulled",
@@ -2227,6 +2453,8 @@ def archive_run_lock(spool_root: Path):
 def collect(args: argparse.Namespace) -> int:
     archive_root = validate_output_root(Path(args.archive_root))
     host_id = validate_host_id(args.host_id)
+    # Deliberately starts empty for each invocation and is never serialized.
+    validation_proofs: ObjectValidationProofCache = {}
     with archive_run_lock(archive_root):
         harnesses = collect_sources(
             archive_root,
@@ -2235,6 +2463,7 @@ def collect(args: argparse.Namespace) -> int:
             codex_roots=path_list([args.codex_root]),
             openclaw_roots=path_list([args.openclaw_root]),
             hermes_exports=path_list([args.hermes_export]),
+            validation_proofs=validation_proofs,
         )
 
     receipt = {
@@ -2293,6 +2522,8 @@ def run_config(args: argparse.Namespace) -> int:
     prior_state_payloads: dict[Path, bytes | None] = {}
     prior_object_names: dict[Path, set[str]] = {}
     prior_object_references: set[Path] = set()
+    # Manifest/index snapshots are inputs to validation, never cache seeds.
+    validation_proofs: ObjectValidationProofCache = {}
     transaction_snapshots_ready = False
     manifest_committed = False
 
@@ -2380,7 +2611,14 @@ def run_config(args: argparse.Namespace) -> int:
                     continue
                 try:
                     options = {source_key: path_list(sources[source_key])}
-                    harnesses.update(collect_sources(spool_root, host_id, **options))
+                    harnesses.update(
+                        collect_sources(
+                            spool_root,
+                            host_id,
+                            validation_proofs=validation_proofs,
+                            **options,
+                        )
+                    )
                 except Exception as error:  # keep other harnesses collectable
                     record_failure(harness, error)
 
@@ -2402,6 +2640,7 @@ def run_config(args: argparse.Namespace) -> int:
                                 spool_root,
                                 host_id,
                                 hermes_exports=hermes_exports,
+                                validation_proofs=validation_proofs,
                             )
                         )
                 except Exception as error:
@@ -2539,7 +2778,11 @@ def run_config(args: argparse.Namespace) -> int:
                 try:
                     atomic_write_json(receipt_path, receipt)
                     write_publish_manifest(
-                        source_root, receipt_path, receipt, config_digest
+                        source_root,
+                        receipt_path,
+                        receipt,
+                        config_digest,
+                        validation_proofs=validation_proofs,
                     )
                     manifest_committed = True
                     if drive_root is not None:
@@ -2575,7 +2818,11 @@ def run_config(args: argparse.Namespace) -> int:
                         receipt["receipt_path"] = str(receipt_path)
                         atomic_write_json(receipt_path, receipt)
                         write_publish_manifest(
-                            source_root, receipt_path, receipt, config_digest
+                            source_root,
+                            receipt_path,
+                            receipt,
+                            config_digest,
+                            validation_proofs=validation_proofs,
                         )
                         if publication.get("status") == "published":
                             receipt_publication = publish_host_shard(
@@ -2605,6 +2852,7 @@ def run_config(args: argparse.Namespace) -> int:
                                     receipt_path,
                                     receipt,
                                     config_digest,
+                                    validation_proofs=validation_proofs,
                                 )
                 except BaseException as error:
                     if not manifest_committed:
