@@ -1007,7 +1007,19 @@ def set_journal_phase(stage_descriptor, lock, journal, phase):
     return journal
 
 
-def create_transaction(stage_descriptor, repo_descriptor, request, lock, expected):
+def create_transaction(
+    stage_descriptor,
+    repo_descriptor,
+    lock,
+    expected,
+    archive_state,
+):
+    if (
+        not isinstance(archive_state, tuple)
+        or len(archive_state) != 2
+        or not all(isinstance(value, bool) for value in archive_state)
+    ):
+        fail("recovery_required")
     if read_journal(stage_descriptor, lock) is not None:
         fail("recovery_required")
     transaction_descriptor, backups_descriptor = open_transaction(
@@ -1065,7 +1077,10 @@ def create_transaction(stage_descriptor, repo_descriptor, request, lock, expecte
             "phase": "prepared",
             "expected_sha256": dict(expected),
             "backups": backups,
-            "archive_state": snapshot_archive_state(request),
+            "archive_state": {
+                "enabled": archive_state[0],
+                "loaded": archive_state[1],
+            },
         }
         journal = validate_journal(journal, lock)
         write_journal(transaction_descriptor, journal)
@@ -1612,12 +1627,19 @@ def install_files(request):
             fail("schema_drift")
         verify_paths_descriptor(stage_descriptor, expected)
         repo_descriptor = open_repo_descriptor(request, create=False)
+        observed_archive_state = valid_archive_state(
+            snapshot_archive_state(request)
+        )
+        immutable_archive_state = (
+            observed_archive_state["enabled"],
+            observed_archive_state["loaded"],
+        )
         journal = create_transaction(
             stage_descriptor,
             repo_descriptor,
-            request,
             lock,
             expected,
+            immutable_archive_state,
         )
 
         for relative in sorted(expected):

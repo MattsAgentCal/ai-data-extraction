@@ -799,6 +799,136 @@ class FleetDeployRetryTests(unittest.TestCase):
             [["print", target], ["print-disabled", "gui/501"]],
         )
 
+    def test_prejournal_probe_failures_abort_and_stale_retry_without_wedging(self):
+        failures = ("unexpected_rc", "malformed_success", "timeout")
+        for failure in failures:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                remote = remote_helper_namespace()
+                root = Path(temporary).resolve()
+                old_payloads = {"a.py": b"old-a"}
+                new_payloads = {"a.py": b"new-a"}
+
+                def failing_launchctl(arguments):
+                    self.assertEqual(arguments[0], "print")
+                    if failure == "unexpected_rc":
+                        return subprocess.CompletedProcess(
+                            arguments, 70, "", "I/O error\n"
+                        )
+                    if failure == "malformed_success":
+                        return subprocess.CompletedProcess(
+                            arguments,
+                            0,
+                            "gui/501/wrong-label = {\n}\n",
+                            "",
+                        )
+                    raise subprocess.TimeoutExpired(arguments, 120)
+
+                home, repo, abort_request = self.prepare_remote_transaction(
+                    remote,
+                    root,
+                    "a" * 32,
+                    old_payloads,
+                    new_payloads,
+                )
+                failed_calls = []
+
+                def record_failure(arguments):
+                    failed_calls.append(list(arguments))
+                    return failing_launchctl(arguments)
+
+                remote["launchctl"] = record_failure
+                with self.assertRaisesRegex(
+                    remote["ControlledFailure"], "archive_launchd_failed"
+                ):
+                    remote["install_files"](abort_request)
+                self.assertEqual(
+                    {relative: (repo / relative).read_bytes() for relative in old_payloads},
+                    old_payloads,
+                )
+                self.assertEqual(len(failed_calls), 1)
+                self.assertFalse(
+                    (Path(abort_request["stage_path"]) / ".transaction").exists()
+                )
+                remote["finish"](dict(abort_request, abort=True))
+                self.assertFalse(Path(abort_request["stage_path"]).exists())
+
+                _home, repo, stale_request = self.prepare_remote_transaction(
+                    remote,
+                    root,
+                    "b" * 32,
+                    old_payloads,
+                    new_payloads,
+                )
+                failed_calls.clear()
+                remote["launchctl"] = record_failure
+                with self.assertRaisesRegex(
+                    remote["ControlledFailure"], "archive_launchd_failed"
+                ):
+                    remote["install_files"](stale_request)
+                stale_stage = Path(stale_request["stage_path"])
+                self.assertFalse((stale_stage / ".transaction").exists())
+                lock_path = home / retry.REMOTE_DEPLOY_ROOT_RELATIVE / "active.json"
+                stale_time = time.time() - remote["STALE_LOCK_SECONDS"] - 60
+                os.utime(lock_path, (stale_time, stale_time))
+
+                label = "com.mattrotundo.ai-chat-archive.old-macbook"
+                canonical_calls = []
+
+                def canonical_launchctl(arguments):
+                    canonical_calls.append(list(arguments))
+                    if arguments[0] == "print":
+                        return launchctl_loaded(arguments, arguments[1])
+                    if arguments[0] == "print-disabled":
+                        return subprocess.CompletedProcess(
+                            arguments, 0, f'"{label}" => false\n', ""
+                        )
+                    raise AssertionError(f"unexpected mutation: {arguments}")
+
+                remote["launchctl"] = canonical_launchctl
+                next_request = dict(stale_request, deployment_id="c" * 32)
+                next_request.pop("stage_path")
+                next_request.pop("expected_sha256")
+                prepared = remote["prepare"](next_request)
+                self.assertFalse(stale_stage.exists())
+
+                expected_hashes = {
+                    relative: hashlib.sha256(payload).hexdigest()
+                    for relative, payload in new_payloads.items()
+                }
+                for relative, payload in new_payloads.items():
+                    remote["upload_file"](
+                        dict(
+                            next_request,
+                            stage_path=prepared["stage_path"],
+                            relative_path=relative,
+                            expected_sha256=expected_hashes[relative],
+                            content_b64=base64.b64encode(payload).decode("ascii"),
+                        )
+                    )
+                activation = dict(
+                    next_request,
+                    stage_path=prepared["stage_path"],
+                    expected_sha256=expected_hashes,
+                )
+                remote["quiesce_archive"] = lambda _request: None
+                remote["install_archive_job"] = lambda _request, _repo: {
+                    "label": label,
+                    "loaded": True,
+                    "plist_path": str(root / "archive.plist"),
+                }
+                remote["restore_archive_state"] = lambda _request, _state: None
+                installed = remote["install_files"](activation)
+                self.assertEqual(installed["sha256"], expected_hashes)
+                self.assertEqual(
+                    canonical_calls,
+                    [
+                        ["print", f"gui/{os.getuid()}/{label}"],
+                        ["print-disabled", f"gui/{os.getuid()}"],
+                    ],
+                )
+                remote["finish"](dict(activation, abort=True))
+                self.assertEqual((repo / "a.py").read_bytes(), b"old-a")
+
     def test_hard_exit_after_first_rename_is_recovered_from_persistent_journal(self):
         remote = remote_helper_namespace()
         old_payloads = {"a.py": b"old-a", "b.py": b"old-b"}
@@ -813,6 +943,7 @@ class FleetDeployRetryTests(unittest.TestCase):
                 new_payloads,
             )
             child = f"""
+import json
 import os
 import sys
 sys.path.insert(0, {str(REPO)!r})
@@ -826,11 +957,15 @@ request = {activate_request!r}
 repo_inode = os.stat(request['remote_repo_root']).st_ino
 real_replace = remote['os'].replace
 def crash_after_runtime_rename(source, target, *args, **kwargs):
-    result = real_replace(source, target, *args, **kwargs)
     destination_descriptor = kwargs.get('dst_dir_fd')
     if target == 'a.py' and destination_descriptor is not None and os.fstat(destination_descriptor).st_ino == repo_inode:
+        journal_path = os.path.join(request['stage_path'], '.transaction', 'journal.json')
+        with open(journal_path, 'r', encoding='utf-8') as handle:
+            if json.load(handle).get('phase') != 'activating':
+                os._exit(74)
+        real_replace(source, target, *args, **kwargs)
         os._exit(73)
-    return result
+    return real_replace(source, target, *args, **kwargs)
 remote['os'].replace = crash_after_runtime_rename
 remote['install_files'](request)
 """
