@@ -11,7 +11,6 @@ from archive_object_contract import (
     ARCHIVE_OBJECT_SCHEMA_VERSION,
     event_envelope,
     validate_archive_object,
-    validate_json_bounds,
 )
 
 
@@ -110,6 +109,23 @@ HERMES_TOOL_CALL_KEYSETS = {
     frozenset(HERMES_TOOL_CALL_KEYS | {"extra_content"}),
 }
 HERMES_TOOL_FUNCTION_KEYS = {"arguments", "name"}
+MAX_HERMES_THOUGHT_SIGNATURE_BYTES = 1024 * 1024
+
+
+def _is_exact_google_extra_content(value):
+    if not isinstance(value, dict) or set(value) != {"google"}:
+        return False
+    google = value["google"]
+    if not isinstance(google, dict) or set(google) != {"thought_signature"}:
+        return False
+    signature = google["thought_signature"]
+    if not isinstance(signature, str):
+        return False
+    try:
+        signature_bytes = len(signature.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
+    return 0 < signature_bytes <= MAX_HERMES_THOUGHT_SIGNATURE_BYTES
 
 
 def _known_extension_types_are_valid(
@@ -437,23 +453,13 @@ def iter_hermes_export(
                                     or not function["name"]
                                     or (
                                         "extra_content" in tool_call
-                                        and not isinstance(
-                                            tool_call["extra_content"], dict
+                                        and not _is_exact_google_extra_content(
+                                            tool_call["extra_content"]
                                         )
                                     )
                                 ):
                                     valid_messages = False
                                     break
-                                if "extra_content" in tool_call:
-                                    try:
-                                        validate_json_bounds(
-                                            tool_call["extra_content"],
-                                            max_depth=16,
-                                            max_nodes=4096,
-                                        )
-                                    except ValueError:
-                                        valid_messages = False
-                                        break
                                 # Gemini thought signatures are provider replay
                                 # metadata, not chat/training content. Validate
                                 # their shape above, then deliberately omit them.

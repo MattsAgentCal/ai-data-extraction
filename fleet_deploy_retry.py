@@ -48,7 +48,7 @@ REVIEWED_RUNTIME_SHA256 = {
     "extract_claude_code.py": "cc09aa37295d98572fdffcf6d8ef465d340e9154c1722f85871991aa9af8512e",
     "extract_codex.py": "6b7132413ad3dc3042ca4644d9ae30062f2a972da48809cdca376c0f35f377e6",
     "extract_openclaw.py": "6049a3832abcddb380b9a9845e4cd1ef264467358be8ad8ce000a11da3e1b84b",
-    "extract_hermes.py": "78b415cd9c705df65e432f17cdde369b01c22953581dd6b697cc2a8d73e6263f",
+    "extract_hermes.py": "c45fb372457d02e1d0df510e96dc9b0592da41b7cea9828ea7636f9000e173cb",
 }
 DEPLOYED_FILES = (*RUNTIME_FILES, REMOTE_CONFIG_RELATIVE_PATH)
 DEPLOY_CONFIG_KEYS = {

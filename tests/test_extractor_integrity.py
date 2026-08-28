@@ -5,7 +5,10 @@ from pathlib import Path
 
 from extract_claude_code import extract_claude_project_conversations, extract_claude_session
 from extract_codex import extract_codex_session, find_all_codex_sessions
-from extract_hermes import extract_hermes_export
+from extract_hermes import (
+    MAX_HERMES_THOUGHT_SIGNATURE_BYTES,
+    extract_hermes_export,
+)
 from extract_openclaw import extract_openclaw_session, find_all_openclaw_sessions
 from archive_object_contract import validate_archive_object
 
@@ -886,6 +889,123 @@ class ExtractorIntegrityTests(unittest.TestCase):
                                     "response_item_id": "response-1",
                                     "type": "function",
                                     "extra_content": [],
+                                }
+                            ],
+                        )
+                    ],
+                },
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id=1,
+                            role="assistant",
+                            content="body",
+                            session_id="hermes-current",
+                            timestamp=1.0,
+                            tool_calls=[
+                                {
+                                    "call_id": "call-1",
+                                    "function": {
+                                        "arguments": "{}",
+                                        "name": "shell",
+                                    },
+                                    "id": "tool-1",
+                                    "response_item_id": "response-1",
+                                    "type": "function",
+                                    "extra_content": {
+                                        "body": "blocked",
+                                    },
+                                }
+                            ],
+                        )
+                    ],
+                },
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id=1,
+                            role="assistant",
+                            content="body",
+                            session_id="hermes-current",
+                            timestamp=1.0,
+                            tool_calls=[
+                                {
+                                    "call_id": "call-1",
+                                    "function": {
+                                        "arguments": "{}",
+                                        "name": "shell",
+                                    },
+                                    "id": "tool-1",
+                                    "response_item_id": "response-1",
+                                    "type": "function",
+                                    "extra_content": {
+                                        "google": {
+                                            "thought_signature": "signature",
+                                            "system_prompt": "blocked",
+                                        }
+                                    },
+                                }
+                            ],
+                        )
+                    ],
+                },
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id=1,
+                            role="assistant",
+                            content="body",
+                            session_id="hermes-current",
+                            timestamp=1.0,
+                            tool_calls=[
+                                {
+                                    "call_id": "call-1",
+                                    "function": {
+                                        "arguments": "{}",
+                                        "name": "shell",
+                                    },
+                                    "id": "tool-1",
+                                    "response_item_id": "response-1",
+                                    "type": "function",
+                                    "extra_content": {
+                                        "google": {"thought_signature": ""}
+                                    },
+                                }
+                            ],
+                        )
+                    ],
+                },
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id=1,
+                            role="assistant",
+                            content="body",
+                            session_id="hermes-current",
+                            timestamp=1.0,
+                            tool_calls=[
+                                {
+                                    "call_id": "call-1",
+                                    "function": {
+                                        "arguments": "{}",
+                                        "name": "shell",
+                                    },
+                                    "id": "tool-1",
+                                    "response_item_id": "response-1",
+                                    "type": "function",
+                                    "extra_content": {
+                                        "google": {
+                                            "thought_signature": "x"
+                                            * (
+                                                MAX_HERMES_THOUGHT_SIGNATURE_BYTES
+                                                + 1
+                                            )
+                                        }
+                                    },
                                 }
                             ],
                         )
