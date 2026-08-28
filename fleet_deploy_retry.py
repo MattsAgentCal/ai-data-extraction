@@ -11,6 +11,8 @@ import os
 import platform
 import plistlib
 import re
+import secrets
+import signal
 import stat
 import subprocess
 import sys
@@ -28,7 +30,9 @@ EXPECTED_SSH_HOST = "oldmac"
 EXPECTED_REMOTE_USER = "mattrotundo"
 EXPECTED_REMOTE_HOME = "/Users/mattrotundo"
 EXPECTED_REMOTE_REPO = "/Users/mattrotundo/Projects/ai-data-extraction"
+REMOTE_DEPLOY_ROOT_RELATIVE = ".local/share/ai-chat-archive-deploy"
 REMOTE_CONFIG_RELATIVE_PATH = "configs/old-macbook.json"
+RETRY_LAUNCHD_LABEL = "com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry"
 INVENTORY_HARNESSES = ("claude", "codex", "openclaw", "hermes")
 RUNTIME_FILES = (
     "fleet_chat_archive.py",
@@ -102,22 +106,34 @@ class DeployFile:
 
 REMOTE_HELPER = r'''
 import base64
+import fcntl
 import hashlib
 import json
 import os
 import platform
 import pwd
 import re
+import signal
 import stat
 import subprocess
 import sys
-import tempfile
+import time
 import uuid
 from pathlib import Path, PurePosixPath
 
 RELATIVE_RE = re.compile(r"(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\Z")
-STAGE_RE = re.compile(r"\.fleet-deploy-[A-Za-z0-9._-]+\Z")
+DEPLOYMENT_RE = re.compile(r"[0-9a-f]{32}\Z")
+STAGE_RE = re.compile(r"\.fleet-deploy-[0-9a-f]{32}\Z")
 SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
+DEPLOY_ROOT_RELATIVE = PurePosixPath(".local/share/ai-chat-archive-deploy")
+STAGES_DIRECTORY = "stages"
+LOCK_FILE = "active.json"
+MUTEX_FILE = "mutex.lock"
+MAX_STALE_STAGES = 32
+MAX_STAGE_ENTRIES = 128
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024
+STALE_LOCK_SECONDS = 24 * 60 * 60
+DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
 class ControlledFailure(Exception):
@@ -173,26 +189,6 @@ def inspect_components(path, allow_missing=True):
         if current != path and not stat.S_ISDIR(metadata.st_mode):
             fail("unsafe_path")
     return True
-
-
-def make_directories(path, trusted_root):
-    path = lexical_absolute(str(path))
-    trusted_root = lexical_absolute(str(trusted_root))
-    ensure_below(path, trusted_root)
-    if not inspect_components(trusted_root, allow_missing=False):
-        fail("unsafe_path")
-    current = trusted_root
-    relative = path.relative_to(trusted_root)
-    for part in relative.parts:
-        current = current / part
-        try:
-            metadata = os.lstat(current)
-        except FileNotFoundError:
-            os.mkdir(current, 0o700)
-            metadata = os.lstat(current)
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            fail("unsafe_path")
-    return path
 
 
 def safe_directory(path):
@@ -297,7 +293,16 @@ def checked_repo(request, create=False):
     repo = lexical_absolute(request["remote_repo_root"])
     ensure_below(repo, home)
     if create:
-        make_directories(repo, home)
+        home_descriptor = open_absolute_directory(home)
+        try:
+            repo_descriptor = open_directory_below(
+                home_descriptor,
+                repo.relative_to(home).parts,
+                create=True,
+            )
+            os.close(repo_descriptor)
+        finally:
+            os.close(home_descriptor)
     else:
         inspect_components(repo, allow_missing=False)
         if not safe_directory(repo):
@@ -305,29 +310,403 @@ def checked_repo(request, create=False):
     return repo
 
 
+def deployment_id(request):
+    value = request.get("deployment_id")
+    if not isinstance(value, str) or not DEPLOYMENT_RE.fullmatch(value):
+        fail("schema_drift")
+    return value
+
+
+def open_absolute_directory(path):
+    path = lexical_absolute(str(path))
+    descriptor = os.open("/", DIRECTORY_FLAGS)
+    try:
+        for part in path.parts[1:]:
+            next_descriptor = os.open(part, DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            fail("unsafe_path")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def open_directory_below(root_descriptor, parts, *, create=False, owner_only=False):
+    descriptor = os.dup(root_descriptor)
+    try:
+        for part in parts:
+            safe_relative(part)
+            if "/" in part:
+                fail("unsafe_path")
+            try:
+                next_descriptor = os.open(part, DIRECTORY_FLAGS, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o700, dir_fd=descriptor)
+                next_descriptor = os.open(part, DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+            fail("unsafe_path")
+        if owner_only:
+            os.fchmod(descriptor, 0o700)
+            if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
+                fail("unsafe_path")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def open_deploy_directories(request, *, create):
+    identity(request)
+    home = lexical_absolute(request["expected_remote_home"])
+    home_descriptor = open_absolute_directory(home)
+    deploy_descriptor = -1
+    stages_descriptor = -1
+    try:
+        deploy_descriptor = open_directory_below(
+            home_descriptor,
+            DEPLOY_ROOT_RELATIVE.parts,
+            create=create,
+            owner_only=True,
+        )
+        stages_descriptor = open_directory_below(
+            deploy_descriptor,
+            (STAGES_DIRECTORY,),
+            create=create,
+            owner_only=True,
+        )
+        return (
+            home / DEPLOY_ROOT_RELATIVE,
+            deploy_descriptor,
+            stages_descriptor,
+        )
+    except BaseException:
+        if stages_descriptor >= 0:
+            os.close(stages_descriptor)
+        if deploy_descriptor >= 0:
+            os.close(deploy_descriptor)
+        raise
+    finally:
+        os.close(home_descriptor)
+
+
+def close_descriptors(*descriptors):
+    for descriptor in descriptors:
+        if descriptor is not None and descriptor >= 0:
+            os.close(descriptor)
+
+
+def read_regular_at(parent_descriptor, name, *, limit):
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_descriptor,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_size > limit
+        ):
+            fail("unsafe_path")
+        chunks = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > limit:
+            fail("unsafe_path")
+        return payload, metadata
+    finally:
+        os.close(descriptor)
+
+
+def write_regular_at(parent_descriptor, name, payload, mode):
+    temporary = "." + name + ".fleet-tmp-" + uuid.uuid4().hex
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            mode,
+            dir_fd=parent_descriptor,
+        )
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+        os.fsync(descriptor)
+        os.fchmod(descriptor, mode)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(
+            temporary,
+            name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            pass
+
+
+def read_lock(deploy_descriptor):
+    try:
+        payload, metadata = read_regular_at(deploy_descriptor, LOCK_FILE, limit=4096)
+    except FileNotFoundError:
+        return None, None
+    try:
+        value = json.loads(payload)
+    except Exception:
+        fail("unsafe_path")
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"deployment_id", "relative_paths", "state"}
+        or not isinstance(value.get("relative_paths"), list)
+        or value.get("state") not in {"prepared", "rollback_failed"}
+    ):
+        fail("unsafe_path")
+    checked_id = value.get("deployment_id")
+    if not isinstance(checked_id, str) or not DEPLOYMENT_RE.fullmatch(checked_id):
+        fail("unsafe_path")
+    checked_paths = [safe_relative(item) for item in value["relative_paths"]]
+    if len(checked_paths) != len(set(checked_paths)):
+        fail("unsafe_path")
+    value["relative_paths"] = checked_paths
+    return value, metadata
+
+
+def acquire_mutex(deploy_descriptor):
+    descriptor = os.open(
+        MUTEX_FILE,
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=deploy_descriptor,
+    )
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        os.close(descriptor)
+        fail("unsafe_path")
+    os.fchmod(descriptor, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    return descriptor
+
+
+def release_mutex(descriptor):
+    fcntl.flock(descriptor, fcntl.LOCK_UN)
+    os.close(descriptor)
+
+
+def set_lock(deploy_descriptor, checked_id, relative_paths, state):
+    mutex = acquire_mutex(deploy_descriptor)
+    try:
+        current, _ = read_lock(deploy_descriptor)
+        if current is None or current["deployment_id"] != checked_id:
+            fail("deployment_lock_mismatch")
+        write_regular_at(
+            deploy_descriptor,
+            LOCK_FILE,
+            json.dumps(
+                {
+                    "deployment_id": checked_id,
+                    "relative_paths": list(relative_paths),
+                    "state": state,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            0o600,
+        )
+    finally:
+        release_mutex(mutex)
+
+
+def acquire_lock(deploy_descriptor, checked_id, relative_paths):
+    payload = json.dumps(
+        {
+            "deployment_id": checked_id,
+            "relative_paths": list(relative_paths),
+            "state": "prepared",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    mutex = acquire_mutex(deploy_descriptor)
+    try:
+        existing, metadata = read_lock(deploy_descriptor)
+        if existing is not None:
+            if metadata is None or time.time() - metadata.st_mtime <= STALE_LOCK_SECONDS:
+                fail("deployment_locked")
+            os.unlink(LOCK_FILE, dir_fd=deploy_descriptor)
+        descriptor = os.open(
+            LOCK_FILE,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=deploy_descriptor,
+        )
+        try:
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+    finally:
+        release_mutex(mutex)
+
+
+def require_lock(deploy_descriptor, request):
+    checked_id = deployment_id(request)
+    lock, _ = read_lock(deploy_descriptor)
+    if lock is None or lock["deployment_id"] != checked_id:
+        fail("deployment_lock_mismatch")
+    if lock["state"] == "rollback_failed":
+        fail("rollback_failed")
+    return lock
+
+
+def release_lock(deploy_descriptor, checked_id):
+    mutex = acquire_mutex(deploy_descriptor)
+    try:
+        lock, _ = read_lock(deploy_descriptor)
+        if lock is None or lock["deployment_id"] != checked_id:
+            fail("deployment_lock_mismatch")
+        os.unlink(LOCK_FILE, dir_fd=deploy_descriptor)
+    finally:
+        release_mutex(mutex)
+
+
+def remove_tree_at(parent_descriptor, name, budget, *, depth=0):
+    if depth > 4 or not RELATIVE_RE.fullmatch(name) or "/" in name:
+        fail("unsafe_path")
+    try:
+        metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if metadata.st_uid != os.getuid() or stat.S_ISLNK(metadata.st_mode):
+        fail("unsafe_path")
+    budget[0] += 1
+    if budget[0] > MAX_STAGE_ENTRIES:
+        fail("stale_stage_limit")
+    if stat.S_ISREG(metadata.st_mode):
+        os.unlink(name, dir_fd=parent_descriptor)
+        return
+    if not stat.S_ISDIR(metadata.st_mode):
+        fail("unsafe_path")
+    descriptor = os.open(name, DIRECTORY_FLAGS, dir_fd=parent_descriptor)
+    try:
+        entries = os.listdir(descriptor)
+        for entry in entries:
+            remove_tree_at(descriptor, entry, budget, depth=depth + 1)
+    finally:
+        os.close(descriptor)
+    os.rmdir(name, dir_fd=parent_descriptor)
+
+
+def cleanup_stages(stages_descriptor):
+    entries = os.listdir(stages_descriptor)
+    if len(entries) > MAX_STALE_STAGES:
+        fail("stale_stage_limit")
+    for entry in entries:
+        if not STAGE_RE.fullmatch(entry):
+            fail("unsafe_path")
+        remove_tree_at(stages_descriptor, entry, [0])
+
+
+def stage_details(request):
+    checked_id = deployment_id(request)
+    deploy_root, deploy_descriptor, stages_descriptor = open_deploy_directories(
+        request, create=False
+    )
+    stage_descriptor = -1
+    try:
+        lock = require_lock(deploy_descriptor, request)
+        stage_name = ".fleet-deploy-" + checked_id
+        expected_path = deploy_root / STAGES_DIRECTORY / stage_name
+        if request.get("stage_path") != str(expected_path):
+            fail("unsafe_path")
+        stage_descriptor = os.open(stage_name, DIRECTORY_FLAGS, dir_fd=stages_descriptor)
+        metadata = os.fstat(stage_descriptor)
+        if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            fail("unsafe_path")
+        return (
+            expected_path,
+            deploy_descriptor,
+            stages_descriptor,
+            stage_descriptor,
+            lock,
+        )
+    except BaseException:
+        close_descriptors(stage_descriptor, stages_descriptor, deploy_descriptor)
+        raise
+
+
 def prepare(request):
-    repo = checked_repo(request, create=True)
+    checked_repo(request, create=True)
+    checked_id = deployment_id(request)
     relative_paths = request.get("relative_paths")
     if not isinstance(relative_paths, list) or len(relative_paths) != len(set(relative_paths)):
         fail("schema_drift")
-    for value in relative_paths:
-        safe_relative(value)
-    stage = Path(tempfile.mkdtemp(prefix=".fleet-deploy-", dir=repo))
-    os.chmod(stage, 0o700)
-    for value in relative_paths:
-        parent = stage / PurePosixPath(value).parent
-        make_directories(parent, stage)
-    return {"schema_version": 1, "ok": True, "stage_path": str(stage)}
-
-
-def checked_stage(request, repo):
-    stage = lexical_absolute(request.get("stage_path"))
-    if stage.parent != repo or not STAGE_RE.fullmatch(stage.name):
-        fail("unsafe_path")
-    inspect_components(stage, allow_missing=False)
-    if not safe_directory(stage):
-        fail("unsafe_path")
-    return stage
+    checked_paths = [safe_relative(value) for value in relative_paths]
+    deploy_root, deploy_descriptor, stages_descriptor = open_deploy_directories(
+        request, create=True
+    )
+    stage_name = ".fleet-deploy-" + checked_id
+    stage_created = False
+    lock_acquired = False
+    try:
+        acquire_lock(deploy_descriptor, checked_id, checked_paths)
+        lock_acquired = True
+        cleanup_stages(stages_descriptor)
+        os.mkdir(stage_name, 0o700, dir_fd=stages_descriptor)
+        stage_created = True
+        stage_descriptor = os.open(stage_name, DIRECTORY_FLAGS, dir_fd=stages_descriptor)
+        try:
+            os.fchmod(stage_descriptor, 0o700)
+            for value in checked_paths:
+                parent_parts = PurePosixPath(value).parent.parts
+                parent_descriptor = open_directory_below(
+                    stage_descriptor,
+                    parent_parts,
+                    create=True,
+                    owner_only=True,
+                )
+                os.close(parent_descriptor)
+        finally:
+            os.close(stage_descriptor)
+        return {
+            "schema_version": 1,
+            "ok": True,
+            "stage_path": str(deploy_root / STAGES_DIRECTORY / stage_name),
+        }
+    except BaseException:
+        if stage_created:
+            try:
+                remove_tree_at(stages_descriptor, stage_name, [0])
+            except BaseException:
+                pass
+        if lock_acquired:
+            try:
+                release_lock(deploy_descriptor, checked_id)
+            except BaseException:
+                pass
+        raise
+    finally:
+        close_descriptors(stages_descriptor, deploy_descriptor)
 
 
 def expected_hashes(request):
@@ -342,120 +721,157 @@ def expected_hashes(request):
     return checked
 
 
-def hash_file(path):
-    if not safe_file(path):
-        fail("remote_file_missing")
+def hash_descriptor(descriptor):
     digest = hashlib.sha256()
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            fail("unsafe_path")
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    finally:
-        os.close(descriptor)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
     return digest.hexdigest()
 
 
-def verify_paths(base, expected):
+def open_relative_file(base_descriptor, relative):
+    path = PurePosixPath(safe_relative(relative))
+    parent_descriptor = open_directory_below(
+        base_descriptor, path.parent.parts, create=False
+    )
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
+    finally:
+        os.close(parent_descriptor)
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        os.close(descriptor)
+        fail("unsafe_path")
+    return descriptor
+
+
+def verify_paths_descriptor(base_descriptor, expected):
     actual = {}
     for relative, wanted in sorted(expected.items()):
-        candidate = base / PurePosixPath(relative)
-        ensure_below(candidate, base)
-        digest = hash_file(candidate)
+        try:
+            descriptor = open_relative_file(base_descriptor, relative)
+        except FileNotFoundError:
+            fail("remote_file_missing")
+        try:
+            digest = hash_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
         if digest != wanted:
             fail("hash_mismatch")
         actual[relative] = digest
     return actual
 
 
-def verify_stage(request):
-    repo = checked_repo(request)
-    stage = checked_stage(request, repo)
-    actual = verify_paths(stage, expected_hashes(request))
-    return {"schema_version": 1, "ok": True, "sha256": actual}
-
-
-def install_one(source, target, mode):
-    if target.exists() or target.is_symlink():
-        metadata = os.lstat(target)
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            fail("unsafe_path")
-    temporary = target.parent / (
-        "." + target.name + ".fleet-tmp-" + uuid.uuid4().hex
-    )
-    source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    target_fd = -1
+def upload_file(request):
+    (
+        stage_path,
+        deploy_descriptor,
+        stages_descriptor,
+        stage_descriptor,
+        lock,
+    ) = stage_details(request)
     try:
-        if not stat.S_ISREG(os.fstat(source_fd).st_mode):
-            fail("unsafe_path")
-        target_fd = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            mode,
-        )
-        while True:
-            chunk = os.read(source_fd, 1024 * 1024)
-            if not chunk:
-                break
-            offset = 0
-            while offset < len(chunk):
-                offset += os.write(target_fd, chunk[offset:])
-        os.fsync(target_fd)
-        os.fchmod(target_fd, mode)
-        os.close(target_fd)
-        target_fd = -1
-        os.replace(temporary, target)
-    finally:
-        os.close(source_fd)
-        if target_fd >= 0:
-            os.close(target_fd)
+        relative = safe_relative(request.get("relative_path"))
+        if relative not in lock["relative_paths"]:
+            fail("schema_drift")
+        wanted = request.get("expected_sha256")
+        if not isinstance(wanted, str) or not SHA_RE.fullmatch(wanted):
+            fail("schema_drift")
+        encoded = request.get("content_b64")
+        if not isinstance(encoded, str) or len(encoded) > (MAX_UPLOAD_BYTES * 4 // 3) + 8:
+            fail("schema_drift")
         try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+            payload = base64.b64decode(encoded, validate=True)
+        except Exception:
+            fail("schema_drift")
+        if len(payload) > MAX_UPLOAD_BYTES or hashlib.sha256(payload).hexdigest() != wanted:
+            fail("hash_mismatch")
+        path = PurePosixPath(relative)
+        parent_descriptor = open_directory_below(
+            stage_descriptor, path.parent.parts, create=False
+        )
+        try:
+            write_regular_at(parent_descriptor, path.name, payload, 0o600)
+        finally:
+            os.close(parent_descriptor)
+        actual = verify_paths_descriptor(stage_descriptor, {relative: wanted})
+        return {"schema_version": 1, "ok": True, "sha256": actual}
+    finally:
+        close_descriptors(stage_descriptor, stages_descriptor, deploy_descriptor)
 
 
-def install_files(request):
-    repo = checked_repo(request)
-    stage = checked_stage(request, repo)
-    expected = expected_hashes(request)
-    verify_paths(stage, expected)
-    install_order = sorted(
-        expected,
-        key=lambda relative: (not relative.endswith(".py"), relative),
+def verify_stage(request):
+    (
+        stage_path,
+        deploy_descriptor,
+        stages_descriptor,
+        stage_descriptor,
+        lock,
+    ) = stage_details(request)
+    try:
+        expected = expected_hashes(request)
+        if set(expected) != set(lock["relative_paths"]):
+            fail("schema_drift")
+        actual = verify_paths_descriptor(stage_descriptor, expected)
+        return {"schema_version": 1, "ok": True, "sha256": actual}
+    finally:
+        close_descriptors(stage_descriptor, stages_descriptor, deploy_descriptor)
+
+
+def launchctl(command):
+    return subprocess.run(
+        ["launchctl", *command],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
     )
-    for relative in install_order:
-        source = stage / PurePosixPath(relative)
-        target = repo / PurePosixPath(relative)
-        make_directories(target.parent, repo)
-        install_one(source, target, 0o700 if relative.endswith(".py") else 0o600)
-    actual = verify_paths(repo, expected)
-    for relative in sorted(expected, reverse=True):
-        os.unlink(stage / PurePosixPath(relative))
-    stage_directories = {
-        (stage / PurePosixPath(relative)).parent
-        for relative in expected
-    }
-    for directory in sorted(stage_directories, key=lambda item: len(item.parts), reverse=True):
-        if directory != stage:
-            os.rmdir(directory)
-    os.rmdir(stage)
-    return {"schema_version": 1, "ok": True, "sha256": actual}
 
 
-def verify_final(request):
-    repo = checked_repo(request)
-    actual = verify_paths(repo, expected_hashes(request))
-    return {"schema_version": 1, "ok": True, "sha256": actual}
+def archive_label(request):
+    host_id = request.get("host_id")
+    if host_id != "old-macbook":
+        fail("schema_drift")
+    return "com.mattrotundo.ai-chat-archive." + host_id
 
 
-def install_archive_launchd(request):
-    repo = checked_repo(request)
+def quiesce_archive(request):
+    label = archive_label(request)
+    target = "gui/{}/{}".format(os.getuid(), label)
+    was_loaded = launchctl(["print", target]).returncode == 0
+    disabled = False
+    try:
+        if launchctl(["disable", target]).returncode != 0:
+            fail("archive_quiesce_failed")
+        disabled = True
+        bootout = launchctl(["bootout", target])
+        if was_loaded and bootout.returncode != 0:
+            fail("archive_quiesce_failed")
+        if launchctl(["print", target]).returncode == 0:
+            fail("archive_still_loaded")
+        return was_loaded
+    except BaseException:
+        if disabled:
+            launchctl(["enable", target])
+        raise
+
+
+def enable_archive(request):
+    label = archive_label(request)
+    target = "gui/{}/{}".format(os.getuid(), label)
+    if launchctl(["enable", target]).returncode != 0:
+        fail("archive_launchd_failed")
+
+
+def install_archive_job(request, repo):
     script_relative = safe_relative(request.get("script_relative_path"))
     config_relative = safe_relative(request.get("config_relative_path"))
     if script_relative != "fleet_chat_archive.py" or config_relative != "configs/old-macbook.json":
@@ -487,9 +903,236 @@ def install_archive_launchd(request):
         launchd = json.loads(completed.stdout)
     except Exception:
         fail("archive_launchd_failed")
-    if not isinstance(launchd, dict):
+    label = archive_label(request)
+    expected_plist = (
+        lexical_absolute(request["expected_remote_home"])
+        / "Library"
+        / "LaunchAgents"
+        / (label + ".plist")
+    )
+    if (
+        not isinstance(launchd, dict)
+        or set(launchd) != {"label", "loaded", "plist_path"}
+        or launchd.get("label") != label
+        or launchd.get("loaded") is not True
+        or launchd.get("plist_path") != str(expected_plist)
+    ):
         fail("archive_launchd_failed")
-    return {"schema_version": 1, "ok": True, "launchd": launchd}
+    target = "gui/{}/{}".format(os.getuid(), label)
+    if launchctl(["print", target]).returncode != 0:
+        fail("archive_launchd_failed")
+    return launchd
+
+
+def read_target(parent_descriptor, name):
+    try:
+        payload, metadata = read_regular_at(parent_descriptor, name, limit=MAX_UPLOAD_BYTES)
+    except FileNotFoundError:
+        return None
+    return payload, stat.S_IMODE(metadata.st_mode)
+
+
+def restore_targets(targets, backups, replaced):
+    for relative in reversed(replaced):
+        parent_descriptor, name, _ = targets[relative]
+        backup = backups[relative]
+        if backup is None:
+            try:
+                metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                fail("rollback_failed")
+            os.unlink(name, dir_fd=parent_descriptor)
+        else:
+            payload, mode = backup
+            write_regular_at(parent_descriptor, name, payload, mode)
+
+
+def block_termination_signals():
+    if hasattr(signal, "pthread_sigmask"):
+        signals = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+        return lambda: signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+    return lambda: None
+
+
+def install_files(request):
+    repo = checked_repo(request)
+    (
+        stage_path,
+        deploy_descriptor,
+        stages_descriptor,
+        stage_descriptor,
+        lock,
+    ) = stage_details(request)
+    repo_descriptor = -1
+    targets = {}
+    temporary_names = {}
+    backups = {}
+    replaced = []
+    was_loaded = False
+    signals_restore = lambda: None
+    try:
+        expected = expected_hashes(request)
+        if set(expected) != set(lock["relative_paths"]):
+            fail("schema_drift")
+        verify_paths_descriptor(stage_descriptor, expected)
+        home_descriptor = open_absolute_directory(lexical_absolute(request["expected_remote_home"]))
+        try:
+            repo_relative = repo.relative_to(lexical_absolute(request["expected_remote_home"]))
+            repo_descriptor = open_directory_below(
+                home_descriptor, repo_relative.parts, create=False
+            )
+        finally:
+            os.close(home_descriptor)
+
+        for relative in sorted(expected):
+            path = PurePosixPath(relative)
+            parent_descriptor = open_directory_below(
+                repo_descriptor, path.parent.parts, create=True, owner_only=True
+            )
+            targets[relative] = (
+                parent_descriptor,
+                path.name,
+                0o700 if relative.endswith(".py") else 0o600,
+            )
+            backups[relative] = read_target(parent_descriptor, path.name)
+            source_descriptor = open_relative_file(stage_descriptor, relative)
+            temporary = "." + path.name + ".fleet-tmp-" + uuid.uuid4().hex
+            temporary_names[relative] = temporary
+            try:
+                payload = b""
+                chunks = []
+                while True:
+                    chunk = os.read(source_descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                payload = b"".join(chunks)
+                write_regular_at(parent_descriptor, temporary, payload, targets[relative][2])
+            finally:
+                os.close(source_descriptor)
+
+        was_loaded = quiesce_archive(request)
+        signals_restore = block_termination_signals()
+        try:
+            install_order = sorted(
+                expected,
+                key=lambda relative: (not relative.endswith(".py"), relative),
+            )
+            for relative in install_order:
+                parent_descriptor, target_name, _ = targets[relative]
+                temporary = temporary_names[relative]
+                os.replace(
+                    temporary,
+                    target_name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+                replaced.append(relative)
+            actual = verify_paths_descriptor(repo_descriptor, expected)
+            launchd = install_archive_job(request, repo)
+        except BaseException as original:
+            recovery_failed = False
+            try:
+                try:
+                    quiesce_archive(request)
+                except BaseException:
+                    pass
+                restore_targets(targets, backups, replaced)
+                for relative, backup in backups.items():
+                    parent_descriptor, name, _ = targets[relative]
+                    if backup is None:
+                        try:
+                            os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        fail("rollback_failed")
+                    payload, _ = backup
+                    current, _ = read_regular_at(parent_descriptor, name, limit=MAX_UPLOAD_BYTES)
+                    if current != payload:
+                        fail("rollback_failed")
+                if was_loaded:
+                    install_archive_job(request, repo)
+                else:
+                    enable_archive(request)
+            except BaseException:
+                recovery_failed = True
+            if recovery_failed:
+                set_lock(
+                    deploy_descriptor,
+                    deployment_id(request),
+                    lock["relative_paths"],
+                    "rollback_failed",
+                )
+                fail("rollback_failed")
+            if isinstance(original, ControlledFailure):
+                raise original
+            fail("install_failed")
+        finally:
+            signals_restore()
+        return {
+            "schema_version": 1,
+            "ok": True,
+            "sha256": actual,
+            "launchd": launchd,
+        }
+    finally:
+        for relative, (parent_descriptor, _, _) in targets.items():
+            temporary = temporary_names.get(relative)
+            if temporary:
+                try:
+                    os.unlink(temporary, dir_fd=parent_descriptor)
+                except FileNotFoundError:
+                    pass
+            os.close(parent_descriptor)
+        close_descriptors(repo_descriptor, stage_descriptor, stages_descriptor, deploy_descriptor)
+
+
+def verify_final(request):
+    repo = checked_repo(request)
+    deploy_root, deploy_descriptor, stages_descriptor = open_deploy_directories(
+        request, create=False
+    )
+    repo_descriptor = -1
+    try:
+        require_lock(deploy_descriptor, request)
+        home = lexical_absolute(request["expected_remote_home"])
+        home_descriptor = open_absolute_directory(home)
+        try:
+            repo_descriptor = open_directory_below(
+                home_descriptor, repo.relative_to(home).parts, create=False
+            )
+        finally:
+            os.close(home_descriptor)
+        actual = verify_paths_descriptor(repo_descriptor, expected_hashes(request))
+        return {"schema_version": 1, "ok": True, "sha256": actual}
+    finally:
+        close_descriptors(repo_descriptor, stages_descriptor, deploy_descriptor)
+
+
+def finish(request):
+    (
+        stage_path,
+        deploy_descriptor,
+        stages_descriptor,
+        stage_descriptor,
+        lock,
+    ) = stage_details(request)
+    try:
+        mutex = acquire_mutex(deploy_descriptor)
+        try:
+            require_lock(deploy_descriptor, request)
+            os.close(stage_descriptor)
+            stage_descriptor = -1
+            remove_tree_at(stages_descriptor, stage_path.name, [0])
+            os.unlink(LOCK_FILE, dir_fd=deploy_descriptor)
+        finally:
+            release_mutex(mutex)
+        return {"schema_version": 1, "ok": True, "finished": True}
+    finally:
+        close_descriptors(stage_descriptor, stages_descriptor, deploy_descriptor)
 
 
 def main():
@@ -501,10 +1144,11 @@ def main():
         handlers = {
             "inventory": inventory,
             "prepare": prepare,
+            "upload_file": upload_file,
             "verify_stage": verify_stage,
             "install_files": install_files,
             "verify_final": verify_final,
-            "install_archive_launchd": install_archive_launchd,
+            "finish": finish,
         }
         if action not in handlers:
             fail("schema_drift")
@@ -548,6 +1192,15 @@ def validate_remote_path(value: object, *, below: str | None = None) -> str:
         except ValueError as error:
             raise DeployError("unsafe_path") from error
     return value
+
+
+def remote_stage_path(config: DeployConfig, deployment_id: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{32}", deployment_id):
+        raise DeployError("config_schema_drift")
+    return (
+        f"{config.expected_remote_home}/{REMOTE_DEPLOY_ROOT_RELATIVE}/stages/"
+        f".fleet-deploy-{deployment_id}"
+    )
 
 
 def read_json_file(path: Path) -> dict:
@@ -773,8 +1426,40 @@ def validate_hash_response(response: dict, expected: dict[str, str]) -> None:
         raise DeployError("hash_mismatch")
 
 
+def validate_install_response(
+    response: dict,
+    expected_hashes: dict[str, str],
+    config: DeployConfig,
+) -> dict:
+    if not isinstance(response, dict) or set(response) != {
+        "schema_version",
+        "ok",
+        "sha256",
+        "launchd",
+    }:
+        raise DeployError("remote_schema_drift")
+    validate_hash_response(
+        {key: response[key] for key in ("schema_version", "ok", "sha256")},
+        expected_hashes,
+    )
+    launchd = response.get("launchd")
+    expected_label = f"com.mattrotundo.ai-chat-archive.{config.host_id}"
+    expected_plist = (
+        f"{config.expected_remote_home}/Library/LaunchAgents/{expected_label}.plist"
+    )
+    if (
+        not isinstance(launchd, dict)
+        or set(launchd) != {"label", "loaded", "plist_path"}
+        or launchd.get("label") != expected_label
+        or launchd.get("loaded") is not True
+        or launchd.get("plist_path") != expected_plist
+    ):
+        raise DeployError("archive_launchd_failed")
+    return launchd
+
+
 class SshTransport:
-    """SSH/SCP transport whose output is never forwarded to the status receipt."""
+    """SSH transport whose output is never forwarded to the status receipt."""
 
     def __init__(
         self,
@@ -859,70 +1544,82 @@ class SshTransport:
                 "remote_file_missing",
                 "hash_mismatch",
                 "archive_launchd_failed",
+                "archive_quiesce_failed",
+                "archive_still_loaded",
+                "deployment_locked",
+                "deployment_lock_mismatch",
+                "install_failed",
+                "rollback_failed",
+                "stale_stage_limit",
                 "remote_helper_failure",
             }
             raise DeployError(code if code in allowed else "remote_helper_failure")
         return response
 
-    def copy_file(self, local_path: Path, remote_path: str) -> None:
-        remote_path = validate_remote_path(remote_path, below=self.config.remote_repo_root)
+    def copy_file(
+        self,
+        local_path: Path,
+        *,
+        deployment_id: str,
+        stage_path: str,
+        relative_path: str,
+        expected_sha256: str,
+    ) -> None:
+        relative_path = validate_relative_path(relative_path)
+        if stage_path != remote_stage_path(self.config, deployment_id):
+            raise DeployError("unsafe_path")
         if local_path.is_symlink() or not local_path.is_file():
             raise DeployError("local_runtime_missing")
-        command = [
-            "scp",
-            "-q",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            "--",
-            str(local_path),
-            f"{self.config.ssh_host}:{remote_path}",
-        ]
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            completed = self.runner(
-                command,
-                text=True,
-                capture_output=True,
-                timeout=120,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise OfflineError() from error
+            descriptor = os.open(local_path, flags)
         except OSError as error:
-            raise DeployError("local_transport_error") from error
-        self._raise_for_transport(completed, python_required=False)
-
-    def install_archive_launchd(self, remote_script: str, remote_config: str) -> dict:
-        remote_script = validate_remote_path(remote_script, below=self.config.remote_repo_root)
-        remote_config = validate_remote_path(remote_config, below=self.config.remote_repo_root)
+            raise DeployError("local_runtime_missing") from error
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4 * 1024 * 1024:
+                raise DeployError("local_runtime_missing")
+            chunks = []
+            remaining = metadata.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+                if not chunk:
+                    raise DeployError("local_runtime_changed")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise DeployError("local_runtime_changed")
+            final = os.fstat(descriptor)
+            if (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            ) != (
+                final.st_dev,
+                final.st_ino,
+                final.st_size,
+                final.st_mtime_ns,
+                final.st_ctime_ns,
+            ):
+                raise DeployError("local_runtime_changed")
+        finally:
+            os.close(descriptor)
+        payload = b"".join(chunks)
+        if hashlib.sha256(payload).hexdigest() != expected_sha256:
+            raise DeployError("local_runtime_hash_mismatch")
         response = self.helper(
-            "install_archive_launchd",
+            "upload_file",
             {
-                "script_relative_path": str(
-                    PurePosixPath(remote_script).relative_to(self.config.remote_repo_root)
-                ),
-                "config_relative_path": str(
-                    PurePosixPath(remote_config).relative_to(self.config.remote_repo_root)
-                ),
-                "interval_seconds": self.config.archive_interval_seconds,
+                "deployment_id": deployment_id,
+                "stage_path": stage_path,
+                "relative_path": relative_path,
+                "expected_sha256": expected_sha256,
+                "content_b64": base64.b64encode(payload).decode("ascii"),
             },
         )
-        if set(response) != {"schema_version", "ok", "launchd"}:
-            raise DeployError("archive_launchd_failed")
-        launchd = response.get("launchd")
-        expected_label = f"com.mattrotundo.ai-chat-archive.{self.config.host_id}"
-        if (
-            not isinstance(launchd, dict)
-            or set(launchd) != {"label", "loaded", "plist_path"}
-            or launchd.get("label") != expected_label
-            or launchd.get("loaded") is not True
-        ):
-            raise DeployError("archive_launchd_failed")
-        validate_remote_path(
-            launchd.get("plist_path"), below=self.config.expected_remote_home
-        )
-        return launchd
+        validate_hash_response(response, {relative_path: expected_sha256})
 
 
 def body_free_inventory(inventory: dict | None) -> dict:
@@ -953,6 +1650,9 @@ def failure_status(config: DeployConfig, code: str, stage: str, inventory: dict 
 def deploy_once(config: DeployConfig, transport, *, repo_root: Path | None = None) -> dict:
     inventory = None
     stage = "inventory"
+    deployment_id = None
+    stage_path = None
+    remote_finished = False
     try:
         inventory_response = transport.helper("inventory", {})
         inventory = validate_inventory_response(config, inventory_response)
@@ -988,7 +1688,15 @@ def deploy_once(config: DeployConfig, transport, *, repo_root: Path | None = Non
             expected_hashes = {item.relative_path: item.sha256 for item in files}
 
             stage = "prepare"
-            prepared = transport.helper("prepare", {"relative_paths": list(expected_hashes)})
+            deployment_id = secrets.token_hex(16)
+            stage_path = remote_stage_path(config, deployment_id)
+            prepared = transport.helper(
+                "prepare",
+                {
+                    "deployment_id": deployment_id,
+                    "relative_paths": list(expected_hashes),
+                },
+            )
             if (
                 not isinstance(prepared, dict)
                 or set(prepared) != {"schema_version", "ok", "stage_path"}
@@ -996,44 +1704,78 @@ def deploy_once(config: DeployConfig, transport, *, repo_root: Path | None = Non
                 raise DeployError("remote_schema_drift")
             if prepared.get("schema_version") != SCHEMA_VERSION or prepared.get("ok") is not True:
                 raise DeployError("remote_schema_drift")
-            stage_path = validate_remote_path(
-                prepared.get("stage_path"), below=config.remote_repo_root
+            returned_stage = validate_remote_path(
+                prepared.get("stage_path"), below=config.expected_remote_home
             )
+            if returned_stage != stage_path:
+                raise DeployError("unsafe_path")
 
             stage = "copy"
             for item in files:
-                destination = f"{stage_path}/{item.relative_path}"
-                transport.copy_file(item.local_path, destination)
+                transport.copy_file(
+                    item.local_path,
+                    deployment_id=deployment_id,
+                    stage_path=stage_path,
+                    relative_path=item.relative_path,
+                    expected_sha256=item.sha256,
+                )
 
             stage = "verify_staged_hashes"
             staged = transport.helper(
                 "verify_stage",
-                {"stage_path": stage_path, "expected_sha256": expected_hashes},
+                {
+                    "deployment_id": deployment_id,
+                    "stage_path": stage_path,
+                    "expected_sha256": expected_hashes,
+                },
             )
             validate_hash_response(staged, expected_hashes)
 
-            stage = "install_files"
+            stage = "activate_runtime"
             installed = transport.helper(
                 "install_files",
-                {"stage_path": stage_path, "expected_sha256": expected_hashes},
+                {
+                    "deployment_id": deployment_id,
+                    "stage_path": stage_path,
+                    "expected_sha256": expected_hashes,
+                    "host_id": config.host_id,
+                    "script_relative_path": "fleet_chat_archive.py",
+                    "config_relative_path": config.remote_config_relative_path,
+                    "interval_seconds": config.archive_interval_seconds,
+                },
             )
-            validate_hash_response(installed, expected_hashes)
+            launchd = validate_install_response(installed, expected_hashes, config)
 
             stage = "verify_remote_hashes"
             final_hashes = transport.helper(
-                "verify_final", {"expected_sha256": expected_hashes}
+                "verify_final",
+                {
+                    "deployment_id": deployment_id,
+                    "expected_sha256": expected_hashes,
+                },
             )
             validate_hash_response(final_hashes, expected_hashes)
 
-            stage = "install_archive_launchd"
-            remote_script = f"{config.remote_repo_root}/fleet_chat_archive.py"
-            remote_config = f"{config.remote_repo_root}/{config.remote_config_relative_path}"
-            transport.install_archive_launchd(remote_script, remote_config)
+            stage = "finish_remote_deploy"
+            finished = transport.helper(
+                "finish",
+                {
+                    "deployment_id": deployment_id,
+                    "stage_path": stage_path,
+                },
+            )
+            if finished != {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "finished": True,
+            }:
+                raise DeployError("remote_schema_drift")
+            remote_finished = True
 
         return {
             "schema_version": SCHEMA_VERSION,
             "host_id": config.host_id,
-            "status": "deployed",
+            "status": "remote_deployed",
             "retryable": False,
             "stage": "completed",
             "inventory": body_free_inventory(inventory),
@@ -1044,6 +1786,7 @@ def deploy_once(config: DeployConfig, transport, *, repo_root: Path | None = Non
             },
             "archive_launchd": {
                 "installed": True,
+                "loaded": launchd["loaded"],
                 "interval_seconds": config.archive_interval_seconds,
             },
             "errors": [],
@@ -1052,6 +1795,19 @@ def deploy_once(config: DeployConfig, transport, *, repo_root: Path | None = Non
         return failure_status(config, error.code, stage, inventory)
     except DeployError as error:
         return failure_status(config, error.code, stage, inventory)
+    finally:
+        if deployment_id is not None and stage_path is not None and not remote_finished:
+            try:
+                transport.helper(
+                    "finish",
+                    {
+                        "deployment_id": deployment_id,
+                        "stage_path": stage_path,
+                        "abort": True,
+                    },
+                )
+            except Exception:
+                pass
 
 
 def secure_directory(path: Path) -> Path:
@@ -1126,7 +1882,7 @@ def install_retry_launchd(
     logs_root = secure_directory(
         logs_dir or Path.home() / "Library" / "Logs" / "AIChatArchiveDeploy"
     )
-    label = "com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry"
+    label = RETRY_LAUNCHD_LABEL
     stdout_path = logs_root / "old-macbook.out.log"
     stderr_path = logs_root / "old-macbook.err.log"
     ensure_owner_log(stdout_path)
@@ -1160,6 +1916,14 @@ def install_retry_launchd(
             capture_output=True,
             check=False,
         )
+        enabled = runner(
+            ["launchctl", "enable", f"{domain}/{label}"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if enabled.returncode != 0:
+            raise DeployError("retry_launchd_failed")
         completed = runner(
             ["launchctl", "bootstrap", domain, str(plist_path)],
             text=True,
@@ -1167,6 +1931,14 @@ def install_retry_launchd(
             check=False,
         )
         if completed.returncode != 0:
+            raise DeployError("retry_launchd_failed")
+        printed = runner(
+            ["launchctl", "print", f"{domain}/{label}"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if printed.returncode != 0:
             raise DeployError("retry_launchd_failed")
         loaded = True
     return {
@@ -1176,6 +1948,72 @@ def install_retry_launchd(
         "loaded": loaded,
         "interval_seconds": config.retry_interval_seconds,
         "plist_path": str(plist_path),
+    }
+
+
+def disable_retry_launchd(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> dict:
+    if platform.system() != "Darwin":
+        raise DeployError("non_darwin")
+    domain = f"gui/{os.getuid()}"
+    target = f"{domain}/{RETRY_LAUNCHD_LABEL}"
+    initially_loaded = runner(
+        ["launchctl", "print", target],
+        text=True,
+        capture_output=True,
+        check=False,
+    ).returncode == 0
+    disabled = runner(
+        ["launchctl", "disable", target],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if disabled.returncode != 0:
+        raise DeployError("retry_launchd_failed")
+    disabled_state = runner(
+        ["launchctl", "print-disabled", domain],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    disabled_pattern = re.compile(
+        rf'"?{re.escape(RETRY_LAUNCHD_LABEL)}"?\s*=>\s*true(?:\s|$)'
+    )
+    if disabled_state.returncode != 0 or not disabled_pattern.search(
+        disabled_state.stdout or ""
+    ):
+        raise DeployError("retry_launchd_failed")
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    try:
+        signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
+        if initially_loaded:
+            bootout = runner(
+                ["launchctl", "bootout", target],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if bootout.returncode != 0:
+                raise DeployError("retry_launchd_failed")
+        printed = runner(
+            ["launchctl", "print", target],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if printed.returncode == 0:
+            raise DeployError("retry_launchd_failed")
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+    return {
+        "label": RETRY_LAUNCHD_LABEL,
+        "disabled": True,
+        "loaded": False,
+        "recurring": False,
     }
 
 
@@ -1199,6 +2037,21 @@ def main() -> int:
         config = load_deploy_config(config_path)
         if args.command == "run":
             result = deploy_once(config, SshTransport(config))
+            if result["status"] == "remote_deployed":
+                try:
+                    retry_launchd = disable_retry_launchd()
+                except DeployError as error:
+                    result["status"] = "failed"
+                    result["stage"] = "disable_retry_launchd"
+                    result["errors"] = [{"code": error.code}]
+                    result["retry_launchd"] = {
+                        "disabled": False,
+                        "loaded": None,
+                        "recurring": None,
+                    }
+                else:
+                    result["status"] = "deployed"
+                    result["retry_launchd"] = retry_launchd
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
             return 0 if result["status"] in {"deployed", "offline_retryable"} else 1
         result = install_retry_launchd(
