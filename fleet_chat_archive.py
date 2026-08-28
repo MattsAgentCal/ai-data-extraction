@@ -138,6 +138,7 @@ EXTRACTOR_FILES = (
 )
 MAX_SOURCE_BYTES = 1280 * 1024 * 1024
 MAX_OBJECT_BYTES = 1280 * 1024 * 1024
+MAX_PRIVATE_KEY_LABEL_CHARS = 64
 CODEX_PATH_PROVENANCE_FIELDS = frozenset({"session_file"})
 
 
@@ -383,6 +384,8 @@ def has_private_key_begin(value: str, lowered: str | None = None) -> bool:
         cursor = label_start
         while cursor < length:
             if lowered.startswith(suffix, cursor):
+                # This slice and split are safe because the forward scan below
+                # fails closed before a label can exceed the strict PEM bound.
                 words = lowered[label_start:cursor].split(" ")
                 if (
                     len(words) >= 2
@@ -403,6 +406,11 @@ def has_private_key_begin(value: str, lowered: str | None = None) -> bool:
             if character != " " and not "a" <= character <= "z":
                 search_from = cursor
                 break
+            if cursor - label_start >= MAX_PRIVATE_KEY_LABEL_CHARS:
+                # An overlong letters/spaces label is begin-like but cannot be
+                # safely classified as a bounded PEM label. Treat the entire
+                # containing string as sensitive without scanning or slicing it.
+                return True
             cursor += 1
         else:
             return False

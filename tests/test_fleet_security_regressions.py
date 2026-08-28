@@ -1122,6 +1122,34 @@ assert "PRIVATE KEY" not in fleet.REDACTABLE_SECRET_PATTERN.upper()
             timeout=2,
         )
 
+    def test_huge_private_key_label_has_bounded_peak_memory(self):
+        script = """
+import resource
+import sys
+import fleet_chat_archive as fleet
+
+def peak_rss_bytes():
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return value if sys.platform == "darwin" else value * 1024
+
+label_size = 16 * 1024 * 1024
+value = "-----BEGIN " + ("A" * label_size) + " PRIVATE KEY-----"
+baseline = peak_rss_bytes()
+assert fleet.has_private_key_begin(value)
+peak = peak_rss_bytes()
+growth = peak - baseline
+assert growth < 24 * 1024 * 1024, growth
+assert peak < 80 * 1024 * 1024, peak
+"""
+        subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+
     def test_marker_prefilter_covers_every_secret_pattern_branch(self):
         examples = [
             "sk-" + "a" * 20,
