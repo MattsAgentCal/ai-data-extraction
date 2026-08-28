@@ -631,15 +631,20 @@ class FleetChatArchiveTests(unittest.TestCase):
                     }
                 )
             )
+            remote_run_id = "20260827T000000.000000Z-deadbeef"
             remote_receipt = (
-                remote_spool / "hosts" / "mini" / "receipts" / "healthy.json"
+                remote_spool
+                / "hosts"
+                / "mini"
+                / "receipts"
+                / f"{remote_run_id}.json"
             )
             remote_receipt.parent.mkdir(parents=True)
             remote_receipt_value = {
                 "schema_version": 1,
                 "extractor_sha256": "a" * 64,
                 "config_sha256": "c" * 64,
-                "run_id": "healthy",
+                "run_id": remote_run_id,
                 "collected_at": "2026-08-27T00:00:00+00:00",
                 "host_id": "mini",
                 "collection_status": "completed",
