@@ -13,6 +13,7 @@ import os
 import plistlib
 import re
 import shutil
+import signal
 import subprocess
 import stat
 import sys
@@ -25,6 +26,10 @@ from extract_claude_code import extract_claude_session, find_all_claude_sessions
 from extract_codex import extract_codex_session, find_all_codex_sessions
 from extract_hermes import extract_hermes_export, iter_hermes_export
 from extract_openclaw import extract_openclaw_session, find_all_openclaw_sessions
+
+
+class TerminationRequested(BaseException):
+    """Cancellation signal that operational exception handlers must not swallow."""
 
 
 HOST_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62})\Z")
@@ -1345,7 +1350,7 @@ def merge_host_shard(
             host_id,
             require_healthy_receipt=require_healthy_receipt,
         )
-    except Exception:
+    except BaseException:
         for destination, payload in rollback_payloads.items():
             atomic_write_bytes(destination, payload)
         raise
@@ -1919,8 +1924,15 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    def handle_termination(_signum: int, _frame: object) -> None:
+        raise TerminationRequested
+
+    signal.signal(signal.SIGTERM, handle_termination)
     args = parser().parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except TerminationRequested:
+        return 128 + signal.SIGTERM
 
 
 if __name__ == "__main__":

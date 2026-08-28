@@ -308,6 +308,28 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             }
             self.assertEqual(authorized_object_names, old_objects)
 
+            def interrupt_after_index(source, destination_path, *, immutable):
+                changed = real_copy(source, destination_path, immutable=immutable)
+                if source.name == "index.json":
+                    raise KeyboardInterrupt
+                return changed
+
+            with mock.patch.object(
+                fleet, "copy_verified_file", side_effect=interrupt_after_index
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    fleet.merge_host_shard(source_shard, destination, "mini")
+
+            authorized_after_cancellation = set(
+                fleet.validated_shard_files(destination_shard, "mini")
+            )
+            authorized_object_names = {
+                path.stem
+                for path in authorized_after_cancellation
+                if path.parent.name == "objects"
+            }
+            self.assertEqual(authorized_object_names, old_objects)
+
             fleet.merge_host_shard(source_shard, destination, "mini")
             final_manifest = json.loads(
                 (destination_shard / "publish-manifest.json").read_text()
@@ -1057,6 +1079,66 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 (root / "spool" / "state" / "test-mac" / "claude.json").read_text()
             )
             self.assertEqual(state["sources"], {})
+
+    def test_termination_during_later_harness_restores_prior_manifest_and_state(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            session = claude_root / "projects" / "sample" / "session.jsonl"
+            write_jsonl(
+                session,
+                [{"type": "user", "message": {"content": "first snapshot"}}],
+            )
+            config_path = root / "config.json"
+            config = {
+                "schema_version": 1,
+                "host_id": "test-mac",
+                "spool_root": str(root / "spool"),
+                "drive_root": None,
+                "sources": {"claude_roots": [str(claude_root)]},
+            }
+            config_path.write_text(json.dumps(config))
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            shard = root / "spool" / "hosts" / "test-mac"
+            old_manifest = (shard / "publish-manifest.json").read_bytes()
+            old_index = (shard / "claude" / "index.json").read_bytes()
+            with session.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {"type": "assistant", "message": {"content": "second snapshot"}}
+                    )
+                    + "\n"
+                )
+            config["sources"]["hermes_instances"] = [{"name": "synthetic"}]
+            config_path.write_text(json.dumps(config))
+
+            with mock.patch.object(
+                fleet,
+                "export_hermes_instances",
+                side_effect=fleet.TerminationRequested,
+            ), mock.patch("builtins.print"), self.assertRaises(
+                fleet.TerminationRequested
+            ):
+                fleet.run_config(configured_args(config_path))
+
+            self.assertEqual(
+                (shard / "publish-manifest.json").read_bytes(), old_manifest
+            )
+            self.assertEqual((shard / "claude" / "index.json").read_bytes(), old_index)
+            fleet.validated_shard_files(shard, "test-mac")
+            for harness in ("claude", "hermes"):
+                state = json.loads(
+                    (
+                        root
+                        / "spool"
+                        / "state"
+                        / "test-mac"
+                        / f"{harness}.json"
+                    ).read_text()
+                )
+                self.assertEqual(state["sources"], {})
 
     def test_cached_remote_shard_publishes_while_remote_is_unreachable(self):
         with safe_temporary_directory() as tmp:
