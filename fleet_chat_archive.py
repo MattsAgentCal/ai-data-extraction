@@ -1557,24 +1557,15 @@ def validated_manifest_snapshot_indexes(
             index = json.loads(index_payload)
         except (TypeError, UnicodeError, ValueError) as error:
             raise ValueError("invalid supplied prior manifest snapshot") from error
-        rows = index.get("conversations") if isinstance(index, dict) else None
-        if (
-            not isinstance(index, dict)
-            or index != index_values.get(harness)
-            or not is_exact_schema_version_one(index.get("schema_version"))
-            or index.get("host_id") != host_id
-            or index.get("harness") != harness
-            or not isinstance(rows, list)
-        ):
+        try:
+            index = validate_index_value(index, host_id, harness, index_path.name)
+        except ValueError as error:
+            raise ValueError("invalid supplied prior manifest snapshot") from error
+        if index != index_values.get(harness):
             raise ValueError("invalid supplied prior manifest snapshot")
         indexed_digests = []
-        for row in rows:
-            digest = row.get("object_sha256") if isinstance(row, dict) else None
-            if (
-                not OBJECT_NAME_RE.fullmatch(f"{digest}.json")
-                or row.get("source") not in HARNESS_SOURCES[harness]
-            ):
-                raise ValueError("invalid supplied prior manifest snapshot")
+        for row in index["conversations"]:
+            digest = row["object_sha256"]
             object_path = source_root / harness / "objects" / f"{digest}.json"
             if not object_path.is_file() or object_path.is_symlink():
                 raise ValueError("invalid supplied prior manifest snapshot")
@@ -2377,15 +2368,15 @@ def validated_object_provenance(
     return archived_source, archived_session_id
 
 
-def validate_index_metadata(index_path: Path, host_id: str, harness: str) -> dict:
-    """Validate an index without opening any conversation object bodies."""
-    index = read_canonical_json_nofollow(
-        index_path,
-        max_bytes=MAX_INDEX_METADATA_BYTES,
-        size_label="archive index",
-    )
+def validate_index_value(
+    index: object,
+    host_id: str,
+    harness: str,
+    index_name: str,
+) -> dict:
+    """Validate one parsed index value without reading paths or object bodies."""
     if not isinstance(index, dict):
-        raise ValueError(f"invalid archive index identity: {index_path.name}")
+        raise ValueError(f"invalid archive index identity: {index_name}")
     if (
         set(index) != {"schema_version", "host_id", "harness", "conversations"}
         or not is_exact_schema_version_one(index.get("schema_version"))
@@ -2394,11 +2385,11 @@ def validate_index_metadata(index_path: Path, host_id: str, harness: str) -> dic
         or not isinstance(index.get("conversations"), list)
         or len(index["conversations"]) > MAX_MANIFEST_OBJECTS_PER_HARNESS
     ):
-        raise ValueError(f"invalid archive index identity: {index_path.name}")
+        raise ValueError(f"invalid archive index identity: {index_name}")
     referenced: set[str] = set()
     for row in index["conversations"]:
         if not isinstance(row, dict):
-            raise ValueError(f"invalid archive index row: {index_path.name}")
+            raise ValueError(f"invalid archive index row: {index_name}")
         base_fields = {"object_sha256", "session_id", "source"}
         codex_fields = base_fields | {"source_sha256", "installation"}
         allowed_fields = {frozenset(base_fields)}
@@ -2408,25 +2399,35 @@ def validate_index_metadata(index_path: Path, host_id: str, harness: str) -> dic
             # may never acquire those path-derived fields.
             allowed_fields.add(frozenset(codex_fields))
         if frozenset(row) not in allowed_fields:
-            raise ValueError(f"invalid archive index row: {index_path.name}")
+            raise ValueError(f"invalid archive index row: {index_name}")
         if (
             not isinstance(row.get("object_sha256"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", row["object_sha256"])
             or not is_bounded_metadata_string(row.get("session_id"))
             or row.get("source") not in HARNESS_SOURCES[harness]
         ):
-            raise ValueError(f"invalid archive index row: {index_path.name}")
+            raise ValueError(f"invalid archive index row: {index_name}")
         if frozenset(row) == frozenset(codex_fields) and (
             not isinstance(row.get("source_sha256"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", row["source_sha256"])
             or not is_bounded_metadata_string(row.get("installation"))
         ):
-            raise ValueError(f"invalid Codex source identity: {index_path.name}")
+            raise ValueError(f"invalid Codex source identity: {index_name}")
         digest = row["object_sha256"]
         if digest in referenced:
             raise ValueError(f"duplicate archive index row: {digest}")
         referenced.add(digest)
     return index
+
+
+def validate_index_metadata(index_path: Path, host_id: str, harness: str) -> dict:
+    """Validate an index without opening any conversation object bodies."""
+    index = read_canonical_json_nofollow(
+        index_path,
+        max_bytes=MAX_INDEX_METADATA_BYTES,
+        size_label="archive index",
+    )
+    return validate_index_value(index, host_id, harness, index_path.name)
 
 
 def validate_index_file(

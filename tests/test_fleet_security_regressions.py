@@ -1243,6 +1243,126 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             )
             self.assertTrue(poisoned_object.is_file())
 
+    def test_snapshot_indexes_enforce_exact_legacy_and_current_row_schemas(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            codex = root / "codex"
+            session = (
+                codex
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-snapshot-schema.jsonl"
+            )
+            write_jsonl(
+                session,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "snapshot-schema"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "safe body",
+                        },
+                    },
+                ],
+            )
+            spool = root / "spool"
+            shard = spool / "hosts" / "test-mac"
+            fleet.archive_conversations(
+                spool,
+                "test-mac",
+                "codex",
+                [
+                    {
+                        "schema_version": 1,
+                        "source": "codex",
+                        "session_id": "snapshot-schema",
+                        "installation": str(codex),
+                        "_archive_source_sha256": "a" * 64,
+                        "messages": [{"role": "user", "content": "safe body"}],
+                    }
+                ],
+            )
+            live_index_path = shard / "codex" / "index.json"
+            live_index = json.loads(live_index_path.read_text())
+            digest = live_index["conversations"][0]["object_sha256"]
+
+            def snapshot_for_row(row):
+                index = {
+                    "schema_version": 1,
+                    "host_id": "test-mac",
+                    "harness": "codex",
+                    "conversations": [row],
+                }
+                index_payload = fleet.canonical_json(index) + b"\n"
+                manifest = {
+                    "schema_version": 1,
+                    "host_id": "test-mac",
+                    "harnesses": {
+                        "codex": {
+                            "index_sha256": hashlib.sha256(
+                                index_payload
+                            ).hexdigest(),
+                            "object_sha256": [digest],
+                        }
+                    },
+                }
+                return (
+                    fleet.canonical_json(manifest) + b"\n",
+                    {live_index_path: index_payload},
+                    {"codex": index},
+                )
+
+            legacy_row = {
+                "object_sha256": digest,
+                "session_id": "snapshot-schema",
+                "source": "codex",
+            }
+            current_row = {
+                **legacy_row,
+                "source_sha256": "b" * 64,
+                "installation": str(codex),
+            }
+            for row in (legacy_row, current_row):
+                with self.subTest(valid_fields=sorted(row)):
+                    indexes = fleet.validated_manifest_snapshot_indexes(
+                        snapshot_for_row(row), shard, "test-mac"
+                    )
+                    self.assertEqual(indexes["codex"]["conversations"], [row])
+
+            invalid_rows = (
+                {
+                    **legacy_row,
+                    "messages": [{"role": "user", "content": "private body"}],
+                },
+                {
+                    **legacy_row,
+                    "source_sha256": True,
+                    "installation": [str(codex)],
+                },
+            )
+            real_validate_object = fleet.validate_object_file
+            for row in invalid_rows:
+                with self.subTest(invalid_fields=sorted(row)), mock.patch.object(
+                    fleet,
+                    "validate_object_file",
+                    wraps=real_validate_object,
+                ) as validate_object, self.assertRaisesRegex(
+                    ValueError, "prior manifest snapshot"
+                ):
+                    fleet.collect_sources(
+                        spool,
+                        "test-mac",
+                        codex_roots=[codex],
+                        prior_manifest_snapshot=snapshot_for_row(row),
+                    )
+                validate_object.assert_not_called()
+
     def test_incremental_state_detects_same_size_rewrite_with_restored_mtime(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
