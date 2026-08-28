@@ -29,12 +29,14 @@
       {
         "host_id": "mac-mini",
         "ssh_host": "cals-mac-mini",
-        "remote_spool_root": "/Users/calrotundo/.local/share/ai-chat-archive/spool"
+        "remote_spool_root": "/Users/calrotundo/.local/share/ai-chat-archive/spool",
+        "timeout_seconds": 21600
       },
       {
         "host_id": "old-macbook",
         "ssh_host": "oldmac",
-        "remote_spool_root": "/Users/mattrotundo/.local/share/ai-chat-archive/spool"
+        "remote_spool_root": "/Users/mattrotundo/.local/share/ai-chat-archive/spool",
+        "timeout_seconds": 21600
       }
     ]
   }
