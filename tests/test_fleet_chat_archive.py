@@ -7,6 +7,8 @@ import tempfile
 import unittest
 import plistlib
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -449,6 +451,51 @@ class FleetChatArchiveTests(unittest.TestCase):
             self.assertEqual(plist_path.stat().st_mode & 0o777, 0o600)
             for log_key in ("StandardOutPath", "StandardErrorPath"):
                 self.assertEqual(Path(job[log_key]).stat().st_mode & 0o777, 0o600)
+
+    def test_launchd_install_enables_a_persistently_disabled_job_before_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {},
+                    }
+                )
+            )
+            args = SimpleNamespace(
+                config=str(config_path),
+                launch_agents_dir=str(root / "LaunchAgents"),
+                interval_seconds=900,
+                no_load=False,
+            )
+
+            with (
+                mock.patch.object(fleet.Path, "home", return_value=root / "home"),
+                mock.patch.object(fleet.subprocess, "run") as run,
+                mock.patch("builtins.print"),
+                mock.patch.object(fleet.os, "getuid", return_value=501),
+            ):
+                self.assertEqual(fleet.install_launchd(args), 0)
+
+            label = "com.mattrotundo.ai-chat-archive.test-mac"
+            domain = "gui/501"
+            plist_path = (root / "LaunchAgents" / f"{label}.plist").resolve()
+            self.assertEqual(
+                [call.args[0] for call in run.call_args_list],
+                [
+                    ["launchctl", "bootout", f"{domain}/{label}"],
+                    ["launchctl", "enable", f"{domain}/{label}"],
+                    ["launchctl", "bootstrap", domain, str(plist_path)],
+                ],
+            )
+            self.assertFalse(run.call_args_list[0].kwargs["check"])
+            self.assertTrue(run.call_args_list[1].kwargs["check"])
+            self.assertTrue(run.call_args_list[2].kwargs["check"])
 
     def test_configured_run_rejects_google_drive_shaped_plain_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
