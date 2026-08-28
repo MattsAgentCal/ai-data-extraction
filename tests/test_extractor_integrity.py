@@ -626,7 +626,8 @@ class ExtractorIntegrityTests(unittest.TestCase):
                     "compression_ineffective_count", "cost_source", "cost_status",
                     "cwd", "display_name", "end_reason", "ended_at",
                     "estimated_cost_usd", "expiry_finalized", "git_branch",
-                    "git_repo_root", "handoff_error", "handoff_platform",
+                    "git_metadata_generation", "git_repo_root", "handoff_error",
+                    "handoff_platform",
                     "handoff_state", "id", "input_tokens", "last_active",
                     "last_activity_at", "last_activity_description",
                     "last_activity_provenance", "last_read_at", "message_count",
@@ -635,7 +636,7 @@ class ExtractorIntegrityTests(unittest.TestCase):
                     "pricing_version", "profile_name", "reasoning_tokens",
                     "rewind_count", "session_key", "source", "started_at",
                     "system_prompt", "system_prompt_hash", "thread_id", "title",
-                    "title_source", "tool_call_count", "user_id",
+                    "title_source", "tool_call_count", "user_id", "hidden",
                 }
             )
             message_keys = {
@@ -664,6 +665,8 @@ class ExtractorIntegrityTests(unittest.TestCase):
                     "model": "model",
                     "billing_provider": "provider",
                     "chat_type": "dm",
+                    "git_metadata_generation": 7,
+                    "hidden": 1,
                     "system_prompt": "must not be archived",
                     "user_id": "must not be archived",
                     "messages": [
@@ -754,6 +757,8 @@ class ExtractorIntegrityTests(unittest.TestCase):
             )
             self.assertNotIn("system_prompt", conversation)
             self.assertNotIn("user_id", conversation)
+            self.assertNotIn("git_metadata_generation", conversation)
+            self.assertNotIn("hidden", conversation)
             self.assertEqual(
                 conversation["events"][0]["payload"],
                 {
@@ -783,6 +788,12 @@ class ExtractorIntegrityTests(unittest.TestCase):
                         }
                     ),
                     json_line(current_row_with_legacy_message),
+                    json_line(
+                        {
+                            **row,
+                            "future_session_column": "must fail closed",
+                        }
+                    ),
                     json_line(
                         {
                             **row,
@@ -857,7 +868,7 @@ class ExtractorIntegrityTests(unittest.TestCase):
                 [],
             )
             self.assertEqual(hybrid_quality["status"], "partial")
-            self.assertEqual(hybrid_quality["failed_lines"], 5)
+            self.assertEqual(hybrid_quality["failed_lines"], 6)
 
     def test_all_four_producers_emit_closed_v2_objects(self):
         with tempfile.TemporaryDirectory() as tmp:

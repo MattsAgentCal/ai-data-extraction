@@ -37,7 +37,8 @@ HERMES_V020_SESSION_KEYS = {
     "compression_fallback_streak", "compression_ineffective_count",
     "cost_source", "cost_status", "cwd", "display_name", "end_reason",
     "ended_at", "estimated_cost_usd", "expiry_finalized",
-    "git_branch", "git_repo_root", "handoff_error", "handoff_platform",
+    "git_branch", "git_metadata_generation", "git_repo_root", "handoff_error",
+    "handoff_platform",
     "handoff_state", "id", "input_tokens", "last_active",
     "last_activity_at", "last_activity_description",
     "last_activity_provenance", "last_read_at", "message_count", "messages",
@@ -45,7 +46,7 @@ HERMES_V020_SESSION_KEYS = {
     "parent_session_id", "pinned", "pricing_version", "profile_name",
     "reasoning_tokens", "rewind_count", "session_key", "source", "started_at",
     "system_prompt", "system_prompt_hash", "thread_id", "title",
-    "title_source", "tool_call_count", "user_id",
+    "title_source", "tool_call_count", "user_id", "hidden",
 }
 HERMES_LEGACY_MESSAGE_KEYS = {
     "content", "created_at", "id", "is_meta", "name", "role", "timestamp",

@@ -21,7 +21,7 @@
     "extract_claude_code.py": "cc09aa37295d98572fdffcf6d8ef465d340e9154c1722f85871991aa9af8512e",
     "extract_codex.py": "0e1254d39dd9978ad6e2da72f3198f6edae27dcb101b7342c6feee4f71b825c0",
     "extract_openclaw.py": "6049a3832abcddb380b9a9845e4cd1ef264467358be8ad8ce000a11da3e1b84b",
-    "extract_hermes.py": "728f16453802b9e398b67a77d56b261b10898380cf75ea8d0ed0e06e9488281f"
+    "extract_hermes.py": "ab31233a75569274360ea89e3c16f60faba02f5662c612b0195acf1038e262fc"
   },
   "remote_config_relative_path": "configs/old-macbook.json"
 }
