@@ -635,7 +635,7 @@ class ExtractorIntegrityTests(unittest.TestCase):
                 ],
             )
 
-    def test_hermes_current_export_extensions_are_typed_and_discarded(self):
+    def test_hermes_020_exact_observed_schemas_preserve_validated_data(self):
         with tempfile.TemporaryDirectory() as tmp:
             export = Path(tmp) / "hermes.jsonl"
             private_ignored = "ignored-private-metadata"
@@ -660,135 +660,201 @@ class ExtractorIntegrityTests(unittest.TestCase):
                 "message_count", "output_tokens", "pinned", "reasoning_tokens",
                 "rewind_count", "tool_call_count",
             }
-            string_message_keys = {
-                "api_content", "codex_message_items", "codex_reasoning_items",
-                "display_kind", "effect_disposition", "finish_reason",
-                "platform_message_id", "reasoning", "reasoning_content",
-                "reasoning_details", "tool_call_id",
+            message_keys = {
+                "active", "api_content", "codex_message_items",
+                "codex_reasoning_items", "compacted", "content", "display_kind",
+                "display_metadata", "effect_disposition", "finish_reason", "id",
+                "observed", "platform_message_id", "reasoning", "reasoning_content",
+                "reasoning_details", "role", "session_id", "timestamp", "token_count",
+                "tool_call_id", "tool_calls", "tool_name",
             }
-            integer_message_keys = {"active", "compacted", "observed", "token_count"}
+
+            def current_message(**values):
+                message = dict.fromkeys(message_keys)
+                message.update(
+                    {"active": 0, "compacted": 0, "observed": 0, "token_count": 0}
+                )
+                message.update(values)
+                return message
+
             row = {
-                "id": "hermes-current",
-                "source": "desktop",
-                "messages": [
-                    {
-                        "id": 1,
-                        "role": "user",
-                        "content": "retained chat body",
-                        "session_id": "hermes-current",
-                        "tool_calls": [],
-                        "display_metadata": {"ignored": private_ignored},
-                        **{key: private_ignored for key in string_message_keys},
-                        **{key: 0 for key in integer_message_keys},
-                    }
-                ],
                 **{key: private_ignored for key in string_row_keys},
                 **{key: 1.5 for key in number_row_keys},
                 **{key: 0 for key in integer_row_keys},
+                "id": "hermes-current",
+                "source": "desktop",
+                "cwd": "/workspace",
+                "started_at": "2026-08-28T00:00:00Z",
+                "ended_at": "2026-08-28T00:01:00Z",
+                "title": "session",
+                "model": "model",
+                "billing_provider": "provider",
+                "chat_type": "dm",
+                "system_prompt": private_ignored,
+                "messages": [
+                    current_message(
+                        id=1,
+                        role="user",
+                        content="retained chat body",
+                        session_id="hermes-current",
+                        timestamp=1.0,
+                        display_metadata={"ignored": private_ignored},
+                    ),
+                    current_message(
+                        id=2,
+                        role="assistant",
+                        content="running",
+                        session_id="hermes-current",
+                        timestamp=2.0,
+                        tool_calls=[
+                            {
+                                "call_id": "call-1",
+                                "function": {"arguments": "{}", "name": "shell"},
+                                "id": "tool-1",
+                                "response_item_id": "response-1",
+                                "type": "function",
+                            }
+                        ],
+                    ),
+                ],
             }
-            write_lines(export, [json_line(row)])
+            base_row = {
+                key: value
+                for key, value in row.items()
+                if key not in {"git_metadata_generation", "hidden"}
+            }
+            base_row["id"] = "hermes-current-base"
+            base_row["messages"] = [
+                {**message, "session_id": "hermes-current-base"}
+                for message in row["messages"]
+            ]
+            write_lines(export, [json_line(row), json_line(base_row)])
             quality = {}
 
             conversations = extract_hermes_export(export, quality_out=quality)
 
             self.assertEqual(quality["status"], "complete")
             self.assertEqual(quality["failed_lines"], 0)
-            self.assertEqual(len(conversations), 1)
-            self.assertEqual(
-                conversations[0]["messages"],
-                [{"role": "user", "content": "retained chat body", "message_id": 1}],
-            )
-            serialized = json.dumps(conversations[0], sort_keys=True)
-            self.assertNotIn(private_ignored, serialized)
-            self.assertTrue(string_row_keys.isdisjoint(conversations[0]))
-
-    def test_hermes_unknown_extensions_and_known_type_drift_fail_closed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            export = Path(tmp) / "hermes.jsonl"
-            base = {
-                "id": "hermes-current",
-                "source": "desktop",
-                "messages": [{"role": "user", "content": "body"}],
-            }
-            write_lines(
-                export,
-                [
-                    json_line({**base, "future_session_field": "blocked"}),
-                    json_line({**base, "api_call_count": "not-an-integer"}),
-                    json_line(
-                        {
-                            **base,
-                            "messages": [
-                                {
-                                    "role": "user",
-                                    "content": "body",
-                                    "future_message_field": "blocked",
-                                }
-                            ],
-                        }
-                    ),
-                    json_line(
-                        {
-                            **base,
-                            "messages": [
-                                {"role": "user", "content": "body", "tool_calls": {}}
-                            ],
-                        }
-                    ),
-                    *[
-                        json_line(
-                            {
-                                **base,
-                                "messages": [
-                                    {
-                                        "role": "user",
-                                        "content": "body",
-                                        "display_metadata": invalid,
-                                    }
-                                ],
-                            }
-                        )
-                        for invalid in (1, True, [])
-                    ],
-                ],
-            )
-            quality = {}
-
-            conversations = extract_hermes_export(export, quality_out=quality)
-
-            self.assertEqual(conversations, [])
-            self.assertEqual(quality["status"], "partial")
-            self.assertEqual(quality["failed_lines"], 7)
-
-    def test_hermes_display_metadata_accepts_only_object_or_null_and_discards_it(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            export = Path(tmp) / "hermes.jsonl"
-            write_lines(
-                export,
-                [
-                    json_line(
-                        {
-                            "id": f"hermes-{index}",
-                            "source": "desktop",
-                            "messages": [
-                                {
-                                    "role": "user",
-                                    "content": "body",
-                                    "display_metadata": value,
-                                }
-                            ],
-                        }
-                    )
-                    for index, value in enumerate((None, {"display": "discarded"}))
-                ],
-            )
-            quality = {}
-
-            conversations = extract_hermes_export(export, quality_out=quality)
-
-            self.assertEqual(quality["status"], "complete")
             self.assertEqual(len(conversations), 2)
-            self.assertNotIn("display_metadata", json.dumps(conversations))
+            conversation = conversations[0]
+            self.assertEqual(conversation["provider"], "provider")
+            self.assertEqual(conversation["session_type"], "dm")
+            self.assertEqual(
+                conversation["messages"][1]["tool_uses"][0],
+                {
+                    "type": "tool_use",
+                    "payload": {
+                        "call_id": "call-1",
+                        "function": {"arguments": "{}", "name": "shell"},
+                        "id": "tool-1",
+                        "response_item_id": "response-1",
+                        "type": "function",
+                    },
+                    "timestamp": 2.0,
+                },
+            )
+            serialized = json.dumps(conversations, sort_keys=True)
+            self.assertNotIn(private_ignored, serialized)
+            self.assertNotIn("git_metadata_generation", serialized)
+            self.assertNotIn("hidden", serialized)
+
+            without_hidden = dict(row)
+            without_hidden.pop("hidden")
+            without_generation = dict(row)
+            without_generation.pop("git_metadata_generation")
+            invalid_rows = [
+                without_hidden,
+                without_generation,
+                {**row, "future_session_field": "blocked"},
+                {**row, "api_call_count": "not-an-integer"},
+                {**row, "events": [{"type": "smuggled", "system_prompt": private_ignored}]},
+                {**row, "messages": [{"role": "user", "content": "hybrid"}]},
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id="not-an-integer",
+                            role="user",
+                            content="body",
+                            session_id="hermes-current",
+                            timestamp=1.0,
+                        )
+                    ],
+                },
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id=1,
+                            role="user",
+                            content="body",
+                            session_id="hermes-current",
+                            timestamp=1,
+                        )
+                    ],
+                },
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id=1,
+                            role="user",
+                            content="body",
+                            session_id="hermes-current",
+                            timestamp=1.0,
+                            active=2,
+                        )
+                    ],
+                },
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id=1,
+                            role="user",
+                            content="body",
+                            session_id="different-session",
+                            timestamp=1.0,
+                        )
+                    ],
+                },
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id=1,
+                            role="assistant",
+                            content="body",
+                            session_id="hermes-current",
+                            timestamp=1.0,
+                            tool_calls=[{"type": "function"}],
+                        )
+                    ],
+                },
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id=1,
+                            role="user",
+                            content="body",
+                            session_id="hermes-current",
+                            timestamp=1.0,
+                            display_metadata=[],
+                        )
+                    ],
+                },
+            ]
+            invalid_export = Path(tmp) / "hermes-invalid.jsonl"
+            write_lines(invalid_export, [json_line(value) for value in invalid_rows])
+            invalid_quality = {}
+
+            self.assertEqual(
+                extract_hermes_export(invalid_export, quality_out=invalid_quality),
+                [],
+            )
+            self.assertEqual(invalid_quality["status"], "partial")
+            self.assertEqual(invalid_quality["failed_lines"], len(invalid_rows))
 
     def test_hermes_retained_message_metadata_type_drift_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
