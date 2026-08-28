@@ -2697,6 +2697,12 @@ def install_launchd(args: argparse.Namespace) -> int:
             text=True,
         )
         subprocess.run(
+            ["launchctl", "enable", f"{domain}/{label}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
             ["launchctl", "bootstrap", domain, str(plist_path)],
             check=True,
             capture_output=True,
