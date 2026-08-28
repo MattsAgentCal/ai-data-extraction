@@ -202,6 +202,18 @@ def unique_json_object(pairs):
     return value
 
 
+def reject_json_constant(_constant):
+    raise ValueError("non-finite JSON number")
+
+
+def bounded_json_loads(payload):
+    return json.loads(
+        payload,
+        object_pairs_hook=unique_json_object,
+        parse_constant=reject_json_constant,
+    )
+
+
 def file_identity(metadata):
     return (
         metadata.st_dev,
@@ -327,10 +339,13 @@ try:
         ):
             fail()
         try:
-            manifest = json.loads(
-                manifest_payload,
-                object_pairs_hook=unique_json_object,
-            )
+            manifest = bounded_json_loads(manifest_payload)
+            if (
+                not isinstance(manifest, dict)
+                or type(manifest.get("schema_version")) is not int
+                or manifest["schema_version"] != 1
+            ):
+                fail()
             canonical_manifest = (
                 json.dumps(
                     manifest,
@@ -361,6 +376,10 @@ def canonical_json(value: object) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def is_exact_schema_version_one(value: object) -> bool:
+    return type(value) is int and value == 1
 
 
 def extractor_sha256() -> str:
@@ -547,6 +566,18 @@ def unique_json_object(pairs: list[tuple[str, object]]) -> dict:
     return value
 
 
+def reject_json_constant(_constant: str):
+    raise ValueError("non-finite JSON number")
+
+
+def bounded_json_loads(payload: bytes):
+    return json.loads(
+        payload,
+        object_pairs_hook=unique_json_object,
+        parse_constant=reject_json_constant,
+    )
+
+
 def read_canonical_json_nofollow(
     path: Path,
     *,
@@ -559,7 +590,7 @@ def read_canonical_json_nofollow(
         size_label=size_label,
     )
     try:
-        value = json.loads(payload, object_pairs_hook=unique_json_object)
+        value = bounded_json_loads(payload)
         canonical_payload = canonical_json(value) + b"\n"
     except (OverflowError, TypeError, UnicodeError, ValueError) as error:
         raise ValueError(f"{size_label} is not canonical JSON") from error
@@ -788,7 +819,7 @@ def load_healthy_manifest_snapshot(
     harnesses = manifest.get("harnesses")
     receipt_binding = manifest.get("receipt")
     if (
-        manifest.get("schema_version") != 1
+        not is_exact_schema_version_one(manifest.get("schema_version"))
         or manifest.get("host_id") != host_id
         or not isinstance(manifest.get("run_id"), str)
         or not isinstance(harnesses, dict)
@@ -1759,7 +1790,7 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
             "receipt",
             "harnesses",
         }
-        or manifest.get("schema_version") != 1
+        or not is_exact_schema_version_one(manifest.get("schema_version"))
         or manifest.get("host_id") != host_id
         or not is_pipeline_run_id(manifest.get("run_id"))
         or not is_canonical_utc_timestamp(manifest.get("generated_at"))
@@ -2154,7 +2185,7 @@ def quarantine_unindexed_objects(destination_parent: Path, host_id: str) -> int:
     if manifest_path.is_file():
         manifest = read_json_nofollow(manifest_path)
         if (
-            manifest.get("schema_version") != 1
+            not is_exact_schema_version_one(manifest.get("schema_version"))
             or manifest.get("host_id") != host_id
             or not isinstance(manifest.get("harnesses"), dict)
         ):
@@ -2268,7 +2299,11 @@ def restore_indexes_to_manifest(source_root: Path, host_id: str) -> bool:
     if not manifest_path.is_file() or manifest_path.is_symlink():
         return False
     manifest = read_json_nofollow(manifest_path)
-    if manifest.get("host_id") != host_id or not isinstance(manifest.get("harnesses"), dict):
+    if (
+        not is_exact_schema_version_one(manifest.get("schema_version"))
+        or manifest.get("host_id") != host_id
+        or not isinstance(manifest.get("harnesses"), dict)
+    ):
         return False
     repairs: list[tuple[Path, bytes]] = []
     for harness, binding in manifest["harnesses"].items():

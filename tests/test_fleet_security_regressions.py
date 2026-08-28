@@ -35,6 +35,33 @@ def write_canonical_json(path: Path, value: object) -> None:
     path.write_bytes(fleet.canonical_json(value) + b"\n")
 
 
+def manifest_with_json_constant(
+    canonical_manifest: bytes,
+    constant: bytes,
+    position: str,
+) -> bytes:
+    manifest = json.loads(canonical_manifest)
+    if position == "top_level":
+        original = fleet.canonical_json(manifest["generated_at"])
+        needle = b'"generated_at":' + original
+        replacement = b'"generated_at":' + constant
+    elif position == "nested":
+        original = fleet.canonical_json(manifest["receipt"]["path"])
+        needle = b'"path":' + original
+        replacement = b'"path":' + constant
+    elif position == "list":
+        original = fleet.canonical_json(
+            manifest["harnesses"]["claude"]["object_sha256"][0]
+        )
+        needle = b'"object_sha256":[' + original
+        replacement = b'"object_sha256":[' + constant
+    else:
+        raise ValueError(f"unsupported JSON constant position: {position}")
+    if canonical_manifest.count(needle) != 1:
+        raise AssertionError(f"manifest fixture has no unique {position} value")
+    return canonical_manifest.replace(needle, replacement, 1)
+
+
 def write_archive_object(
     shard: Path, harness: str = "claude", host_id: str | None = None
 ) -> tuple[Path, bytes]:
@@ -1532,7 +1559,10 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             shard = spool_root / "hosts" / "mini"
             shard.mkdir(parents=True)
             (spool_root / ".run.lock").touch()
-            (shard / "publish-manifest.json").write_text("{}\n")
+            write_canonical_json(
+                shard / "publish-manifest.json",
+                {"schema_version": 1},
+            )
             outside = Path(tmp) / "outside"
             outside.mkdir()
             (shard / "receipts").symlink_to(outside, target_is_directory=True)
@@ -1563,7 +1593,10 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             shard = spool_root / "hosts" / "mini"
             shard.mkdir(parents=True)
             (spool_root / ".run.lock").touch()
-            (shard / "publish-manifest.json").write_text("{}\n")
+            write_canonical_json(
+                shard / "publish-manifest.json",
+                {"schema_version": 1},
+            )
 
             allowed = subprocess.run(
                 [
@@ -1594,7 +1627,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             lock_path.touch()
             (
                 spool_root / "hosts" / "mini" / "publish-manifest.json"
-            ).write_text("{}\n")
+            ).write_bytes(fleet.canonical_json({"schema_version": 1}) + b"\n")
             fake_bin = root / "bin"
             fake_bin.mkdir()
             (fake_bin / "rsync").symlink_to("/bin/sleep")
@@ -1907,6 +1940,66 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 parsed_manifest,
             )
 
+    def test_manifest_requires_exact_integer_schema_version(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
+            manifest_path = shard / "publish-manifest.json"
+            valid_payload = manifest_path.read_bytes()
+            valid_manifest = json.loads(valid_payload)
+
+            for schema_version in (True, False):
+                with self.subTest(schema_version=schema_version):
+                    candidate = dict(valid_manifest)
+                    candidate["schema_version"] = schema_version
+                    write_canonical_json(manifest_path, candidate)
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "^invalid publish manifest identity: mini$",
+                    ):
+                        fleet.validate_publish_manifest_metadata(shard, "mini")
+
+            manifest_path.write_bytes(valid_payload)
+            self.assertEqual(
+                fleet.validate_publish_manifest_metadata(shard, "mini"),
+                valid_manifest,
+            )
+
+    def test_manifest_rejects_nonfinite_numbers_at_every_json_nesting_position(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
+            manifest_path = shard / "publish-manifest.json"
+            valid_payload = manifest_path.read_bytes()
+            valid_manifest = json.loads(valid_payload)
+
+            for constant in (b"NaN", b"Infinity", b"-Infinity"):
+                for position in ("top_level", "nested", "list"):
+                    with self.subTest(
+                        constant=constant.decode("ascii"),
+                        position=position,
+                    ):
+                        manifest_path.write_bytes(
+                            manifest_with_json_constant(
+                                valid_payload,
+                                constant,
+                                position,
+                            )
+                        )
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "^publish manifest is not canonical JSON$",
+                        ):
+                            fleet.validate_publish_manifest_metadata(shard, "mini")
+
+            manifest_path.write_bytes(valid_payload)
+            self.assertEqual(
+                fleet.validate_publish_manifest_metadata(shard, "mini"),
+                valid_manifest,
+            )
+
     def test_remote_sender_guard_rejects_duplicate_manifest_keys_before_rsync(self):
         with safe_temporary_directory() as tmp:
             spool_root = Path(tmp) / "remote-spool"
@@ -1940,6 +2033,59 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(blocked.stdout, "")
             self.assertEqual(blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR)
             self.assertNotIn(secret_token, blocked.stderr)
+
+    def test_remote_sender_guard_rejects_boolean_schema_and_nonfinite_numbers(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "remote-spool"
+            shard = spool_root / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
+            (spool_root / ".run.lock").touch()
+            manifest_path = shard / "publish-manifest.json"
+            valid_payload = manifest_path.read_bytes()
+            valid_manifest = json.loads(valid_payload)
+            candidates: dict[str, bytes] = {}
+            for schema_version in (True, False):
+                candidate = dict(valid_manifest)
+                candidate["schema_version"] = schema_version
+                candidates[f"schema_{str(schema_version).lower()}"] = (
+                    fleet.canonical_json(candidate) + b"\n"
+                )
+            for constant in (b"NaN", b"Infinity", b"-Infinity"):
+                for position in ("top_level", "nested", "list"):
+                    candidates[
+                        f"{constant.decode('ascii')}_{position}"
+                    ] = manifest_with_json_constant(
+                        valid_payload,
+                        constant,
+                        position,
+                    )
+
+            for name, payload in candidates.items():
+                with self.subTest(name=name):
+                    manifest_path.write_bytes(payload)
+                    blocked = subprocess.run(
+                        [
+                            sys.executable,
+                            "-c",
+                            fleet.REMOTE_RSYNC_GUARD,
+                            str(spool_root),
+                            "mini",
+                            str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
+                            "--version",
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+
+                    self.assertEqual(blocked.returncode, 42)
+                    self.assertEqual(blocked.stdout, "")
+                    self.assertEqual(
+                        blocked.stderr.strip(),
+                        fleet.REMOTE_RSYNC_GUARD_ERROR,
+                    )
 
     def test_remote_pull_revalidates_duplicate_free_final_manifest_sentinel(self):
         with safe_temporary_directory() as tmp:
@@ -1994,6 +2140,94 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertNotIn(secret_token, remote_result["error"])
             self.assertFalse((spool_root / "hosts" / "mini").exists())
             self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+
+    def test_remote_pull_rejects_boolean_schema_and_nonfinite_final_sentinel(self):
+        for invalid_kind in (
+            "schema_true",
+            "schema_false",
+            "NaN_top_level",
+            "NaN_nested",
+            "NaN_list",
+            "Infinity_top_level",
+            "Infinity_nested",
+            "Infinity_list",
+            "-Infinity_top_level",
+            "-Infinity_nested",
+            "-Infinity_list",
+        ):
+            with self.subTest(invalid_kind=invalid_kind):
+                with safe_temporary_directory() as tmp:
+                    spool_root = Path(tmp) / "spool"
+                    remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+                    write_archive_object(remote_shard, host_id="mini")
+                    write_healthy_receipt(remote_shard)
+                    manifest_path = remote_shard / "publish-manifest.json"
+                    valid_payload = manifest_path.read_bytes()
+                    if invalid_kind.startswith("schema_"):
+                        invalid_manifest = json.loads(valid_payload)
+                        invalid_manifest["schema_version"] = (
+                            invalid_kind == "schema_true"
+                        )
+                        invalid_payload = (
+                            fleet.canonical_json(invalid_manifest) + b"\n"
+                        )
+                        expected_error = "invalid publish manifest identity: mini"
+                    else:
+                        position = next(
+                            candidate
+                            for candidate in ("top_level", "nested", "list")
+                            if invalid_kind.endswith(f"_{candidate}")
+                        )
+                        constant_text = invalid_kind[: -(len(position) + 1)]
+                        invalid_payload = manifest_with_json_constant(
+                            valid_payload,
+                            constant_text.encode("ascii"),
+                            position,
+                        )
+                        expected_error = "publish manifest is not canonical JSON"
+                    rsync_calls = 0
+
+                    def mutate_before_final_sentinel(command, **kwargs):
+                        nonlocal rsync_calls
+                        if command[0] == "ssh":
+                            return subprocess.CompletedProcess(command, 0)
+                        rsync_calls += 1
+                        result = emulate_allowlisted_rsync(
+                            command,
+                            kwargs,
+                            remote_shard,
+                        )
+                        if rsync_calls == 3:
+                            manifest_path.write_bytes(invalid_payload)
+                        return result
+
+                    hub = {
+                        "remotes": [
+                            {
+                                "host_id": "mini",
+                                "ssh_host": "mini.test",
+                                "remote_spool_root": "/remote/spool",
+                            }
+                        ]
+                    }
+                    with mock.patch.object(
+                        fleet.subprocess,
+                        "run",
+                        side_effect=mutate_before_final_sentinel,
+                    ):
+                        result = fleet.pull_hub_remotes(hub, spool_root)
+
+                    remote_result = result["remotes"]["mini"]
+                    self.assertEqual(rsync_calls, 4)
+                    self.assertEqual(
+                        remote_result["status"],
+                        "blocked_integrity_failure",
+                    )
+                    self.assertEqual(remote_result["error"], expected_error)
+                    self.assertFalse((spool_root / "hosts" / "mini").exists())
+                    self.assertFalse(
+                        any((spool_root / ".incoming").rglob("*"))
+                    )
 
     def test_remote_pull_rejects_canonical_final_manifest_sentinel_mismatch(self):
         with safe_temporary_directory() as tmp:
