@@ -12,6 +12,93 @@ from datetime import datetime
 import hashlib
 import platform
 import os
+import errno
+import stat
+
+
+_MACOS_COMPATIBILITY_SYMLINKS = {
+    Path("/etc"): Path("/private/etc"),
+    Path("/tmp"): Path("/private/tmp"),
+    Path("/var"): Path("/private/var"),
+}
+
+
+def _reject_symlink_components(path):
+    expanded = Path(path).expanduser()
+    absolute = Path(os.path.abspath(os.fspath(expanded)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            expected = _MACOS_COMPATIBILITY_SYMLINKS.get(current)
+            if expected is None or current.resolve(strict=True) != expected:
+                raise ValueError(f"refusing symlink path component: {current}")
+    return expanded
+
+
+def _open_regular_jsonl(path):
+    path = _reject_symlink_components(path)
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    for alias, target in _MACOS_COMPATIBILITY_SYMLINKS.items():
+        try:
+            absolute = target / absolute.relative_to(alias)
+            break
+        except ValueError:
+            continue
+    directory_fd = os.open(
+        absolute.anchor,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        for part in absolute.parts[1:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        descriptor = os.open(
+            absolute.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise ValueError(f"refusing symlinked JSONL file: {path}") from error
+        raise
+    finally:
+        os.close(directory_fd)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ValueError(f"JSONL input must be a regular file: {path}")
+    return os.fdopen(descriptor, "r", encoding="utf-8")
+
+
+def _discover_session_files(project_dir):
+    project_dir = _reject_symlink_components(project_dir)
+    if not project_dir.exists():
+        return []
+    if not project_dir.is_dir():
+        raise ValueError(f"input root must be a directory: {project_dir}")
+    search_root = project_dir / "projects" if (project_dir / "projects").exists() else project_dir
+    files = []
+    for current, directory_names, file_names in os.walk(search_root, followlinks=False):
+        directory_names.sort()
+        file_names.sort()
+        current_path = Path(current)
+        directory_names[:] = [
+            name for name in directory_names if not (current_path / name).is_symlink()
+        ]
+        for name in file_names:
+            candidate = current_path / name
+            if candidate.is_symlink() and candidate.suffix == ".jsonl":
+                raise ValueError(f"refusing symlink in input root: {candidate}")
+            if candidate.suffix == ".jsonl" and not candidate.name.startswith("agent-"):
+                files.append(candidate)
+    return files
 
 def find_claude_installations():
     """Find all Claude Code installation directories"""
@@ -63,122 +150,180 @@ def find_claude_installations():
 
     return list(set(locations))  # Remove duplicates
 
-def extract_claude_project_conversations(project_dir):
-    """Extract conversations from a Claude project directory with full context"""
+CLAUDE_IGNORED_RECORD_TYPES = {
+    "atis-latch",
+    "attachment",
+    "custom-title",
+    "file-history-snapshot",
+    "last-prompt",
+    "mode",
+    "pr-link",
+    "progress",
+    "queue-operation",
+    "result",
+    "started",
+    "summary",
+    "system",
+}
+
+
+def find_all_claude_sessions(project_dir):
+    return _discover_session_files(project_dir)
+
+
+def extract_claude_session(jsonl_file, *, installation=None, quality_out=None):
+    messages = []
+    auxiliary_events = []
+    session_id = jsonl_file.stem
+    project_path = None
+    project_name = jsonl_file.parent.name if jsonl_file.parent.name != "projects" else None
+    discovered_lines = 0
+    parsed_lines = 0
+    failed_lines = 0
+    recognized_lines = 0
+    with _open_regular_jsonl(jsonl_file) as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            discovered_lines += 1
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                failed_lines += 1
+                continue
+            if not isinstance(obj, dict):
+                failed_lines += 1
+                continue
+            parsed_lines += 1
+            msg_type = obj.get("type")
+            if msg_type == "user":
+                message = obj.get("message", {})
+                if not isinstance(message, dict):
+                    failed_lines += 1
+                    continue
+                recognized_lines += 1
+                content = message.get("content", "")
+                if not isinstance(content, (str, list)):
+                    failed_lines += 1
+                    recognized_lines -= 1
+                    continue
+                if content:
+                    record = {
+                        "role": "user",
+                        "content": content,
+                        "timestamp": obj.get("timestamp"),
+                    }
+                    if "toolUse" in obj:
+                        record["tool_use"] = obj["toolUse"]
+                    messages.append(record)
+                project_path = obj.get("cwd", project_path)
+            elif msg_type == "assistant":
+                message = obj.get("message", {})
+                if not isinstance(message, dict):
+                    failed_lines += 1
+                    continue
+                recognized_lines += 1
+                content = message.get("content", [])
+                text_parts = []
+                tool_uses = []
+                if isinstance(content, list):
+                    invalid_content = False
+                    for item in content:
+                        if not isinstance(item, dict):
+                            invalid_content = True
+                            break
+                        if item.get("type") == "text" and isinstance(item.get("text"), str):
+                            text_parts.append(item.get("text", ""))
+                        elif isinstance(item, dict) and item.get("type") == "tool_use":
+                            tool_uses.append(item)
+                        else:
+                            tool_uses.append(item)
+                    if invalid_content:
+                        failed_lines += 1
+                        recognized_lines -= 1
+                        continue
+                elif isinstance(content, str):
+                    text_parts.append(content)
+                else:
+                    failed_lines += 1
+                    recognized_lines -= 1
+                    continue
+                full_text = "\n".join(text_parts)
+                if full_text or tool_uses:
+                    record = {
+                        "role": "assistant",
+                        "content": full_text,
+                        "model": message.get("model"),
+                        "timestamp": obj.get("timestamp"),
+                    }
+                    if tool_uses:
+                        record["tool_uses"] = tool_uses
+                    messages.append(record)
+            elif msg_type == "tool_result":
+                recognized_lines += 1
+                tool_result = obj.get("toolResult", {})
+                if tool_result and messages:
+                    messages[-1].setdefault("tool_results", []).append(tool_result)
+            elif msg_type in CLAUDE_IGNORED_RECORD_TYPES:
+                recognized_lines += 1
+                auxiliary_events.append(obj)
+            else:
+                failed_lines += 1
+
+    quality = {
+        "status": (
+            "partial"
+            if failed_lines or (discovered_lines and not recognized_lines)
+            else "complete"
+        ),
+        "discovered_lines": discovered_lines,
+        "parsed_lines": parsed_lines,
+        "failed_lines": failed_lines,
+        "discovered_files": 1,
+        "recognized_lines": recognized_lines,
+    }
+    if quality_out is not None:
+        quality_out.clear()
+        quality_out.update(quality)
+    if not messages and not auxiliary_events:
+        return None
+    conversation = {
+        "messages": messages,
+        "source": "claude-code",
+        "session_id": session_id,
+        "project_path": project_path,
+        "project_name": project_name,
+        "source_file": str(jsonl_file),
+    }
+    if auxiliary_events:
+        conversation["events"] = auxiliary_events
+    if installation is not None:
+        conversation["installation"] = str(installation)
+    return conversation
+
+
+def extract_claude_project_conversations(project_dir, *, quality_out=None):
     conversations = []
-
-    # Find all JSONL session files
-    jsonl_files = []
-    if (project_dir / 'projects').exists():
-        # New structure: projects/project-name/session.jsonl
-        for proj in (project_dir / 'projects').iterdir():
-            if proj.is_dir():
-                jsonl_files.extend(list(proj.glob('*.jsonl')))
-    else:
-        # Old structure: direct JSONL files
-        jsonl_files = list(project_dir.glob('*.jsonl'))
-
-    # Filter out agent files
-    jsonl_files = [f for f in jsonl_files if not f.name.startswith('agent-')]
-
-    for jsonl_file in jsonl_files:
-        try:
-            messages = []
-            session_id = jsonl_file.stem
-            project_path = None
-            project_name = jsonl_file.parent.name if jsonl_file.parent.name != 'projects' else None
-
-            with open(jsonl_file, 'r') as f:
-                for line in f:
-                    if not line.strip():
-                        continue
-
-                    try:
-                        obj = json.loads(line)
-                        msg_type = obj.get('type')
-
-                        if msg_type == 'user':
-                            message = obj.get('message', {})
-                            content = message.get('content', '')
-
-                            if content:
-                                msg = {
-                                    'role': 'user',
-                                    'content': content,
-                                    'timestamp': obj.get('timestamp')
-                                }
-
-                                # Extract tool use (code context, diffs, etc.)
-                                if 'toolUse' in obj:
-                                    msg['tool_use'] = obj['toolUse']
-
-                                messages.append(msg)
-
-                            # Extract working directory
-                            if 'cwd' in obj:
-                                project_path = obj['cwd']
-
-                        elif msg_type == 'assistant':
-                            message = obj.get('message', {})
-                            content = message.get('content', [])
-
-                            # Extract text from content array
-                            text_parts = []
-                            code_blocks = []
-                            tool_uses = []
-
-                            if isinstance(content, list):
-                                for item in content:
-                                    if isinstance(item, dict):
-                                        if item.get('type') == 'text':
-                                            text_parts.append(item.get('text', ''))
-                                        elif item.get('type') == 'tool_use':
-                                            # Code execution, file edits, etc.
-                                            tool_uses.append(item)
-                            elif isinstance(content, str):
-                                text_parts.append(content)
-
-                            full_text = '\n'.join(text_parts)
-                            if full_text or tool_uses:
-                                msg = {
-                                    'role': 'assistant',
-                                    'content': full_text,
-                                    'model': message.get('model'),
-                                    'timestamp': obj.get('timestamp')
-                                }
-
-                                if tool_uses:
-                                    msg['tool_uses'] = tool_uses
-
-                                messages.append(msg)
-
-                        elif msg_type == 'tool_result':
-                            # Capture tool results (diffs, file reads, etc.)
-                            tool_result = obj.get('toolResult', {})
-                            if tool_result and messages:
-                                # Add to last assistant message
-                                if 'tool_results' not in messages[-1]:
-                                    messages[-1]['tool_results'] = []
-                                messages[-1]['tool_results'].append(tool_result)
-
-                    except json.JSONDecodeError:
-                        continue
-
-            if messages:
-                conversations.append({
-                    'messages': messages,
-                    'source': 'claude-code',
-                    'session_id': session_id,
-                    'project_path': project_path,
-                    'project_name': project_name,
-                    'source_file': str(jsonl_file),
-                    'installation': str(project_dir)
-                })
-
-        except Exception as e:
-            print(f"Error processing {jsonl_file}: {e}")
-            continue
-
+    qualities = []
+    for jsonl_file in find_all_claude_sessions(project_dir):
+        quality = {}
+        conversation = extract_claude_session(
+            jsonl_file, installation=project_dir, quality_out=quality
+        )
+        qualities.append(quality)
+        if conversation:
+            conversations.append(conversation)
+    aggregate = {
+        "status": "partial" if any(q["status"] == "partial" for q in qualities) else "complete",
+        "discovered_lines": sum(q["discovered_lines"] for q in qualities),
+        "parsed_lines": sum(q["parsed_lines"] for q in qualities),
+        "failed_lines": sum(q["failed_lines"] for q in qualities),
+        "discovered_files": len(qualities),
+        "recognized_lines": sum(q["recognized_lines"] for q in qualities),
+    }
+    if quality_out is not None:
+        quality_out.clear()
+        quality_out.update(aggregate)
     return conversations
 
 def main():

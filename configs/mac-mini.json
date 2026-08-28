@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "host_id": "mac-mini",
+  "spool_root": "/Users/calrotundo/.local/share/ai-chat-archive/spool",
+  "drive_root": null,
+  "inventory_harnesses": ["claude", "codex", "openclaw", "hermes"],
+  "sources": {
+    "claude_roots": ["/Users/calrotundo/.claude"],
+    "codex_roots": ["/Users/calrotundo/.codex"],
+    "openclaw_roots": ["/Users/calrotundo/.openclaw/agents/cal/sessions"],
+    "hermes_instances": [
+      {
+        "home": "/Users/calrotundo/.hermes",
+        "binary": "/Users/calrotundo/.local/bin/hermes"
+      },
+      {
+        "home": "/Users/calrotundo/.hermes/profiles/cal",
+        "binary": "/Users/calrotundo/.local/bin/hermes"
+      }
+    ]
+  }
+}

@@ -1,0 +1,1917 @@
+#!/usr/bin/env python3
+"""Content-addressed, host-namespaced chat archive collector."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import plistlib
+import re
+import shutil
+import subprocess
+import stat
+import sys
+import tempfile
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+from extract_claude_code import extract_claude_session, find_all_claude_sessions
+from extract_codex import extract_codex_session, find_all_codex_sessions
+from extract_hermes import extract_hermes_export, iter_hermes_export
+from extract_openclaw import extract_openclaw_session, find_all_openclaw_sessions
+
+
+HOST_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62})\Z")
+APPROVED_SOURCE_KEYS = {
+    "claude_roots",
+    "codex_roots",
+    "openclaw_roots",
+    "hermes_exports",
+    "hermes_instances",
+}
+PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    re.IGNORECASE | re.DOTALL,
+)
+SENSITIVE_NAME_PATTERN = (
+    r"(?:[A-Za-z0-9_.-]*"
+    r"(?:api[_-]?key|credential(?:s)?|password|passwd|"
+    r"secret(?:[_-]?(?:key|access[_-]?key))?|"
+    r"(?:access|auth|refresh)[_-]?token|token))"
+)
+SENSITIVE_ASSIGNMENT_MARKER_RE = re.compile(
+    rf"(?i)(?<![A-Za-z0-9_.-])[\"']?{SENSITIVE_NAME_PATTERN}[\"']?\s*[:=]"
+)
+QUOTED_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    rf"(?i)([\"']?{SENSITIVE_NAME_PATTERN}[\"']?\s*[:=]\s*)"
+    r"([\"'])(?!\[REDACTED\])([^\r\n]*?)\2"
+)
+UNQUOTED_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    rf"(?i)([\"']?{SENSITIVE_NAME_PATTERN}[\"']?\s*[:=]\s*)"
+    r"(?![\"']?\[REDACTED\][\"']?)([^\s,;}}\]]+)"
+)
+PROVIDER_TOKEN_RE = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_-]{20,}|gh[opusr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b"
+)
+JWT_RE = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
+)
+AUTH_HEADER_RE = re.compile(
+    r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*[^\r\n]+"
+)
+COOKIE_HEADER_RE = re.compile(r"(?i)\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+")
+GENERIC_BEARER_RE = re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9+/=_-]{8,}")
+RESIDUAL_ASSIGNMENT_RE = re.compile(
+    rf"(?i)[\"']?{SENSITIVE_NAME_PATTERN}[\"']?\s*[:=]\s*"
+    r"(?P<value>\[REDACTED\]|[\"'][^\r\n]*?[\"']|[^\s,;}}\]]+)"
+)
+SENSITIVE_KEY_PARTS = {
+    "apikey",
+    "accesstoken",
+    "authtoken",
+    "authorization",
+    "clientsecret",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "passwd",
+    "privatekey",
+    "proxyauthorization",
+    "refreshtoken",
+    "secret",
+    "secretaccesskey",
+    "secretkey",
+    "setcookie",
+    "token",
+}
+OBJECT_NAME_RE = re.compile(r"[0-9a-f]{64}\.json\Z")
+APPROVED_HARNESSES = {"claude", "codex", "openclaw", "hermes"}
+HARNESS_SOURCES = {
+    "claude": {"claude-code"},
+    "codex": {"codex"},
+    "openclaw": {"openclaw"},
+    "hermes": {"hermes"},
+}
+EXTRACTOR_FILES = (
+    "fleet_chat_archive.py",
+    "extract_claude_code.py",
+    "extract_codex.py",
+    "extract_openclaw.py",
+    "extract_hermes.py",
+)
+
+
+def canonical_json(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def extractor_sha256() -> str:
+    digest = hashlib.sha256()
+    root = Path(__file__).resolve().parent
+    for name in EXTRACTOR_FILES:
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update((root / name).read_bytes())
+    return digest.hexdigest()
+
+
+def lexical_absolute(path: Path) -> Path:
+    absolute = Path(os.path.abspath(os.path.expanduser(str(path))))
+    # macOS exposes these fixed system aliases as root-owned symlinks. Normalize
+    # only the aliases themselves; user-controlled components remain untrusted.
+    system_aliases = {
+        Path("/var"): Path("/private/var"),
+        Path("/tmp"): Path("/private/tmp"),
+        Path("/etc"): Path("/private/etc"),
+    }
+    for alias, target in system_aliases.items():
+        try:
+            return target / absolute.relative_to(alias)
+        except ValueError:
+            continue
+    return absolute
+
+
+def assert_no_symlink_components(path: Path, *, include_leaf: bool = True) -> Path:
+    """Reject symlinks in every existing component without resolving through them."""
+    absolute = lexical_absolute(path)
+    parts = absolute.parts
+    current = Path(parts[0])
+    for part in parts[1:-1]:
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
+        if current.is_symlink():
+            raise ValueError(f"refusing symlink path component: {current}")
+        if not current.is_dir():
+            raise ValueError(f"path component is not a directory: {current}")
+    if include_leaf and (absolute.exists() or absolute.is_symlink()):
+        if absolute.is_symlink():
+            raise ValueError(f"refusing symlink path component: {absolute}")
+    return absolute
+
+
+def open_directory_fd(path: Path, *, create: bool = False) -> tuple[Path, int]:
+    absolute = lexical_absolute(path)
+    descriptor = os.open(
+        absolute.anchor,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        for part in absolute.parts[1:]:
+            if create:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+            next_descriptor = os.open(
+                part,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return absolute, descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def open_regular_fd(path: Path) -> int:
+    absolute = lexical_absolute(path)
+    _, parent_fd = open_directory_fd(absolute.parent)
+    try:
+        descriptor = os.open(
+            absolute.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+    finally:
+        os.close(parent_fd)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ValueError(f"archive input must be a regular file: {absolute}")
+    return descriptor
+
+
+def read_json_nofollow(path: Path):
+    descriptor = open_regular_fd(path)
+    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def read_bytes_nofollow(path: Path) -> bytes:
+    descriptor = open_regular_fd(path)
+    with os.fdopen(descriptor, "rb") as handle:
+        return handle.read()
+
+
+def secure_mkdir(path: Path) -> None:
+    try:
+        _, descriptor = open_directory_fd(path, create=True)
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise ValueError(f"refusing unsafe directory: {lexical_absolute(path)}") from error
+        raise
+    try:
+        os.fchmod(descriptor, 0o700)
+    finally:
+        os.close(descriptor)
+
+
+def normalized_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+def is_sensitive_key(value: object) -> bool:
+    key = normalized_key(value)
+    return key in SENSITIVE_KEY_PARTS or any(
+        key.endswith(part) for part in SENSITIVE_KEY_PARTS
+    )
+
+
+def has_residual_assignment(value: str) -> bool:
+    return value != "[REDACTED]" and bool(SENSITIVE_ASSIGNMENT_MARKER_RE.search(value))
+
+
+def redact_text(value: str) -> tuple[str, int]:
+    redactions = 0
+    value, count = PRIVATE_KEY_RE.subn("[REDACTED]", value)
+    redactions += count
+    # Assignment values can be multiline YAML blocks, shell $'...' strings, or
+    # escaped serialized JSON. Redact the containing string as one unit rather
+    # than risk preserving a suffix the parser cannot safely delimit.
+    if SENSITIVE_ASSIGNMENT_MARKER_RE.search(value):
+        return "[REDACTED]", redactions + 1
+    value, count = QUOTED_CREDENTIAL_ASSIGNMENT_RE.subn(
+        r"\1\2[REDACTED]\2", value
+    )
+    redactions += count
+    value, count = UNQUOTED_CREDENTIAL_ASSIGNMENT_RE.subn(
+        r"\1[REDACTED]", value
+    )
+    redactions += count
+    for pattern in (
+        AUTH_HEADER_RE,
+        COOKIE_HEADER_RE,
+        GENERIC_BEARER_RE,
+        PROVIDER_TOKEN_RE,
+        JWT_RE,
+    ):
+        value, count = pattern.subn("[REDACTED]", value)
+        redactions += count
+    return value, redactions
+
+
+def redact_value(value):
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        result = []
+        redactions = 0
+        for item in value:
+            cleaned, count = redact_value(item)
+            result.append(cleaned)
+            redactions += count
+        return result, redactions
+    if isinstance(value, dict):
+        result = {}
+        redactions = 0
+        for key, item in value.items():
+            archived_key = key
+            if isinstance(key, str):
+                cleaned_key, key_count = redact_text(key)
+                if key_count:
+                    archived_key = f"[REDACTED_KEY_{len(result)}]"
+                    redactions += key_count
+            if is_sensitive_key(key) and item not in (None, "", "[REDACTED]"):
+                cleaned, count = "[REDACTED]", 1
+            else:
+                cleaned, count = redact_value(item)
+            result[archived_key] = cleaned
+            redactions += count
+        return result, redactions
+    return value, 0
+
+
+def residual_secret_paths(value: object, path: str = "$") -> list[str]:
+    """Return body-free locations of recognized secrets left after redaction."""
+    findings: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_has_secret = isinstance(key, str) and (
+                bool(PROVIDER_TOKEN_RE.search(key))
+                or bool(JWT_RE.search(key))
+                or bool(PRIVATE_KEY_RE.search(key))
+                or has_residual_assignment(key)
+            )
+            child_path = f"{path}.<sensitive-key>" if key_has_secret else f"{path}.{key}"
+            if key_has_secret:
+                findings.append(child_path)
+            if is_sensitive_key(key) and item not in (None, "", "[REDACTED]"):
+                findings.append(child_path)
+            findings.extend(residual_secret_paths(item, child_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            findings.extend(residual_secret_paths(item, f"{path}[{index}]"))
+    elif isinstance(value, str):
+        if (
+            PRIVATE_KEY_RE.search(value)
+            or PROVIDER_TOKEN_RE.search(value)
+            or JWT_RE.search(value)
+            or AUTH_HEADER_RE.search(value)
+            or COOKIE_HEADER_RE.search(value)
+            or has_residual_assignment(value)
+        ):
+            findings.append(path)
+    return findings
+
+
+def atomic_write_json(path: Path, value: object) -> None:
+    atomic_write_bytes(path, canonical_json(value) + b"\n")
+
+
+def atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path = lexical_absolute(path)
+    secure_mkdir(path.parent)
+    _, directory_fd = open_directory_fd(path.parent)
+    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    descriptor = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.fchmod(descriptor, 0o600)
+        os.close(descriptor)
+        descriptor = -1
+        os.rename(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
+
+
+def archive_conversations(
+    archive_root: Path,
+    host_id: str,
+    harness: str,
+    conversations,
+    *,
+    collection_complete: bool = True,
+) -> dict:
+    harness_root = archive_root / "hosts" / host_id / harness
+    objects_root = harness_root / "objects"
+    secure_mkdir(archive_root / "hosts")
+    secure_mkdir(archive_root / "hosts" / host_id)
+    secure_mkdir(harness_root)
+    secure_mkdir(objects_root)
+
+    new_objects = 0
+    conversation_count = 0
+    redaction_count = 0
+    index_path = harness_root / "index.json"
+    prior_rows: list[dict] = []
+    if index_path.exists():
+        assert_no_symlink_components(index_path)
+        prior_index = read_json_nofollow(index_path)
+        prior_rows = list(prior_index.get("conversations", []))
+    index_by_digest = {
+        row["object_sha256"]: row
+        for row in prior_rows
+        if isinstance(row, dict) and OBJECT_NAME_RE.fullmatch(f"{row.get('object_sha256', '')}.json")
+    }
+    for conversation in conversations:
+        conversation_count += 1
+        conversation, conversation_redactions = redact_value(conversation)
+        redaction_count += conversation_redactions
+        if conversation_redactions:
+            conversation["archive_redaction_count"] = conversation_redactions
+        residuals = residual_secret_paths(conversation)
+        if residuals:
+            raise ValueError(
+                "recognized credential remained after redaction at "
+                + ", ".join(residuals[:5])
+            )
+        payload = canonical_json(conversation)
+        digest = hashlib.sha256(payload).hexdigest()
+        object_path = objects_root / f"{digest}.json"
+        if not object_path.exists():
+            atomic_write_json(object_path, conversation)
+            new_objects += 1
+        index_by_digest[digest] = {
+            "object_sha256": digest,
+            "session_id": conversation.get("session_id"),
+            "source": conversation.get("source"),
+        }
+
+    index_rows = list(index_by_digest.values())
+    index_rows.sort(key=lambda row: (str(row["session_id"]), row["object_sha256"]))
+    atomic_write_json(
+        harness_root / "index.json",
+        {
+            "schema_version": 1,
+            "host_id": host_id,
+            "harness": harness,
+            "conversations": index_rows,
+        },
+    )
+    return {
+        "status": (
+            "partial"
+            if not collection_complete
+            else "collected" if conversation_count else "no_conversations"
+        ),
+        "conversations": conversation_count,
+        "new_objects": new_objects,
+        "redactions": redaction_count,
+        "index_conversations": len(index_rows),
+        "publishable": collection_complete,
+    }
+
+
+def source_fingerprint(path: Path, *, include_content_hash: bool = False) -> dict:
+    descriptor = open_regular_fd(path)
+    try:
+        metadata = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    fingerprint = {
+        "size": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+        "inode": metadata.st_ino,
+    }
+    if include_content_hash:
+        fingerprint["sha256"] = file_sha256(path)
+    return fingerprint
+
+
+def load_incremental_state(archive_root: Path, host_id: str, harness: str) -> tuple[Path, dict]:
+    state_path = archive_root / "state" / host_id / f"{harness}.json"
+    current_extractor = extractor_sha256()
+    if not state_path.is_file():
+        return state_path, {}
+    assert_no_symlink_components(state_path)
+    state = read_json_nofollow(state_path)
+    if state.get("extractor_sha256") != current_extractor:
+        return state_path, {}
+    sources = state.get("sources", {})
+    return state_path, sources if isinstance(sources, dict) else {}
+
+
+def save_incremental_state(state_path: Path, sources: dict) -> None:
+    atomic_write_json(
+        state_path,
+        {
+            "schema_version": 1,
+            "extractor_sha256": extractor_sha256(),
+            "sources": sources,
+        },
+    )
+
+
+def collect_sources(
+    archive_root: Path,
+    host_id: str,
+    *,
+    claude_roots=(),
+    codex_roots=(),
+    openclaw_roots=(),
+    hermes_exports=(),
+) -> dict:
+    archive_root = validate_output_root(archive_root)
+    secure_mkdir(archive_root)
+    harnesses = {}
+
+    def aggregate_quality(items: list[dict], *, source_missing: bool = False) -> dict:
+        keys = ("discovered_lines", "parsed_lines", "failed_lines", "recognized_lines")
+        quality = {key: sum(int(item.get(key, 0)) for item in items) for key in keys}
+        quality["discovered_files"] = sum(
+            int(item.get("discovered_files", 1)) for item in items
+        )
+        quality["status"] = (
+            "source_missing"
+            if source_missing
+            else "partial"
+            if any(item.get("status") == "partial" for item in items)
+            else "complete"
+        )
+        return quality
+
+    def finish_harness(
+        harness: str,
+        conversations,
+        qualities: list[dict],
+        *,
+        source_missing=False,
+        file_counts: dict | None = None,
+        state_commit: tuple[Path, dict] | None = None,
+    ) -> None:
+        work_parent = archive_root / ".work"
+        secure_mkdir(work_parent)
+        with tempfile.TemporaryDirectory(
+            dir=work_parent, prefix=f"{host_id}-{harness}-"
+        ) as staged_directory:
+            staged_root = Path(staged_directory)
+            result = archive_conversations(
+                staged_root,
+                host_id,
+                harness,
+                conversations,
+                collection_complete=True,
+            )
+            missing = source_missing() if callable(source_missing) else source_missing
+            quality = aggregate_quality(qualities, source_missing=missing)
+            if file_counts is not None:
+                quality["discovered_files"] = file_counts["discovered"]
+                quality["processed_files"] = file_counts["processed"]
+                quality["skipped_unchanged_files"] = file_counts["skipped"]
+            complete = quality["status"] == "complete"
+            result["publishable"] = complete
+            if not complete:
+                result["status"] = "partial"
+                result["staged_objects_discarded"] = result["new_objects"]
+                result["new_objects"] = 0
+            if quality["status"] == "source_missing":
+                result["status"] = "source_missing"
+            result["quality"] = quality
+
+            if complete:
+                staged_objects = staged_root / "hosts" / host_id / harness / "objects"
+                live_objects = archive_root / "hosts" / host_id / harness / "objects"
+                result["new_objects"] = sum(
+                    1
+                    for path in staged_objects.iterdir()
+                    if not (live_objects / path.name).is_file()
+                )
+                merge_host_shard(
+                    staged_root / "hosts" / host_id,
+                    archive_root,
+                    host_id,
+                    require_healthy_receipt=False,
+                )
+                live_index = read_json_nofollow(
+                    archive_root / "hosts" / host_id / harness / "index.json"
+                )
+                result["index_conversations"] = len(live_index["conversations"])
+                if state_commit is not None:
+                    save_incremental_state(*state_commit)
+            harnesses[harness] = result
+
+    if claude_roots:
+        qualities = []
+        source_missing = False
+        file_counts = {"discovered": 0, "processed": 0, "skipped": 0}
+        state_path, prior_state = load_incremental_state(
+            archive_root, host_id, "claude"
+        )
+        next_state = dict(prior_state)
+        def claude_conversations():
+            nonlocal source_missing
+            for root in claude_roots:
+                if not root.is_dir():
+                    source_missing = True
+                    continue
+                for session_file in find_all_claude_sessions(root):
+                    file_counts["discovered"] += 1
+                    state_key = str(lexical_absolute(session_file))
+                    fingerprint = source_fingerprint(session_file)
+                    if prior_state.get(state_key) == fingerprint:
+                        file_counts["skipped"] += 1
+                        continue
+                    file_counts["processed"] += 1
+                    quality = {}
+                    conversation = extract_claude_session(
+                        session_file, installation=root, quality_out=quality
+                    )
+                    qualities.append(quality)
+                    if conversation:
+                        yield conversation
+                    if quality.get("status") == "complete":
+                        next_state[state_key] = fingerprint
+        finish_harness(
+            "claude",
+            claude_conversations(),
+            qualities,
+            source_missing=lambda: source_missing,
+            file_counts=file_counts,
+            state_commit=(state_path, next_state),
+        )
+
+    if codex_roots:
+        qualities = []
+        source_missing = False
+        file_counts = {"discovered": 0, "processed": 0, "skipped": 0}
+        state_path, prior_state = load_incremental_state(
+            archive_root, host_id, "codex"
+        )
+        next_state = dict(prior_state)
+        def codex_conversations():
+            nonlocal source_missing
+            for codex_root in codex_roots:
+                if not codex_root.is_dir():
+                    source_missing = True
+                    continue
+                for session_file in find_all_codex_sessions(codex_root):
+                    file_counts["discovered"] += 1
+                    state_key = str(lexical_absolute(session_file))
+                    fingerprint = source_fingerprint(session_file)
+                    if prior_state.get(state_key) == fingerprint:
+                        file_counts["skipped"] += 1
+                        continue
+                    file_counts["processed"] += 1
+                    quality = {}
+                    conversation = extract_codex_session(
+                        session_file, quality_out=quality
+                    )
+                    qualities.append(quality)
+                    if conversation:
+                        conversation["installation"] = str(codex_root)
+                        yield conversation
+                    if quality.get("status") == "complete":
+                        next_state[state_key] = fingerprint
+        finish_harness(
+            "codex",
+            codex_conversations(),
+            qualities,
+            source_missing=lambda: source_missing,
+            file_counts=file_counts,
+            state_commit=(state_path, next_state),
+        )
+
+    if openclaw_roots:
+        qualities = []
+        source_missing = False
+        file_counts = {"discovered": 0, "processed": 0, "skipped": 0}
+        state_path, prior_state = load_incremental_state(
+            archive_root, host_id, "openclaw"
+        )
+        next_state = dict(prior_state)
+        def openclaw_conversations():
+            nonlocal source_missing
+            for openclaw_root in openclaw_roots:
+                if not openclaw_root.is_dir():
+                    source_missing = True
+                    continue
+                for session_file in find_all_openclaw_sessions(openclaw_root):
+                    file_counts["discovered"] += 1
+                    state_key = str(lexical_absolute(session_file))
+                    fingerprint = source_fingerprint(session_file)
+                    if prior_state.get(state_key) == fingerprint:
+                        file_counts["skipped"] += 1
+                        continue
+                    file_counts["processed"] += 1
+                    quality = {}
+                    conversation = extract_openclaw_session(
+                        session_file, quality_out=quality
+                    )
+                    qualities.append(quality)
+                    if conversation:
+                        conversation["installation"] = str(openclaw_root)
+                        yield conversation
+                    if quality.get("status") == "complete":
+                        next_state[state_key] = fingerprint
+        finish_harness(
+            "openclaw",
+            openclaw_conversations(),
+            qualities,
+            source_missing=lambda: source_missing,
+            file_counts=file_counts,
+            state_commit=(state_path, next_state),
+        )
+
+    if hermes_exports:
+        qualities = []
+        source_missing = False
+        file_counts = {"discovered": 0, "processed": 0, "skipped": 0}
+        state_path, prior_state = load_incremental_state(
+            archive_root, host_id, "hermes"
+        )
+        next_state = dict(prior_state)
+        def hermes_conversations():
+            nonlocal source_missing
+            for export_file in hermes_exports:
+                if not export_file.is_file():
+                    source_missing = True
+                    continue
+                file_counts["discovered"] += 1
+                state_key = f"hermes-export:{export_file.name}"
+                fingerprint = source_fingerprint(export_file, include_content_hash=True)
+                fingerprint.pop("mtime_ns", None)
+                fingerprint.pop("ctime_ns", None)
+                fingerprint.pop("inode", None)
+                if prior_state.get(state_key) == fingerprint:
+                    file_counts["skipped"] += 1
+                    continue
+                file_counts["processed"] += 1
+                quality = {}
+                yield from iter_hermes_export(export_file, quality_out=quality)
+                qualities.append(quality)
+                if quality.get("status") == "complete":
+                    next_state[state_key] = fingerprint
+        finish_harness(
+            "hermes",
+            hermes_conversations(),
+            qualities,
+            source_missing=lambda: source_missing,
+            file_counts=file_counts,
+            state_commit=(state_path, next_state),
+        )
+
+    return harnesses
+
+
+def path_list(values) -> list[Path]:
+    return [assert_no_symlink_components(Path(value)) for value in values if value]
+
+
+def validate_host_id(value: str) -> str:
+    if not HOST_ID_RE.fullmatch(value):
+        raise ValueError("host_id must contain only lowercase letters, digits, and hyphens")
+    return value
+
+
+def validate_output_root(path: Path) -> Path:
+    resolved = assert_no_symlink_components(path)
+    for candidate in (resolved, *resolved.parents):
+        git_marker = candidate / ".git"
+        if git_marker.exists() or git_marker.is_symlink():
+            raise ValueError(f"fleet output cannot be inside a Git checkout: {resolved}")
+    return resolved
+
+
+def export_hermes_instances(instances: list[dict], work_root: Path) -> list[Path]:
+    exports = []
+    for index, instance in enumerate(instances):
+        hermes_home = assert_no_symlink_components(Path(instance["home"]))
+        binary = assert_no_symlink_components(
+            Path(instance.get("binary", "~/.local/bin/hermes"))
+        )
+        output = work_root / f"hermes-{index}.jsonl"
+        environment = os.environ.copy()
+        environment["HERMES_HOME"] = str(hermes_home)
+        subprocess.run(
+            [
+                str(binary),
+                "sessions",
+                "export",
+                str(output),
+                "--format",
+                "jsonl",
+                "--redact",
+                "--yes",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=int(instance.get("timeout_seconds", 600)),
+            env=environment,
+        )
+        exports.append(output)
+    return exports
+
+
+def is_google_drive_path(path: Path) -> bool:
+    candidate = assert_no_symlink_components(path)
+    cloud_root = lexical_absolute(Path.home() / "Library" / "CloudStorage")
+    try:
+        relative = candidate.relative_to(cloud_root)
+    except ValueError:
+        return False
+    if not relative.parts or not relative.parts[0].startswith("GoogleDrive-"):
+        return False
+    provider_root = cloud_root / relative.parts[0]
+    fileproviderctl = shutil.which("fileproviderctl")
+    if not fileproviderctl or not provider_root.is_dir():
+        return False
+    try:
+        completed = subprocess.run(
+            [fileproviderctl, "evaluate", str(provider_root)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    output = (completed.stdout + completed.stderr).lower()
+    return completed.returncode == 0 and "no item for url" not in output
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    descriptor = open_regular_fd(path)
+    with os.fdopen(descriptor, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_object_file(path: Path) -> dict:
+    assert_no_symlink_components(path)
+    if not OBJECT_NAME_RE.fullmatch(path.name):
+        raise ValueError(f"invalid archive object filename: {path.name}")
+    value = read_json_nofollow(path)
+    expected = path.stem
+    actual = hashlib.sha256(canonical_json(value)).hexdigest()
+    if actual != expected:
+        raise ValueError(f"archive object hash mismatch: {path.name}")
+    if not isinstance(value, dict):
+        raise ValueError(f"archive object must be a JSON object: {path.name}")
+    residuals = residual_secret_paths(value)
+    if residuals:
+        raise ValueError(
+            "recognized credential in archive object at " + ", ".join(residuals[:5])
+        )
+    return value
+
+
+def validate_index_file(
+    index_path: Path,
+    source_root: Path,
+    host_id: str,
+    harness: str,
+    *,
+    require_exact_object_set: bool = True,
+) -> dict:
+    index = read_json_nofollow(index_path)
+    if (
+        index.get("schema_version") != 1
+        or index.get("host_id") != host_id
+        or index.get("harness") != harness
+        or not isinstance(index.get("conversations"), list)
+    ):
+        raise ValueError(f"invalid archive index identity: {index_path.name}")
+    referenced: set[str] = set()
+    for row in index["conversations"]:
+        if not isinstance(row, dict) or not OBJECT_NAME_RE.fullmatch(
+            f"{row.get('object_sha256', '')}.json"
+        ):
+            raise ValueError(f"invalid archive index row: {index_path.name}")
+        digest = row["object_sha256"]
+        if digest in referenced:
+            raise ValueError(f"duplicate archive index row: {digest}")
+        if row.get("source") not in HARNESS_SOURCES[harness]:
+            raise ValueError(f"unauthorized source in {harness} index")
+        object_path = source_root / harness / "objects" / f"{digest}.json"
+        if not object_path.is_file() or object_path.is_symlink():
+            raise ValueError(f"archive index references missing object: {digest}")
+        archived = validate_object_file(object_path)
+        if (
+            archived.get("source") not in HARNESS_SOURCES[harness]
+            or archived.get("source") != row.get("source")
+            or archived.get("session_id") != row.get("session_id")
+        ):
+            raise ValueError(f"archive object provenance mismatch for {harness}: {digest}")
+        referenced.add(digest)
+    object_root = source_root / harness / "objects"
+    object_digests = (
+        {path.stem for path in object_root.iterdir() if path.is_file()}
+        if object_root.is_dir()
+        else set()
+    )
+    if require_exact_object_set and object_digests != referenced:
+        raise ValueError(f"archive index/object set mismatch for {harness}")
+    return index
+
+
+def write_publish_manifest(
+    source_root: Path,
+    receipt_path: Path,
+    receipt: dict,
+    config_sha256: str,
+) -> dict:
+    """Atomically bind a healthy receipt to one exact transferable snapshot."""
+    collection_status = receipt.get("collection_status", receipt.get("status"))
+    if collection_status not in {"completed", "completed_with_absent_harnesses"}:
+        raise ValueError("refusing to manifest an incomplete collection")
+    present_harnesses = sorted(
+        path.name
+        for path in source_root.iterdir()
+        if path.is_dir() and path.name in APPROVED_HARNESSES
+    )
+    manifest_harnesses = {}
+    for harness in present_harnesses:
+        index_path = source_root / harness / "index.json"
+        index = validate_index_file(index_path, source_root, receipt["host_id"], harness)
+        manifest_harnesses[harness] = {
+            "index_sha256": file_sha256(index_path),
+            "object_sha256": sorted(
+                row["object_sha256"] for row in index["conversations"]
+            ),
+        }
+    relative_receipt = receipt_path.relative_to(source_root)
+    manifest = {
+        "schema_version": 1,
+        "host_id": receipt["host_id"],
+        "run_id": receipt["run_id"],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "extractor_sha256": receipt["extractor_sha256"],
+        "config_sha256": config_sha256,
+        "receipt": {
+            "path": relative_receipt.as_posix(),
+            "sha256": file_sha256(receipt_path),
+        },
+        "harnesses": manifest_harnesses,
+    }
+    atomic_write_json(source_root / "publish-manifest.json", manifest)
+    return manifest
+
+
+def validate_publish_manifest(
+    source_root: Path,
+    host_id: str,
+    present_harnesses: set[str],
+    receipt_paths: list[Path],
+) -> dict:
+    manifest_path = source_root / "publish-manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise ValueError(f"host shard has no publish manifest: {host_id}")
+    manifest = read_json_nofollow(manifest_path)
+    harnesses = manifest.get("harnesses")
+    receipt_binding = manifest.get("receipt")
+    digest_fields = (
+        manifest.get("extractor_sha256"),
+        manifest.get("config_sha256"),
+        receipt_binding.get("sha256") if isinstance(receipt_binding, dict) else None,
+    )
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("host_id") != host_id
+        or not isinstance(manifest.get("run_id"), str)
+        or not isinstance(manifest.get("generated_at"), str)
+        or not all(re.fullmatch(r"[0-9a-f]{64}", str(value)) for value in digest_fields)
+        or not isinstance(harnesses, dict)
+        or not set(harnesses).issubset(present_harnesses)
+        or not present_harnesses.issubset(APPROVED_HARNESSES)
+        or not isinstance(receipt_binding, dict)
+    ):
+        raise ValueError(f"invalid publish manifest identity: {host_id}")
+
+    receipt_relative = Path(str(receipt_binding.get("path", "")))
+    if (
+        len(receipt_relative.parts) != 2
+        or receipt_relative.parts[0] != "receipts"
+        or not receipt_relative.name.endswith(".json")
+    ):
+        raise ValueError(f"invalid manifest receipt path: {host_id}")
+    receipt_path = source_root / receipt_relative
+    if receipt_path not in receipt_paths or file_sha256(receipt_path) != receipt_binding["sha256"]:
+        raise ValueError(f"manifest receipt hash mismatch: {host_id}")
+    receipt = read_json_nofollow(receipt_path)
+    receipt_harnesses = receipt.get("harnesses")
+    collection_status = receipt.get("collection_status", receipt.get("status"))
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("host_id") != host_id
+        or receipt.get("run_id") != manifest["run_id"]
+        or receipt.get("extractor_sha256") != manifest["extractor_sha256"]
+        or receipt.get("config_sha256") != manifest["config_sha256"]
+        or collection_status not in {"completed", "completed_with_absent_harnesses"}
+        or not isinstance(receipt_harnesses, dict)
+        or not set(receipt_harnesses).issubset(APPROVED_HARNESSES)
+        or not present_harnesses.issubset(receipt_harnesses)
+    ):
+        raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
+    for harness in present_harnesses:
+        result = receipt_harnesses[harness]
+        if not isinstance(result, dict) or result.get("status") in {
+            "failed",
+            "partial",
+            "source_missing",
+            "not_present_on_host",
+        }:
+            raise ValueError(f"manifest receipt has incomplete {harness} extraction")
+        binding = harnesses.get(harness)
+        object_digests = binding.get("object_sha256") if isinstance(binding, dict) else None
+        index_path = source_root / harness / "index.json"
+        index = validate_index_file(
+            index_path,
+            source_root,
+            host_id,
+            harness,
+            require_exact_object_set=False,
+        )
+        actual_digests = sorted(row["object_sha256"] for row in index["conversations"])
+        if (
+            not isinstance(binding, dict)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(binding.get("index_sha256", "")))
+            or not isinstance(object_digests, list)
+            or any(not re.fullmatch(r"[0-9a-f]{64}", str(item)) for item in object_digests)
+            or len(object_digests) != len(set(object_digests))
+            or object_digests != actual_digests
+            or binding["index_sha256"] != file_sha256(index_path)
+        ):
+            raise ValueError(f"publish manifest snapshot mismatch for {harness}")
+    return manifest
+
+
+def validated_shard_files(
+    source_root: Path,
+    host_id: str,
+    *,
+    require_healthy_receipt: bool = True,
+) -> list[Path]:
+    source_root = assert_no_symlink_components(source_root)
+    if not source_root.is_dir():
+        raise FileNotFoundError(f"host shard does not exist: {source_root}")
+    files: list[Path] = []
+    receipt_paths: list[Path] = []
+    present_harnesses: set[str] = set()
+    for current_root, directories, names in os.walk(source_root, followlinks=False):
+        current = Path(current_root)
+        for name in [*directories, *names]:
+            candidate = current / name
+            if candidate.is_symlink():
+                raise ValueError(f"refusing symlink in host shard: {candidate}")
+        for name in names:
+            candidate = current / name
+            if not candidate.is_file():
+                raise ValueError(f"refusing non-regular shard entry: {candidate}")
+            relative = candidate.relative_to(source_root)
+            if name.startswith("."):
+                raise ValueError(f"refusing temporary shard entry: {relative}")
+            if not relative.parts:
+                raise ValueError("invalid empty shard path")
+            top_level = relative.parts[0]
+            if top_level not in APPROVED_HARNESSES | {"receipts", "publish-manifest.json"}:
+                raise ValueError(f"unauthorized harness in host shard: {top_level}")
+            if top_level == "publish-manifest.json":
+                if len(relative.parts) != 1:
+                    raise ValueError(f"unexpected publish manifest path: {relative}")
+            elif top_level in APPROVED_HARNESSES:
+                present_harnesses.add(top_level)
+                valid_shape = (
+                    len(relative.parts) == 3
+                    and relative.parts[1] == "objects"
+                    and OBJECT_NAME_RE.fullmatch(relative.parts[2])
+                ) or (len(relative.parts) == 2 and relative.parts[1] == "index.json")
+                if not valid_shape:
+                    raise ValueError(f"unexpected file in {top_level} shard: {relative}")
+            elif len(relative.parts) != 2 or not relative.name.endswith(".json"):
+                raise ValueError(f"unexpected receipt path: {relative}")
+
+            if "objects" in relative.parts:
+                if not require_healthy_receipt:
+                    validate_object_file(candidate)
+            elif name in {"index.json", "publish-manifest.json"} or top_level == "receipts":
+                if not require_healthy_receipt:
+                    read_json_nofollow(candidate)
+                if top_level == "receipts":
+                    receipt_paths.append(candidate)
+            else:
+                raise ValueError(f"unexpected file in host shard: {relative}")
+            files.append(candidate)
+    if not files:
+        raise ValueError(f"host shard is empty: {source_root}")
+    if require_healthy_receipt:
+        manifest = validate_publish_manifest(
+            source_root, host_id, present_harnesses, receipt_paths
+        )
+        authorized = {
+            source_root / "publish-manifest.json",
+            source_root / Path(manifest["receipt"]["path"]),
+        }
+        for harness, binding in manifest["harnesses"].items():
+            authorized.add(source_root / harness / "index.json")
+            authorized.update(
+                source_root / harness / "objects" / f"{digest}.json"
+                for digest in binding["object_sha256"]
+            )
+        if not authorized.issubset(set(files)):
+            raise ValueError(f"publish manifest references missing shard files: {host_id}")
+        return sorted(authorized)
+    for harness in present_harnesses:
+        index_path = source_root / harness / "index.json"
+        if not index_path.is_file() or index_path.is_symlink():
+            raise ValueError(f"host shard is missing {harness} index")
+        validate_index_file(index_path, source_root, host_id, harness)
+    return sorted(files)
+
+
+def copy_verified_file(source: Path, destination: Path, *, immutable: bool) -> bool:
+    assert_no_symlink_components(source)
+    destination = assert_no_symlink_components(destination, include_leaf=False)
+    source_digest = file_sha256(source)
+    if destination.exists() or destination.is_symlink():
+        assert_no_symlink_components(destination)
+        destination_digest = file_sha256(destination)
+        if immutable:
+            if destination_digest != source_digest:
+                raise ValueError(f"immutable archive collision: {destination.name}")
+            return False
+    secure_mkdir(destination.parent)
+    _, directory_fd = open_directory_fd(destination.parent)
+    temporary_name = f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    output_fd = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
+    input_fd = open_regular_fd(source)
+    try:
+        copied_digest = hashlib.sha256()
+        source_handle = os.fdopen(input_fd, "rb")
+        input_fd = -1
+        with source_handle, os.fdopen(
+            output_fd, "wb", closefd=False
+        ) as output_handle:
+            for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
+                copied_digest.update(chunk)
+                output_handle.write(chunk)
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+        os.fchmod(output_fd, 0o600)
+        os.close(output_fd)
+        output_fd = -1
+        if copied_digest.hexdigest() != source_digest:
+            raise ValueError(f"copy verification failed: {source.name}")
+        if immutable:
+            try:
+                os.link(
+                    temporary_name,
+                    destination.name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                assert_no_symlink_components(destination)
+                if file_sha256(destination) != source_digest:
+                    raise ValueError(f"immutable archive collision: {destination.name}")
+                return False
+        else:
+            os.rename(
+                temporary_name,
+                destination.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        os.fsync(directory_fd)
+        if file_sha256(destination) != source_digest:
+            raise ValueError(f"destination verification failed: {destination.name}")
+    finally:
+        if input_fd >= 0:
+            os.close(input_fd)
+        if output_fd >= 0:
+            os.close(output_fd)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
+    return True
+
+
+def merge_index_file(source: Path, destination: Path) -> bool:
+    source_index = read_json_nofollow(source)
+    if not destination.exists():
+        atomic_write_json(destination, source_index)
+        return True
+    destination_index = read_json_nofollow(destination)
+    if (
+        source_index.get("host_id") != destination_index.get("host_id")
+        or source_index.get("harness") != destination_index.get("harness")
+    ):
+        raise ValueError("refusing to merge indexes with different identities")
+    merged = {
+        row["object_sha256"]: row
+        for row in destination_index.get("conversations", [])
+    }
+    before = len(merged)
+    for row in source_index.get("conversations", []):
+        merged.setdefault(row["object_sha256"], row)
+    destination_index["conversations"] = sorted(
+        merged.values(),
+        key=lambda row: (str(row.get("session_id")), row["object_sha256"]),
+    )
+    if len(merged) == before:
+        return False
+    atomic_write_json(destination, destination_index)
+    return True
+
+
+def restore_indexes_to_manifest(source_root: Path, host_id: str) -> bool:
+    """Recover an old manifested snapshot after an interrupted additive merge."""
+    manifest_path = source_root / "publish-manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        return False
+    manifest = read_json_nofollow(manifest_path)
+    if manifest.get("host_id") != host_id or not isinstance(manifest.get("harnesses"), dict):
+        return False
+    repairs: list[tuple[Path, bytes]] = []
+    for harness, binding in manifest["harnesses"].items():
+        if harness not in APPROVED_HARNESSES or not isinstance(binding, dict):
+            return False
+        expected_objects = binding.get("object_sha256")
+        expected_index_hash = binding.get("index_sha256")
+        if not isinstance(expected_objects, list) or not isinstance(expected_index_hash, str):
+            return False
+        index_path = source_root / harness / "index.json"
+        if not index_path.is_file() or index_path.is_symlink():
+            return False
+        current = read_json_nofollow(index_path)
+        if not isinstance(current.get("conversations"), list):
+            return False
+        expected_set = set(expected_objects)
+        candidate = dict(current)
+        candidate["conversations"] = [
+            row
+            for row in current["conversations"]
+            if isinstance(row, dict) and row.get("object_sha256") in expected_set
+        ]
+        payload = canonical_json(candidate) + b"\n"
+        if hashlib.sha256(payload).hexdigest() != expected_index_hash:
+            return False
+        if file_sha256(index_path) != expected_index_hash:
+            repairs.append((index_path, payload))
+    for path, payload in repairs:
+        atomic_write_bytes(path, payload)
+    return bool(repairs)
+
+
+def merge_host_shard(
+    source_root: Path,
+    destination_parent: Path,
+    host_id: str,
+    *,
+    require_healthy_receipt: bool = True,
+) -> dict:
+    source_root = assert_no_symlink_components(source_root)
+    files = validated_shard_files(
+        source_root, host_id, require_healthy_receipt=require_healthy_receipt
+    )
+    destination_root = destination_parent / "hosts" / host_id
+    source_wins = True
+    if (
+        require_healthy_receipt
+        and destination_root.exists()
+        and (destination_root / "publish-manifest.json").is_file()
+    ):
+        try:
+            validated_shard_files(destination_root, host_id, require_healthy_receipt=True)
+        except ValueError:
+            if not restore_indexes_to_manifest(destination_root, host_id):
+                raise
+            validated_shard_files(destination_root, host_id, require_healthy_receipt=True)
+        source_manifest = read_json_nofollow(source_root / "publish-manifest.json")
+        destination_manifest = read_json_nofollow(
+            destination_root / "publish-manifest.json"
+        )
+
+        def snapshot_sets(manifest: dict) -> dict[str, set[str]]:
+            return {
+                harness: set(binding["object_sha256"])
+                for harness, binding in manifest["harnesses"].items()
+            }
+
+        source_sets = snapshot_sets(source_manifest)
+        destination_sets = snapshot_sets(destination_manifest)
+
+        def snapshot_subset(left: dict[str, set[str]], right: dict[str, set[str]]) -> bool:
+            return all(
+                harness in right and digests.issubset(right[harness])
+                for harness, digests in left.items()
+            )
+
+        destination_is_subset = snapshot_subset(destination_sets, source_sets)
+        source_is_subset = snapshot_subset(source_sets, destination_sets)
+        if not destination_is_subset and not source_is_subset:
+            raise ValueError(f"divergent immutable snapshots for host: {host_id}")
+        if source_is_subset and not destination_is_subset:
+            source_wins = False
+        elif source_is_subset and destination_is_subset:
+            source_wins = str(source_manifest["generated_at"]) >= str(
+                destination_manifest["generated_at"]
+            )
+
+    copied = 0
+    verified = 0
+    # Bodies first, indexes second, receipts third, manifest last. The manifest
+    # is the only authorization pointer, so interrupted copies remain unusable.
+    files.sort(
+        key=lambda path: (
+            3
+            if path.name == "publish-manifest.json"
+            else
+            2
+            if "receipts" in path.relative_to(source_root).parts
+            else 1
+            if path.name == "index.json"
+            else 0,
+            str(path),
+        )
+    )
+    rollback_payloads: dict[Path, bytes] = {}
+    if source_wins:
+        for source in files:
+            relative = source.relative_to(source_root)
+            if source.name == "index.json" or source.name == "publish-manifest.json":
+                destination = destination_root / relative
+                if destination.is_file() and not destination.is_symlink():
+                    rollback_payloads[destination] = read_bytes_nofollow(destination)
+    try:
+        for source in files:
+            relative = source.relative_to(source_root)
+            if not source_wins and "receipts" not in relative.parts:
+                continue
+            destination = destination_root / relative
+            immutable = "objects" in relative.parts or "receipts" in relative.parts
+            if source.name == "index.json":
+                changed = (
+                    copy_verified_file(source, destination, immutable=False)
+                    if require_healthy_receipt
+                    else merge_index_file(source, destination)
+                )
+            else:
+                changed = copy_verified_file(source, destination, immutable=immutable)
+            if changed:
+                copied += 1
+            verified += 1
+        validated_shard_files(
+            destination_root,
+            host_id,
+            require_healthy_receipt=require_healthy_receipt,
+        )
+    except Exception:
+        for destination, payload in rollback_payloads.items():
+            atomic_write_bytes(destination, payload)
+        raise
+    return {"status": "published", "files_copied": copied, "files_verified": verified}
+
+
+def publish_host_shard(
+    spool_root: Path,
+    drive_root: Path,
+    host_id: str,
+    *,
+    allow_non_google_drive: bool = False,
+    require_healthy_receipt: bool = True,
+) -> dict:
+    spool_root = assert_no_symlink_components(spool_root)
+    drive_root = assert_no_symlink_components(drive_root)
+    if not drive_root.exists() or not drive_root.is_dir():
+        return {"status": "blocked_drive_unavailable", "files_copied": 0}
+    if not allow_non_google_drive and not is_google_drive_path(drive_root):
+        return {"status": "blocked_not_google_drive", "files_copied": 0}
+    try:
+        validate_output_root(drive_root)
+    except ValueError as error:
+        return {
+            "status": "blocked_integrity_failure",
+            "files_copied": 0,
+            "error": str(error),
+        }
+
+    source_root = spool_root / "hosts" / host_id
+    try:
+        return merge_host_shard(
+            source_root,
+            drive_root,
+            host_id,
+            require_healthy_receipt=require_healthy_receipt,
+        )
+    except FileNotFoundError:
+        return {"status": "blocked_source_missing", "files_copied": 0}
+    except ValueError as error:
+        return {
+            "status": "blocked_integrity_failure",
+            "files_copied": 0,
+            "error": str(error),
+        }
+
+
+def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
+    spool_root = validate_output_root(spool_root)
+    statuses = {}
+    for remote in hub.get("remotes", []):
+        remote_host_id = validate_host_id(remote["host_id"])
+        if remote.get("source_spool_root"):
+            source_spool = assert_no_symlink_components(Path(remote["source_spool_root"]))
+            try:
+                result = merge_host_shard(
+                    source_spool / "hosts" / remote_host_id,
+                    spool_root,
+                    remote_host_id,
+                )
+            except (FileNotFoundError, ValueError) as error:
+                statuses[remote_host_id] = {
+                    "status": "blocked_integrity_failure",
+                    "files_copied": 0,
+                    "error": str(error),
+                }
+                continue
+            statuses[remote_host_id] = {
+                "status": "pulled" if result["status"] == "published" else result["status"],
+                "files_copied": result["files_copied"],
+                "files_verified": result.get("files_verified", 0),
+            }
+            continue
+
+        ssh_host = remote.get("ssh_host")
+        remote_spool_root = remote.get("remote_spool_root")
+        if not ssh_host or not remote_spool_root:
+            statuses[remote_host_id] = {"status": "invalid_remote", "files_copied": 0}
+            continue
+        source = (
+            f"{ssh_host}:{remote_spool_root.rstrip('/')}/hosts/{remote_host_id}/"
+        )
+        incoming_root = spool_root / ".incoming"
+        secure_mkdir(incoming_root)
+        try:
+            with tempfile.TemporaryDirectory(
+                dir=incoming_root, prefix=f"{remote_host_id}-"
+            ) as incoming:
+                subprocess.run(
+                    [
+                        "rsync",
+                        "-rt",
+                        "--no-links",
+                        "--safe-links",
+                        "--exclude=.*",
+                        "--exclude=*.tmp",
+                        "--exclude=*.partial",
+                        "-e",
+                        "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ControlMaster=no -o ControlPath=none",
+                        source,
+                        str(Path(incoming)) + "/",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=int(remote.get("timeout_seconds", 300)),
+                )
+                result = merge_host_shard(
+                    Path(incoming), spool_root, remote_host_id
+                )
+            statuses[remote_host_id] = {
+                "status": "pulled",
+                "files_copied": result["files_copied"],
+                "files_verified": result["files_verified"],
+            }
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            statuses[remote_host_id] = {"status": "unreachable", "files_copied": 0}
+        except (FileNotFoundError, ValueError) as error:
+            statuses[remote_host_id] = {
+                "status": "blocked_integrity_failure",
+                "files_copied": 0,
+                "error": str(error),
+            }
+    return {"remotes": statuses}
+
+
+@contextlib.contextmanager
+def archive_run_lock(spool_root: Path):
+    secure_mkdir(spool_root)
+    lock_path = spool_root / ".run.lock"
+    assert_no_symlink_components(lock_path, include_leaf=False)
+    descriptor = os.open(
+        lock_path,
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def collect(args: argparse.Namespace) -> int:
+    archive_root = validate_output_root(Path(args.archive_root))
+    host_id = validate_host_id(args.host_id)
+    with archive_run_lock(archive_root):
+        harnesses = collect_sources(
+            archive_root,
+            host_id,
+            claude_roots=path_list([args.claude_root]),
+            codex_roots=path_list([args.codex_root]),
+            openclaw_roots=path_list([args.openclaw_root]),
+            hermes_exports=path_list([args.hermes_export]),
+        )
+
+    receipt = {
+        "schema_version": 1,
+        "extractor_sha256": extractor_sha256(),
+        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "host_id": host_id,
+        "harnesses": harnesses,
+    }
+    print(json.dumps(receipt, sort_keys=True))
+    return 1 if any(not item.get("publishable", True) for item in harnesses.values()) else 0
+
+
+def run_config(args: argparse.Namespace) -> int:
+    config_path = assert_no_symlink_components(Path(args.config))
+    config = read_json_nofollow(config_path)
+    if config.get("schema_version") != 1:
+        raise ValueError("unsupported config schema_version")
+    config_digest = hashlib.sha256(canonical_json(config)).hexdigest()
+    host_id = validate_host_id(config["host_id"])
+    if "allow_non_google_drive" in config:
+        raise ValueError("allow_non_google_drive is test-only and forbidden in configs")
+    spool_root = validate_output_root(Path(config["spool_root"]))
+    secure_mkdir(spool_root)
+    sources = config.get("sources", {})
+    unapproved_source_keys = sorted(set(sources) - APPROVED_SOURCE_KEYS)
+    if unapproved_source_keys:
+        raise ValueError(f"unapproved source keys: {', '.join(unapproved_source_keys)}")
+    run_id = (
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        + "-"
+        + uuid.uuid4().hex[:8]
+    )
+    receipt_path = spool_root / "hosts" / host_id / "receipts" / f"{run_id}.json"
+    harnesses: dict = {}
+    hub_status = {"remotes": {}}
+    publication = {"status": "not_attempted", "files_copied": 0}
+    run_errors: list[dict] = []
+    collection_errors: list[dict] = []
+
+    def record_failure(harness: str, error: Exception) -> None:
+        harnesses[harness] = {
+            "status": "failed",
+            "conversations": 0,
+            "new_objects": 0,
+            "publishable": False,
+            "error_type": type(error).__name__,
+            "error": str(error),
+        }
+        body_free_error = {"component": harness, "error_type": type(error).__name__}
+        run_errors.append(body_free_error)
+        collection_errors.append(body_free_error)
+
+    with archive_run_lock(spool_root):
+        try:
+            configured_collectors = (
+                ("claude", "claude_roots"),
+                ("codex", "codex_roots"),
+                ("openclaw", "openclaw_roots"),
+            )
+            for harness, source_key in configured_collectors:
+                if not sources.get(source_key):
+                    continue
+                try:
+                    options = {source_key: path_list(sources[source_key])}
+                    harnesses.update(collect_sources(spool_root, host_id, **options))
+                except Exception as error:  # keep other harnesses collectable
+                    record_failure(harness, error)
+
+            if sources.get("hermes_exports") or sources.get("hermes_instances"):
+                try:
+                    work_parent = spool_root / ".work"
+                    secure_mkdir(work_parent)
+                    with tempfile.TemporaryDirectory(
+                        dir=work_parent, prefix=f"{host_id}-"
+                    ) as work:
+                        hermes_exports = path_list(sources.get("hermes_exports", []))
+                        hermes_exports.extend(
+                            export_hermes_instances(
+                                sources.get("hermes_instances", []), Path(work)
+                            )
+                        )
+                        harnesses.update(
+                            collect_sources(
+                                spool_root,
+                                host_id,
+                                hermes_exports=hermes_exports,
+                            )
+                        )
+                except Exception as error:
+                    record_failure("hermes", error)
+
+            inventory_harnesses = config.get(
+                "inventory_harnesses", config.get("expected_harnesses", [])
+            )
+            for harness in inventory_harnesses:
+                harnesses.setdefault(
+                    harness,
+                    {
+                        "status": "not_present_on_host",
+                        "conversations": 0,
+                        "new_objects": 0,
+                        "publishable": False,
+                        "inventory_only": True,
+                    },
+                )
+
+            for harness, result in harnesses.items():
+                if result.get("status") in {"partial", "source_missing"}:
+                    body_free_error = {
+                        "component": harness,
+                        "error_type": "IncompleteExtraction",
+                    }
+                    run_errors.append(body_free_error)
+                    collection_errors.append(body_free_error)
+
+            try:
+                hub_status = pull_hub_remotes(config.get("hub", {}), spool_root)
+            except Exception as error:
+                hub_status = {
+                    "remotes": {},
+                    "status": "failed",
+                    "error_type": type(error).__name__,
+                }
+                run_errors.append({"component": "hub", "error_type": type(error).__name__})
+
+            drive_root_value = config.get("drive_root")
+            local_publishable = all(
+                result.get("publishable", True)
+                for result in harnesses.values()
+                if result.get("status") != "not_present_on_host"
+            ) and not any(result.get("status") == "failed" for result in harnesses.values())
+            if drive_root_value:
+                drive_root = assert_no_symlink_components(Path(drive_root_value))
+                publication = (
+                    {"status": "pending_manifest", "files_copied": 0}
+                    if local_publishable
+                    else {
+                        "status": "blocked_incomplete_collection",
+                        "files_copied": 0,
+                    }
+                )
+                cached_host_ids = {
+                    validate_host_id(remote["host_id"])
+                    for remote in config.get("hub", {}).get("remotes", [])
+                }
+                hosts_root = spool_root / "hosts"
+                if hosts_root.is_dir():
+                    for candidate in hosts_root.iterdir():
+                        if candidate.is_dir() and candidate.name != host_id:
+                            cached_host_ids.add(validate_host_id(candidate.name))
+                for remote_host_id in sorted(cached_host_ids):
+                    remote_status = hub_status["remotes"].setdefault(
+                        remote_host_id,
+                        {"status": "cached", "files_copied": 0},
+                    )
+                    remote_status["publication"] = publish_host_shard(
+                        spool_root, drive_root, remote_host_id
+                    )
+                failing_publications = [
+                    *[
+                        status.get("publication", {})
+                        for status in hub_status["remotes"].values()
+                    ],
+                ]
+                if any(
+                    result.get("status") not in {"published", "blocked_source_missing"}
+                    for result in failing_publications
+                ):
+                    run_errors.append(
+                        {
+                            "component": "publication",
+                            "error_type": "PublicationBlocked",
+                        }
+                    )
+            else:
+                publication = {"status": "blocked_no_drive_root", "files_copied": 0}
+        except Exception as error:
+            body_free_error = {"component": "run", "error_type": type(error).__name__}
+            run_errors.append(body_free_error)
+            collection_errors.append(body_free_error)
+            publication = {"status": "failed", "files_copied": 0}
+        finally:
+            collection_status = (
+                "failed"
+                if collection_errors
+                else "completed_with_absent_harnesses"
+                if any(
+                    item.get("status") == "not_present_on_host"
+                    for item in harnesses.values()
+                )
+                else "completed"
+            )
+            receipt = {
+                "schema_version": 1,
+                "extractor_sha256": extractor_sha256(),
+                "config_sha256": config_digest,
+                "run_id": run_id,
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "host_id": host_id,
+                "collection_status": collection_status,
+                "status": "failed" if run_errors else collection_status,
+                "harnesses": harnesses,
+                "hub": hub_status,
+                "publication": publication,
+                "errors": run_errors,
+                "receipt_path": str(receipt_path),
+            }
+            atomic_write_json(receipt_path, receipt)
+            if collection_status in {"completed", "completed_with_absent_harnesses"}:
+                source_root = spool_root / "hosts" / host_id
+                try:
+                    write_publish_manifest(
+                        source_root, receipt_path, receipt, config_digest
+                    )
+                    if config.get("drive_root"):
+                        drive_root = assert_no_symlink_components(
+                            Path(config["drive_root"])
+                        )
+                        publication = publish_host_shard(
+                            spool_root, drive_root, host_id
+                        )
+                        if publication.get("status") != "published":
+                            run_errors.append(
+                                {
+                                    "component": "publication",
+                                    "error_type": "PublicationBlocked",
+                                }
+                            )
+                        receipt["publication"] = publication
+                        receipt["status"] = "failed" if run_errors else collection_status
+                        receipt["errors"] = run_errors
+
+                        # A successful first copy already contains the immutable
+                        # collection receipt. Bind the final publication result
+                        # with a second immutable receipt and advance the manifest.
+                        if publication.get("status") == "published":
+                            receipt_path = (
+                                spool_root
+                                / "hosts"
+                                / host_id
+                                / "receipts"
+                                / f"{run_id}-published.json"
+                            )
+                            receipt["receipt_path"] = str(receipt_path)
+                        atomic_write_json(receipt_path, receipt)
+                        write_publish_manifest(
+                            source_root, receipt_path, receipt, config_digest
+                        )
+                        if publication.get("status") == "published":
+                            receipt_publication = publish_host_shard(
+                                spool_root, drive_root, host_id
+                            )
+                            receipt["receipt_publication"] = receipt_publication
+                            if receipt_publication.get("status") != "published":
+                                run_errors.append(
+                                    {
+                                        "component": "receipt_publication",
+                                        "error_type": "PublicationBlocked",
+                                    }
+                                )
+                                receipt["status"] = "failed"
+                                receipt["errors"] = run_errors
+                                receipt_path = (
+                                    spool_root
+                                    / "hosts"
+                                    / host_id
+                                    / "receipts"
+                                    / f"{run_id}-publication-failed.json"
+                                )
+                                receipt["receipt_path"] = str(receipt_path)
+                                atomic_write_json(receipt_path, receipt)
+                                write_publish_manifest(
+                                    source_root,
+                                    receipt_path,
+                                    receipt,
+                                    config_digest,
+                                )
+                except Exception as error:
+                    run_errors.append(
+                        {
+                            "component": "publish_manifest",
+                            "error_type": type(error).__name__,
+                        }
+                    )
+                    receipt["status"] = "failed"
+                    receipt["errors"] = run_errors
+                    atomic_write_json(receipt_path, receipt)
+
+    print(json.dumps(receipt, sort_keys=True))
+    return 1 if run_errors else 0
+
+
+def install_launchd(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    config = json.loads(config_path.read_text())
+    host_id = validate_host_id(config["host_id"])
+    label = f"com.mattrotundo.ai-chat-archive.{host_id}"
+    agents_dir = (
+        Path(args.launch_agents_dir).expanduser().resolve()
+        if args.launch_agents_dir
+        else Path.home() / "Library" / "LaunchAgents"
+    )
+    logs_dir = Path.home() / "Library" / "Logs" / "AIChatArchive"
+    secure_mkdir(logs_dir)
+    log_paths = [
+        logs_dir / f"{host_id}.out.log",
+        logs_dir / f"{host_id}.err.log",
+    ]
+    for log_path in log_paths:
+        _, log_directory_fd = open_directory_fd(log_path.parent)
+        try:
+            log_fd = os.open(
+                log_path.name,
+                os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=log_directory_fd,
+            )
+            os.fchmod(log_fd, 0o600)
+            os.close(log_fd)
+        finally:
+            os.close(log_directory_fd)
+    job = {
+        "Label": label,
+        "ProgramArguments": [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "run",
+            "--config",
+            str(config_path),
+        ],
+        "WorkingDirectory": str(Path(__file__).resolve().parent),
+        "RunAtLoad": True,
+        "StartInterval": args.interval_seconds,
+        "ProcessType": "Background",
+        "StandardOutPath": str(log_paths[0]),
+        "StandardErrorPath": str(log_paths[1]),
+        "Umask": 0o077,
+        "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
+    }
+    plist_path = agents_dir / f"{label}.plist"
+    atomic_write_bytes(plist_path, plistlib.dumps(job, fmt=plistlib.FMT_XML))
+
+    loaded = False
+    if not args.no_load:
+        domain = f"gui/{os.getuid()}"
+        subprocess.run(
+            ["launchctl", "bootout", f"{domain}/{label}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["launchctl", "bootstrap", domain, str(plist_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        loaded = True
+
+    print(json.dumps({"label": label, "loaded": loaded, "plist_path": str(plist_path)}))
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(description=__doc__)
+    commands = root.add_subparsers(dest="command", required=True)
+    collect_command = commands.add_parser("collect")
+    collect_command.add_argument("--host-id", required=True)
+    collect_command.add_argument("--archive-root", required=True)
+    collect_command.add_argument("--claude-root")
+    collect_command.add_argument("--codex-root")
+    collect_command.add_argument("--openclaw-root")
+    collect_command.add_argument("--hermes-export")
+    collect_command.set_defaults(func=collect)
+    run_command = commands.add_parser("run")
+    run_command.add_argument("--config", required=True)
+    run_command.set_defaults(func=run_config)
+    install_command = commands.add_parser("install-launchd")
+    install_command.add_argument("--config", required=True)
+    install_command.add_argument("--launch-agents-dir")
+    install_command.add_argument("--interval-seconds", type=int, default=21600)
+    install_command.add_argument("--no-load", action="store_true")
+    install_command.set_defaults(func=install_launchd)
+    return root
+
+
+def main() -> int:
+    args = parser().parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

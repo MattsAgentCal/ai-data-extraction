@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "host_id": "mac-studio",
+  "spool_root": "/Users/calstudio/.local/share/ai-chat-archive/spool",
+  "drive_root": null,
+  "inventory_harnesses": ["claude", "codex", "openclaw", "hermes"],
+  "sources": {
+    "claude_roots": ["/Users/calstudio/.claude"],
+    "codex_roots": ["/Users/calstudio/.codex"],
+    "hermes_instances": [
+      {
+        "home": "/Users/calstudio/.hermes",
+        "binary": "/Users/calstudio/.local/bin/hermes"
+      },
+      {
+        "home": "/Users/calstudio/.hermes/profiles/cal",
+        "binary": "/Users/calstudio/.local/bin/hermes"
+      }
+    ]
+  },
+  "hub": {
+    "remotes": [
+      {
+        "host_id": "new-macbook",
+        "ssh_host": "newmac",
+        "remote_spool_root": "/Users/mattrotundo/.local/share/ai-chat-archive/spool"
+      },
+      {
+        "host_id": "mac-mini",
+        "ssh_host": "cals-mac-mini",
+        "remote_spool_root": "/Users/calrotundo/.local/share/ai-chat-archive/spool"
+      },
+      {
+        "host_id": "old-macbook",
+        "ssh_host": "oldmac",
+        "remote_spool_root": "/Users/mattrotundo/.local/share/ai-chat-archive/spool"
+      }
+    ]
+  }
+}

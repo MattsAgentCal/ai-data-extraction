@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "host_id": "new-macbook",
+  "spool_root": "/Users/mattrotundo/.local/share/ai-chat-archive/spool",
+  "drive_root": null,
+  "inventory_harnesses": ["claude", "codex", "openclaw", "hermes"],
+  "sources": {
+    "claude_roots": ["/Users/mattrotundo/.claude"],
+    "codex_roots": ["/Users/mattrotundo/.codex"],
+    "hermes_instances": [
+      {
+        "home": "/Users/mattrotundo/.hermes",
+        "binary": "/Users/mattrotundo/.local/bin/hermes"
+      }
+    ]
+  }
+}
