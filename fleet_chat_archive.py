@@ -868,6 +868,8 @@ class ObjectValidationProof:
 
 
 ObjectValidationProofCache = dict[str, ObjectValidationProof]
+ManifestSnapshot = tuple[bytes, dict[Path, bytes], dict[str, dict]]
+_AUTO_LOAD_PRIOR_MANIFEST_SNAPSHOT = object()
 
 
 def canonical_json(value: object) -> bytes:
@@ -1390,7 +1392,7 @@ def defer_sigterm_during_rollback():
 def load_healthy_manifest_snapshot(
     source_root: Path,
     host_id: str,
-) -> tuple[bytes, dict[Path, bytes], dict[str, dict]] | None:
+) -> ManifestSnapshot | None:
     """Load exact manifest-bound indexes without trusting unbound live rows."""
     manifest_path = source_root / "publish-manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
@@ -1491,6 +1493,96 @@ def load_healthy_manifest_snapshot(
         index_payloads[index_path] = index_payload
         index_values[harness] = index
     return manifest_payload, index_payloads, index_values
+
+
+def validated_manifest_snapshot_indexes(
+    snapshot: object,
+    source_root: Path,
+    host_id: str,
+) -> dict[str, dict]:
+    """Bind captured index bytes without trusting them as validated object bodies."""
+    if snapshot is None:
+        return {}
+    if not isinstance(snapshot, tuple) or len(snapshot) != 3:
+        raise ValueError("invalid supplied prior manifest snapshot")
+    manifest_payload, index_payloads, index_values = snapshot
+    if (
+        not isinstance(manifest_payload, bytes)
+        or not isinstance(index_payloads, dict)
+        or not isinstance(index_values, dict)
+    ):
+        raise ValueError("invalid supplied prior manifest snapshot")
+    try:
+        manifest = json.loads(manifest_payload)
+    except (TypeError, UnicodeError, ValueError) as error:
+        raise ValueError("invalid supplied prior manifest snapshot") from error
+    harnesses = manifest.get("harnesses") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or not is_exact_schema_version_one(manifest.get("schema_version"))
+        or manifest.get("host_id") != host_id
+        or not isinstance(harnesses, dict)
+        or not set(harnesses).issubset(APPROVED_HARNESSES)
+        or set(index_values) != set(harnesses)
+        or set(index_payloads)
+        != {source_root / harness / "index.json" for harness in harnesses}
+    ):
+        raise ValueError("invalid supplied prior manifest snapshot")
+
+    validated_indexes: dict[str, dict] = {}
+    for harness, binding in harnesses.items():
+        index_path = source_root / harness / "index.json"
+        index_payload = index_payloads.get(index_path)
+        expected_index_hash = (
+            binding.get("index_sha256") if isinstance(binding, dict) else None
+        )
+        object_digests = (
+            binding.get("object_sha256") if isinstance(binding, dict) else None
+        )
+        if (
+            not isinstance(index_payload, bytes)
+            or not isinstance(expected_index_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_index_hash)
+            or hashlib.sha256(index_payload).hexdigest() != expected_index_hash
+            or not isinstance(object_digests, list)
+            or any(
+                not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                for digest in object_digests
+            )
+            or len(object_digests) != len(set(object_digests))
+        ):
+            raise ValueError("invalid supplied prior manifest snapshot")
+        try:
+            index = json.loads(index_payload)
+        except (TypeError, UnicodeError, ValueError) as error:
+            raise ValueError("invalid supplied prior manifest snapshot") from error
+        rows = index.get("conversations") if isinstance(index, dict) else None
+        if (
+            not isinstance(index, dict)
+            or index != index_values.get(harness)
+            or not is_exact_schema_version_one(index.get("schema_version"))
+            or index.get("host_id") != host_id
+            or index.get("harness") != harness
+            or not isinstance(rows, list)
+        ):
+            raise ValueError("invalid supplied prior manifest snapshot")
+        indexed_digests = []
+        for row in rows:
+            digest = row.get("object_sha256") if isinstance(row, dict) else None
+            if (
+                not OBJECT_NAME_RE.fullmatch(f"{digest}.json")
+                or row.get("source") not in HARNESS_SOURCES[harness]
+            ):
+                raise ValueError("invalid supplied prior manifest snapshot")
+            object_path = source_root / harness / "objects" / f"{digest}.json"
+            if not object_path.is_file() or object_path.is_symlink():
+                raise ValueError("invalid supplied prior manifest snapshot")
+            indexed_digests.append(digest)
+        if sorted(indexed_digests) != sorted(object_digests):
+            raise ValueError("invalid supplied prior manifest snapshot")
+        validated_indexes[harness] = index
+    return validated_indexes
 
 
 def stable_codex_conversation_sha256(conversation: dict) -> str:
@@ -1748,6 +1840,7 @@ def collect_sources(
     openclaw_roots=(),
     hermes_exports=(),
     validation_proofs: ObjectValidationProofCache | None = None,
+    prior_manifest_snapshot=_AUTO_LOAD_PRIOR_MANIFEST_SNAPSHOT,
 ) -> dict:
     archive_root = validate_output_root(archive_root)
     secure_mkdir(archive_root)
@@ -1756,12 +1849,17 @@ def collect_sources(
     codex_reuse_index = None
     if codex_roots:
         live_host_root = archive_root / "hosts" / host_id
-        snapshot = load_healthy_manifest_snapshot(live_host_root, host_id)
-        if snapshot is not None:
-            _, _, manifest_indexes = snapshot
-            codex_reuse_index = manifest_indexes.get("codex")
-            if codex_reuse_index is not None:
-                codex_reuse_harness_root = live_host_root / "codex"
+        snapshot = (
+            load_healthy_manifest_snapshot(live_host_root, host_id)
+            if prior_manifest_snapshot is _AUTO_LOAD_PRIOR_MANIFEST_SNAPSHOT
+            else prior_manifest_snapshot
+        )
+        manifest_indexes = validated_manifest_snapshot_indexes(
+            snapshot, live_host_root, host_id
+        )
+        codex_reuse_index = manifest_indexes.get("codex")
+        if codex_reuse_index is not None:
+            codex_reuse_harness_root = live_host_root / "codex"
 
     def aggregate_quality(items: list[dict], *, source_missing: bool = False) -> dict:
         keys = ("discovered_lines", "parsed_lines", "failed_lines", "recognized_lines")
@@ -4477,6 +4575,7 @@ def run_config(args: argparse.Namespace) -> int:
                             spool_root,
                             host_id,
                             validation_proofs=validation_proofs,
+                            prior_manifest_snapshot=prior_snapshot,
                             **options,
                         )
                     )

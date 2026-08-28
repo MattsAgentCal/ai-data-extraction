@@ -1103,6 +1103,146 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(objects, [legacy_object])
             self.assertEqual(legacy_object.stat().st_ino, legacy_inode)
 
+    def test_supplied_prior_snapshot_is_bounded_and_revalidates_reuse_objects(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            codex = root / "codex"
+            session = (
+                codex
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-untrusted-prior.jsonl"
+            )
+            write_jsonl(
+                session,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "untrusted-prior"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "fresh clean body",
+                        },
+                    },
+                ],
+            )
+            spool = root / "spool"
+            shard = spool / "hosts" / "test-mac"
+            poisoned = {
+                "schema_version": 1,
+                "source": "codex",
+                "session_id": "untrusted-prior",
+                "installation": str(codex),
+                "messages": [
+                    {"role": "user", "content": "Bearer abcdefghijklmnop"}
+                ],
+            }
+            poisoned_payload = fleet.canonical_json(poisoned)
+            poisoned_digest = hashlib.sha256(poisoned_payload).hexdigest()
+            poisoned_object = (
+                shard / "codex" / "objects" / f"{poisoned_digest}.json"
+            )
+            poisoned_object.parent.mkdir(parents=True)
+            poisoned_object.write_bytes(poisoned_payload + b"\n")
+            supplied_index = {
+                "schema_version": 1,
+                "host_id": "test-mac",
+                "harness": "codex",
+                "conversations": [
+                    {
+                        "object_sha256": poisoned_digest,
+                        "session_id": "untrusted-prior",
+                        "source": "codex",
+                    }
+                ],
+            }
+            index_path = shard / "codex" / "index.json"
+            write_canonical_json(index_path, supplied_index)
+
+            with self.assertRaisesRegex(ValueError, "prior manifest snapshot"):
+                fleet.collect_sources(
+                    spool,
+                    "test-mac",
+                    codex_roots=[codex],
+                    prior_manifest_snapshot=(b"malformed",),
+                )
+
+            supplied_index_payload = fleet.canonical_json(supplied_index) + b"\n"
+            supplied_manifest = {
+                "schema_version": 1,
+                "host_id": "test-mac",
+                "harnesses": {
+                    "codex": {
+                        "index_sha256": hashlib.sha256(
+                            supplied_index_payload
+                        ).hexdigest(),
+                        "object_sha256": [poisoned_digest],
+                    }
+                },
+            }
+            supplied_snapshot = (
+                fleet.canonical_json(supplied_manifest) + b"\n",
+                {index_path: supplied_index_payload},
+                {"codex": supplied_index},
+            )
+            real_validate_object = fleet.validate_object_file
+            mismatched_snapshot = (
+                supplied_snapshot[0],
+                supplied_snapshot[1],
+                {
+                    "codex": {
+                        **supplied_index,
+                        "conversations": [],
+                    }
+                },
+            )
+            with mock.patch.object(
+                fleet,
+                "validate_object_file",
+                wraps=real_validate_object,
+            ) as validate_mismatch, self.assertRaisesRegex(
+                ValueError, "prior manifest snapshot"
+            ):
+                fleet.collect_sources(
+                    spool,
+                    "test-mac",
+                    codex_roots=[codex],
+                    prior_manifest_snapshot=mismatched_snapshot,
+                )
+            validate_mismatch.assert_not_called()
+
+            with mock.patch.object(
+                fleet,
+                "validate_object_file",
+                wraps=real_validate_object,
+            ) as validate_object:
+                result = fleet.collect_sources(
+                    spool,
+                    "test-mac",
+                    codex_roots=[codex],
+                    prior_manifest_snapshot=supplied_snapshot,
+                )
+
+            current_index = json.loads(index_path.read_text())
+            self.assertEqual(result["codex"]["quality"]["processed_files"], 1)
+            self.assertEqual(len(current_index["conversations"]), 1)
+            self.assertNotEqual(
+                current_index["conversations"][0]["object_sha256"],
+                poisoned_digest,
+            )
+            self.assertTrue(
+                any(
+                    Path(call.args[0]) == poisoned_object
+                    for call in validate_object.call_args_list
+                )
+            )
+            self.assertTrue(poisoned_object.is_file())
+
     def test_incremental_state_detects_same_size_rewrite_with_restored_mtime(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -5149,6 +5289,228 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                     ),
                 ),
                 before,
+            )
+            fleet.validated_shard_files(shard, "test-mac")
+
+    def test_run_reuses_pretransaction_codex_snapshot_after_claude_merge(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            claude_session = (
+                claude_root / "projects" / "sample" / "session.jsonl"
+            )
+            write_jsonl(
+                claude_session,
+                [{"type": "user", "message": {"content": "initial Claude"}}],
+            )
+            codex_root = root / "codex"
+            codex_session = (
+                codex_root
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-pretransaction-reuse.jsonl"
+            )
+            write_jsonl(
+                codex_session,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "pretransaction-reuse"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "initial Codex",
+                        },
+                    },
+                ],
+            )
+            spool = root / "spool"
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(spool),
+                        "drive_root": None,
+                        "sources": {
+                            "claude_roots": [str(claude_root)],
+                            "codex_roots": [str(codex_root)],
+                        },
+                    }
+                )
+            )
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            shard = spool / "hosts" / "test-mac"
+            manifest_path = shard / "publish-manifest.json"
+            codex_index_path = shard / "codex" / "index.json"
+            original_codex_index = json.loads(codex_index_path.read_text())
+            original_codex_digest = original_codex_index["conversations"][0][
+                "object_sha256"
+            ]
+            original_codex_object = (
+                shard / "codex" / "objects" / f"{original_codex_digest}.json"
+            )
+            poisoned_codex = {
+                "schema_version": 1,
+                "source": "codex",
+                "session_id": "pretransaction-reuse",
+                "installation": str(codex_root),
+                "messages": [
+                    {"role": "user", "content": "Bearer abcdefghijklmnop"}
+                ],
+            }
+            poisoned_payload = fleet.canonical_json(poisoned_codex)
+            poisoned_digest = hashlib.sha256(poisoned_payload).hexdigest()
+            poisoned_object = (
+                shard / "codex" / "objects" / f"{poisoned_digest}.json"
+            )
+            poisoned_object.write_bytes(poisoned_payload + b"\n")
+            legacy_codex_index = {
+                "schema_version": 1,
+                "host_id": "test-mac",
+                "harness": "codex",
+                "conversations": [
+                    {
+                        "object_sha256": poisoned_digest,
+                        "session_id": "pretransaction-reuse",
+                        "source": "codex",
+                    }
+                ],
+            }
+            write_canonical_json(codex_index_path, legacy_codex_index)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["harnesses"]["codex"] = {
+                "index_sha256": fleet.file_sha256(codex_index_path),
+                "object_sha256": [poisoned_digest],
+            }
+            write_canonical_json(manifest_path, manifest)
+            original_codex_object.unlink()
+            prior_manifest = manifest_path.read_bytes()
+
+            with claude_session.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {"content": "changed Claude"},
+                        }
+                    )
+                    + "\n"
+                )
+            with codex_session.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "agent_message",
+                                "message": "changed Codex",
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+
+            merge_observations = []
+            manifest_observations = []
+            real_load_snapshot = fleet.load_healthy_manifest_snapshot
+            real_merge = fleet.merge_host_shard
+            real_write_manifest = fleet.write_publish_manifest
+
+            def observe_merge(source_root, *args, **kwargs):
+                staged_harnesses = sorted(
+                    path.name
+                    for path in source_root.iterdir()
+                    if (path / "index.json").is_file()
+                )
+                result = real_merge(source_root, *args, **kwargs)
+                for harness in staged_harnesses:
+                    current_index = json.loads(
+                        (shard / harness / "index.json").read_text()
+                    )
+                    merge_observations.append(
+                        {
+                            "harness": harness,
+                            "manifest": manifest_path.read_bytes(),
+                            "poison_exists": poisoned_object.is_file(),
+                            "digests": [
+                                row["object_sha256"]
+                                for row in current_index["conversations"]
+                            ],
+                        }
+                    )
+                return result
+
+            def observe_manifest_commit(*args, **kwargs):
+                before = (
+                    manifest_path.read_bytes(),
+                    poisoned_object.is_file(),
+                )
+                result = real_write_manifest(*args, **kwargs)
+                after = (
+                    manifest_path.read_bytes(),
+                    poisoned_object.is_file(),
+                )
+                manifest_observations.append((before, after))
+                return result
+
+            with mock.patch.object(
+                fleet,
+                "load_healthy_manifest_snapshot",
+                wraps=real_load_snapshot,
+            ) as load_snapshot, mock.patch.object(
+                fleet,
+                "merge_host_shard",
+                side_effect=observe_merge,
+            ), mock.patch.object(
+                fleet,
+                "write_publish_manifest",
+                side_effect=observe_manifest_commit,
+            ), mock.patch(
+                "builtins.print"
+            ):
+                result = fleet.run_config(configured_args(config_path))
+
+            self.assertEqual(result, 0)
+            self.assertEqual(load_snapshot.call_count, 1)
+            self.assertEqual(
+                [item["harness"] for item in merge_observations],
+                ["claude", "codex"],
+            )
+            self.assertTrue(
+                all(
+                    item["manifest"] == prior_manifest
+                    and item["poison_exists"]
+                    for item in merge_observations
+                )
+            )
+            self.assertNotIn(poisoned_digest, merge_observations[-1]["digests"])
+            self.assertEqual(len(manifest_observations), 1)
+            before_manifest, after_manifest = manifest_observations[0]
+            self.assertEqual(before_manifest, (prior_manifest, True))
+            self.assertNotEqual(after_manifest[0], prior_manifest)
+            self.assertTrue(after_manifest[1])
+            self.assertFalse(poisoned_object.exists())
+            self.assertTrue(
+                any(
+                    path.name == poisoned_object.name
+                    for path in (spool / "quarantine" / "test-mac").rglob("*.json")
+                )
+            )
+            final_manifest = json.loads(manifest_path.read_text())
+            final_receipt = json.loads(
+                (shard / final_manifest["receipt"]["path"]).read_text()
+            )
+            self.assertEqual(
+                final_receipt["harnesses"]["codex"]["quality"]["processed_files"],
+                1,
             )
             fleet.validated_shard_files(shard, "test-mac")
 
