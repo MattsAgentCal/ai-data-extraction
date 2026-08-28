@@ -954,7 +954,7 @@ def defer_termination_signals_during_rollback():
     previous_mask = None
     if hasattr(signal, "pthread_sigmask"):
         previous_mask = signal.pthread_sigmask(
-            signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM}
+            signal.SIG_BLOCK, {signal.SIGHUP, signal.SIGINT, signal.SIGTERM}
         )
     try:
         yield
@@ -6439,6 +6439,7 @@ def main() -> int:
     def handle_termination(_signum: int, _frame: object) -> None:
         raise TerminationRequested
 
+    signal.signal(signal.SIGHUP, handle_termination)
     signal.signal(signal.SIGTERM, handle_termination)
     args = parser().parse_args()
     try:

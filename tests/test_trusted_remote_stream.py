@@ -332,19 +332,34 @@ class TrustedRemoteStreamTests(unittest.TestCase):
                 len(manifest["harnesses"]["claude"]["object_sha256"]), 2
             )
 
-    def test_rollback_context_blocks_and_restores_sigint_and_sigterm(self):
+    def test_rollback_context_blocks_and_restores_termination_signals(self):
         if not hasattr(signal, "pthread_sigmask"):
             self.skipTest("pthread signal masks are unavailable")
         previous = signal.pthread_sigmask(signal.SIG_BLOCK, set())
         try:
             with fleet.defer_termination_signals_during_rollback():
                 current = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                self.assertIn(signal.SIGHUP, current)
                 self.assertIn(signal.SIGINT, current)
                 self.assertIn(signal.SIGTERM, current)
             restored = signal.pthread_sigmask(signal.SIG_BLOCK, set())
             self.assertEqual(restored, previous)
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+    def test_main_registers_sighup_and_sigterm_handlers(self):
+        parsed = mock.Mock()
+        parsed.func.return_value = 0
+        command_parser = mock.Mock()
+        command_parser.parse_args.return_value = parsed
+        with mock.patch.object(
+            fleet, "parser", return_value=command_parser
+        ), mock.patch.object(fleet.signal, "signal") as register:
+            self.assertEqual(fleet.main(), 0)
+
+        registered = {call.args[0]: call.args[1] for call in register.call_args_list}
+        self.assertEqual(set(registered), {signal.SIGHUP, signal.SIGTERM})
+        self.assertIs(registered[signal.SIGHUP], registered[signal.SIGTERM])
 
     def test_failed_metadata_restore_keeps_new_immutable_files(self):
         with safe_temporary_directory() as tmp:
