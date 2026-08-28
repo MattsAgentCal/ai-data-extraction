@@ -7,6 +7,12 @@ import os
 import stat
 from pathlib import Path
 
+from archive_object_contract import (
+    ARCHIVE_OBJECT_SCHEMA_VERSION,
+    event_envelope,
+    validate_archive_object,
+)
+
 
 _MACOS_COMPATIBILITY_SYMLINKS = {
     Path("/etc"): Path("/private/etc"),
@@ -147,7 +153,16 @@ def iter_hermes_export(
                 except json.JSONDecodeError:
                     failed_lines += 1
                     continue
-                if not isinstance(row, dict) or not row.get("id"):
+                allowed_row_keys = {
+                    "id", "source", "cwd", "started_at", "ended_at", "title",
+                    "model", "provider", "agent_id", "session_type", "messages", "events",
+                }
+                if (
+                    not isinstance(row, dict)
+                    or type(row.get("id")) not in {str, int}
+                    or not str(row["id"])
+                    or set(row) - allowed_row_keys
+                ):
                     failed_lines += 1
                     continue
                 if not isinstance(row.get("messages"), list):
@@ -165,15 +180,40 @@ def iter_hermes_export(
                 auxiliary_events = []
                 valid_messages = True
                 for message in row["messages"]:
-                    if not isinstance(message, dict):
+                    allowed_message_keys = {
+                        "id", "role", "content", "created_at", "timestamp",
+                        "is_meta", "tool_name", "name",
+                    }
+                    if (
+                        not isinstance(message, dict)
+                        or set(message) - allowed_message_keys
+                    ):
                         valid_messages = False
                         break
                     role = message.get("role")
                     content = message.get("content")
                     if role == "session_meta" and content is None:
-                        auxiliary_events.append(message)
+                        auxiliary_events.append(
+                            event_envelope(
+                                "session_meta",
+                                {
+                                    key: value
+                                    for key, value in message.items()
+                                    if key not in {"role", "timestamp"}
+                                },
+                                message.get("timestamp", message.get("created_at")),
+                            )
+                        )
                     elif role in valid_roles and isinstance(content, (str, list)):
-                        chat_messages.append(message)
+                        normalized = {"role": role, "content": content}
+                        if "id" in message:
+                            normalized["message_id"] = message["id"]
+                        timestamp = message.get("timestamp", message.get("created_at"))
+                        if "timestamp" in message or "created_at" in message:
+                            normalized["timestamp"] = timestamp
+                        if "tool_name" in message:
+                            normalized["tool_name"] = message["tool_name"]
+                        chat_messages.append(normalized)
                     else:
                         valid_messages = False
                         break
@@ -181,23 +221,43 @@ def iter_hermes_export(
                     failed_lines += 1
                     continue
                 parsed_lines += 1
-                conversation = dict(row)
-                conversation["messages"] = chat_messages
+                existing_events = row.get("events", [])
+                if not isinstance(existing_events, list) or any(
+                    not isinstance(event, dict)
+                    or not isinstance(event.get("type"), str)
+                    or not event.get("type")
+                    for event in existing_events
+                ):
+                    failed_lines += 1
+                    parsed_lines -= 1
+                    continue
+                normalized_events = [
+                    event_envelope(
+                        event["type"],
+                        {key: value for key, value in event.items() if key not in {"type", "timestamp"}},
+                        event.get("timestamp"),
+                    )
+                    for event in existing_events
+                ]
+                conversation = {
+                    "archive_schema_version": ARCHIVE_OBJECT_SCHEMA_VERSION,
+                    "messages": chat_messages,
+                    "native_source": row.get("source"),
+                    "source": "hermes",
+                    "session_id": str(row["id"]),
+                    "source_schema": "hermes-sessions-export-jsonl-v1",
+                }
+                for key in (
+                    "cwd", "started_at", "ended_at", "title", "model", "provider",
+                    "agent_id", "session_type",
+                ):
+                    if key in row:
+                        conversation[key] = row[key]
                 if auxiliary_events:
-                    existing_events = conversation.get("events")
-                    if existing_events is None:
-                        conversation["events"] = auxiliary_events
-                    elif isinstance(existing_events, list):
-                        conversation["events"] = [*existing_events, *auxiliary_events]
-                    else:
-                        failed_lines += 1
-                        parsed_lines -= 1
-                        continue
-                conversation["native_source"] = row.get("source")
-                conversation["source"] = "hermes"
-                conversation["session_id"] = row["id"]
-                conversation["source_schema"] = "hermes-sessions-export-jsonl-v1"
-                yield conversation
+                    normalized_events.extend(auxiliary_events)
+                if normalized_events:
+                    conversation["events"] = normalized_events
+                yield validate_archive_object(conversation, harness="hermes")
             _verify_parsed_source(
                 handle,
                 export_file,

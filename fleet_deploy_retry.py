@@ -36,17 +36,19 @@ RETRY_LAUNCHD_LABEL = "com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry"
 INVENTORY_HARNESSES = ("claude", "codex", "openclaw", "hermes")
 RUNTIME_FILES = (
     "fleet_chat_archive.py",
+    "archive_object_contract.py",
     "extract_claude_code.py",
     "extract_codex.py",
     "extract_openclaw.py",
     "extract_hermes.py",
 )
 REVIEWED_RUNTIME_SHA256 = {
-    "fleet_chat_archive.py": "c8952ea89ec493afd0d8ff771f10802f0279e651b81ec89b96698b63fa16d740",
-    "extract_claude_code.py": "3b6d311a208574f51813699b0885586d97cfc61c7e01a9dda6e97d09be6e9328",
-    "extract_codex.py": "50a34f07cc5abc4d19565bd855754c59fffe1165631f6c6c6cd2e6b3869d62e8",
-    "extract_openclaw.py": "a13ef9e016fa8b49a6839098377d95f16f1cd6b0f82896c9585de5e9316c2c1d",
-    "extract_hermes.py": "5d3211855af039e5caf660c2929831a9d460394866fe8b2eefcabcc8e65e372a",
+    "fleet_chat_archive.py": "281b6a8e6a083b2d472a2830b8602bb07780122980600278dcceedfcdbe44679",
+    "archive_object_contract.py": "f31e840f49fcc9f35dc8223d1d0da3a479ae6da2de7fc62fac73ef6e8521825a",
+    "extract_claude_code.py": "cc09aa37295d98572fdffcf6d8ef465d340e9154c1722f85871991aa9af8512e",
+    "extract_codex.py": "0e1254d39dd9978ad6e2da72f3198f6edae27dcb101b7342c6feee4f71b825c0",
+    "extract_openclaw.py": "6049a3832abcddb380b9a9845e4cd1ef264467358be8ad8ce000a11da3e1b84b",
+    "extract_hermes.py": "d72ede52c85696db8fd0dc16b4086c2ed3bfb8457507e364d4515463c3174c56",
 }
 DEPLOYED_FILES = (*RUNTIME_FILES, REMOTE_CONFIG_RELATIVE_PATH)
 DEPLOY_CONFIG_KEYS = {

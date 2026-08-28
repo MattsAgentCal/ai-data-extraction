@@ -12,7 +12,14 @@ from datetime import datetime
 import platform
 import os
 import errno
+import re
 import stat
+
+from archive_object_contract import (
+    ARCHIVE_OBJECT_SCHEMA_VERSION,
+    event_envelope,
+    validate_archive_object,
+)
 
 
 _MACOS_COMPATIBILITY_SYMLINKS = {
@@ -20,6 +27,12 @@ _MACOS_COMPATIBILITY_SYMLINKS = {
     Path("/tmp"): Path("/private/tmp"),
     Path("/var"): Path("/private/var"),
 }
+
+_CODEX_ROLLOUT_FILENAME_RE = re.compile(
+    r"rollout-(\d{4})-(\d{2})-(\d{2})T"
+    r"\d{2}-\d{2}-\d{2}-"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl\Z"
+)
 
 
 def _snapshot_identity(metadata):
@@ -148,6 +161,62 @@ def _publish_quality(quality_out, value):
         quality_out.update(value)
 
 
+def _identity_digest(value):
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _fallback_session_id(session_file, installation_identity=None):
+    """Return a stable opaque ID without exposing a rollout or install path."""
+    session_path = Path(os.path.abspath(os.fspath(session_file)))
+    material = {}
+    if installation_identity is not None:
+        installation_path = Path(
+            os.path.abspath(os.fspath(Path(installation_identity).expanduser()))
+        )
+        material["installation_sha256"] = _identity_digest(str(installation_path))
+        try:
+            relative_path = session_path.relative_to(installation_path)
+        except ValueError:
+            relative_path = None
+        match = _CODEX_ROLLOUT_FILENAME_RE.fullmatch(session_path.name)
+        parts = relative_path.parts if relative_path is not None else ()
+        live_rollout = (
+            match is not None
+            and len(parts) == 5
+            and parts[0] == "sessions"
+            and parts[1:4] == match.groups()
+        )
+        archived_rollout = (
+            match is not None
+            and len(parts) == 2
+            and parts[0] == "archived_sessions"
+        )
+        if live_rollout or archived_rollout:
+            # Codex preserves the globally unique rollout filename when it
+            # moves a completed transcript from sessions/ to archived_sessions/.
+            # The strict shape prevents arbitrary same-basename files from
+            # collapsing onto one logical identity.
+            material["rollout_filename_sha256"] = _identity_digest(
+                session_path.name
+            )
+            return "codex-fallback-" + _identity_digest(material)
+        rollout_path = (
+            relative_path.as_posix()
+            if relative_path is not None
+            else str(session_path)
+        )
+    else:
+        rollout_path = str(session_path)
+    material["rollout_path_sha256"] = _identity_digest(rollout_path)
+    return "codex-fallback-" + _identity_digest(material)
+
+
 def _append_message(messages, origins, message, origin):
     """Append in source order, coalescing adjacent cross-schema copies."""
     if messages and origins[-1] != origin:
@@ -238,6 +307,7 @@ def extract_codex_session(
     quality_out=None,
     expected_source_sha256=None,
     max_source_bytes=None,
+    installation_identity=None,
 ):
     """Extract conversation from a Codex rollout file with full context"""
     messages = []
@@ -322,7 +392,9 @@ def extract_codex_session(
 
                             # Add context if available
                             if 'context' in payload:
-                                msg['context'] = payload['context']
+                                msg['context'] = event_envelope(
+                                    "context", payload['context'], obj.get("timestamp")
+                                )
 
                             _append_message(messages, message_origins, msg, "event_msg")
 
@@ -345,43 +417,38 @@ def extract_codex_session(
                     elif payload_type == 'tool_use':
                         recognized_lines += 1
                         # Code execution, file edits, etc.
-                        tool_use = {
-                            'type': 'tool_use',
-                            'tool': payload.get('tool'),
-                            'input': payload.get('input'),
-                            'timestamp': obj.get('timestamp')
-                        }
+                        tool_use = event_envelope(
+                            "tool_use",
+                            {"tool": payload.get("tool"), "input": payload.get("input")},
+                            obj.get("timestamp"),
+                        )
                         tool_results.append(tool_use)
 
                     elif payload_type == 'tool_result':
                         recognized_lines += 1
                         # Results from tool execution (diffs, outputs, etc.)
-                        tool_result = {
-                            'type': 'tool_result',
-                            'tool': payload.get('tool'),
-                            'output': payload.get('output'),
-                            'timestamp': obj.get('timestamp')
-                        }
+                        tool_result = event_envelope(
+                            "tool_result",
+                            {"tool": payload.get("tool"), "output": payload.get("output")},
+                            obj.get("timestamp"),
+                        )
                         tool_results.append(tool_result)
 
                     elif payload_type == 'diff':
                         recognized_lines += 1
                         # Code diffs
-                        diff = {
-                            'type': 'diff',
-                            'file': payload.get('file'),
-                            'diff': payload.get('diff'),
-                            'timestamp': obj.get('timestamp')
-                        }
+                        diff = event_envelope(
+                            "diff",
+                            {"file": payload.get("file"), "diff": payload.get("diff")},
+                            obj.get("timestamp"),
+                        )
                         tool_results.append(diff)
                     elif payload_type in known_event_payloads:
                         recognized_lines += 1
                         tool_results.append(
-                            {
-                                "type": f"event_msg:{payload_type}",
-                                "payload": payload,
-                                "timestamp": obj.get("timestamp"),
-                            }
+                            event_envelope(
+                                f"event_msg:{payload_type}", payload, obj.get("timestamp")
+                            )
                         )
                     else:
                         failed_lines += 1
@@ -440,11 +507,9 @@ def extract_codex_session(
                             }, "response_item")
                         else:
                             tool_results.append(
-                                {
-                                    "type": "response_item:message_empty",
-                                    "payload": payload,
-                                    "timestamp": obj.get("timestamp"),
-                                }
+                                event_envelope(
+                                    "response_item:message_empty", payload, obj.get("timestamp")
+                                )
                             )
 
                     elif payload_type in {
@@ -452,33 +517,29 @@ def extract_codex_session(
                         'function_call', 'function_call_output'
                     }:
                         recognized_lines += 1
-                        tool_event = {
-                            'type': payload_type,
+                        tool_payload = {
                             'id': payload.get('id'),
                             'call_id': payload.get('call_id'),
-                            'timestamp': obj.get('timestamp')
                         }
                         for key in ('name', 'input', 'arguments', 'output', 'status'):
                             if key in payload:
-                                tool_event[key] = payload[key]
-                        tool_results.append(tool_event)
+                                tool_payload[key] = payload[key]
+                        tool_results.append(
+                            event_envelope(payload_type, tool_payload, obj.get("timestamp"))
+                        )
                     elif payload_type in {'reasoning', 'agent_message'}:
                         recognized_lines += 1
                         tool_results.append(
-                            {
-                                "type": f"response_item:{payload_type}",
-                                "payload": payload,
-                                "timestamp": obj.get("timestamp"),
-                            }
+                            event_envelope(
+                                f"response_item:{payload_type}", payload, obj.get("timestamp")
+                            )
                         )
                     elif payload_type in known_response_payloads:
                         recognized_lines += 1
                         tool_results.append(
-                            {
-                                "type": f"response_item:{payload_type}",
-                                "payload": payload,
-                                "timestamp": obj.get("timestamp"),
-                            }
+                            event_envelope(
+                                f"response_item:{payload_type}", payload, obj.get("timestamp")
+                            )
                         )
                     else:
                         failed_lines += 1
@@ -490,11 +551,7 @@ def extract_codex_session(
                 }:
                     recognized_lines += 1
                     tool_results.append(
-                        {
-                            "type": event_type,
-                            "payload": obj.get("payload"),
-                            "timestamp": obj.get("timestamp"),
-                        }
+                        event_envelope(event_type, obj.get("payload"), obj.get("timestamp"))
                     )
                 else:
                     failed_lines += 1
@@ -515,9 +572,16 @@ def extract_codex_session(
     quality["discovered_files"] = 1
     _publish_quality(quality_out, quality)
     if messages or tool_results:
+        native_session_id = session_meta.get('id')
+        session_id = (
+            native_session_id
+            if isinstance(native_session_id, str) and native_session_id
+            else _fallback_session_id(session_file, installation_identity)
+        )
         conv = {
+            'archive_schema_version': ARCHIVE_OBJECT_SCHEMA_VERSION,
             'messages': messages,
-            'session_id': session_meta.get('id'),
+            'session_id': session_id,
             'cwd': session_meta.get('cwd'),
             'source': 'codex',
             'session_file': str(session_file),
@@ -527,7 +591,7 @@ def extract_codex_session(
         if tool_results:
             conv['tool_results'] = tool_results
 
-        return conv
+        return validate_archive_object(conv, harness="codex")
 
     return None
 

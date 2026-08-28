@@ -1,9 +1,9 @@
 import argparse
 import fcntl
 import hashlib
+import io
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +22,7 @@ import extract_claude_code as claude_extractor  # noqa: E402
 import extract_codex as codex_extractor  # noqa: E402
 import extract_hermes as hermes_extractor  # noqa: E402
 import extract_openclaw as openclaw_extractor  # noqa: E402
+from tests.test_trusted_remote_stream import TrustedRemoteStreamTests  # noqa: E402
 
 TEST_RUN_ID = "20260827T000000.000000Z-deadbeef"
 
@@ -66,10 +67,13 @@ def write_archive_object(
     shard: Path, harness: str = "claude", host_id: str | None = None
 ) -> tuple[Path, bytes]:
     conversation = {
-        "schema_version": 1,
+        "archive_schema_version": 2,
         "source": "claude-code",
         "session_id": "cached-session",
         "messages": [{"role": "user", "content": "cached body"}],
+        "project_path": None,
+        "project_name": None,
+        "source_file": "/synthetic/session.jsonl",
     }
     canonical = fleet.canonical_json(conversation)
     digest = hashlib.sha256(canonical).hexdigest()
@@ -174,6 +178,101 @@ def emulate_allowlisted_rsync(command: list[str], kwargs: dict, source: Path):
 
 
 class FleetSecurityRegressionTests(unittest.TestCase):
+    def assert_trusted_stream_case(self, method_name: str) -> None:
+        """Run the trusted-stream successor for one retired rsync fixture."""
+        result = unittest.TestResult()
+        TrustedRemoteStreamTests(method_name).run(result)
+        self.assertEqual(result.testsRun, 1)
+        if result.errors or result.failures:
+            self.fail(
+                f"trusted-stream successor {method_name} failed: "
+                f"{result.errors + result.failures}"
+            )
+
+    def test_changed_session_replaces_stale_row_for_every_v2_harness(self):
+        base_conversations = {
+            "claude": {
+                "archive_schema_version": 2,
+                "source": "claude-code",
+                "session_id": "same-session",
+                "messages": [{"role": "user", "content": "first body"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/claude.jsonl",
+            },
+            "codex": {
+                "archive_schema_version": 2,
+                "source": "codex",
+                "session_id": "same-session",
+                "messages": [{"role": "user", "content": "first body"}],
+                "cwd": "/synthetic/project",
+                "session_file": "/synthetic/codex.jsonl",
+                "timestamp": None,
+                "installation": "/synthetic/codex",
+                "_archive_source_sha256": "d" * 64,
+            },
+            "openclaw": {
+                "archive_schema_version": 2,
+                "source": "openclaw",
+                "session_id": "same-session",
+                "messages": [{"role": "user", "content": "first body"}],
+                "cwd": "/synthetic/project",
+                "session_file": "/synthetic/openclaw.jsonl",
+                "timestamp": None,
+                "source_schema": "openclaw-jsonl-v3",
+            },
+            "hermes": {
+                "archive_schema_version": 2,
+                "source": "hermes",
+                "session_id": "same-session",
+                "messages": [{"role": "user", "content": "first body"}],
+                "native_source": "hermes-cli",
+                "source_schema": "hermes-sessions-export-jsonl-v1",
+            },
+        }
+        for harness, initial in base_conversations.items():
+            with self.subTest(harness=harness), safe_temporary_directory() as tmp:
+                spool = Path(tmp) / "spool"
+                fleet.archive_conversations(
+                    spool, "test-mac", harness, [dict(initial)]
+                )
+                harness_root = spool / "hosts" / "test-mac" / harness
+                first_index = json.loads((harness_root / "index.json").read_text())
+                old_digest = first_index["conversations"][0]["object_sha256"]
+
+                changed = json.loads(json.dumps(initial))
+                changed["messages"][0]["content"] = "changed body"
+                if harness == "codex":
+                    changed["_archive_source_sha256"] = "d" * 64
+                fleet.archive_conversations(
+                    spool, "test-mac", harness, [changed]
+                )
+
+                current_index = json.loads((harness_root / "index.json").read_text())
+                self.assertEqual(len(current_index["conversations"]), 1)
+                current_digest = current_index["conversations"][0]["object_sha256"]
+                self.assertNotEqual(current_digest, old_digest)
+                self.assertTrue(
+                    (harness_root / "objects" / f"{old_digest}.json").is_file()
+                )
+
+                write_healthy_receipt(harness_root.parent, harness=harness)
+                self.assertEqual(
+                    fleet.finalize_manifested_object_set(spool, "test-mac"), 1
+                )
+                self.assertEqual(
+                    {path.stem for path in (harness_root / "objects").glob("*.json")},
+                    {current_digest},
+                )
+                self.assertTrue(
+                    any(
+                        (spool / "quarantine" / "test-mac").rglob(
+                            f"{old_digest}.json"
+                        )
+                    )
+                )
+                fleet.validated_shard_files(harness_root.parent, "test-mac")
+
     def test_manifest_receipt_hash_and_json_use_one_byte_snapshot(self):
         with safe_temporary_directory() as tmp:
             shard = Path(tmp) / "hosts" / "mini"
@@ -268,9 +367,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 "claude",
                 [
                     {
+                        "archive_schema_version": 2,
                         "source": "claude-code",
                         "session_id": "unbound-newer",
                         "messages": [{"role": "user", "content": "newer"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/unbound.jsonl",
                     }
                 ],
             )
@@ -291,9 +394,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
         with safe_temporary_directory() as tmp:
             shard = Path(tmp) / "hosts" / "mini"
             archived = {
+                "archive_schema_version": 2,
                 "source": "imessage",
                 "session_id": "body-session",
                 "messages": [],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/forged.jsonl",
             }
             payload = fleet.canonical_json(archived)
             digest = hashlib.sha256(payload).hexdigest()
@@ -377,7 +484,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             }
             write_canonical_json(shard / "publish-manifest.json", manifest)
 
-            with self.assertRaisesRegex(ValueError, "provenance mismatch"):
+            with self.assertRaisesRegex(ValueError, "source/harness|provenance mismatch"):
                 fleet.validated_shard_files(shard, "mini")
 
     def test_immutable_copy_does_not_overwrite_a_racing_destination(self):
@@ -415,9 +522,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 "claude",
                 [
                     {
+                        "archive_schema_version": 2,
                         "source": "claude-code",
                         "session_id": "newer-session",
                         "messages": [{"role": "user", "content": "newer"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/newer.jsonl",
                     }
                 ],
             )
@@ -479,225 +590,66 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 len(final_manifest["harnesses"]["claude"]["object_sha256"]), 2
             )
 
-    def test_new_harness_merge_cancellation_removes_index_and_retry_recovers(self):
+    def test_healthy_changed_session_replaces_live_row_and_quarantines_last_good(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
             destination = root / "destination"
             destination_shard = destination / "hosts" / "mini"
-            shared_conversation = {
-                "source": "claude-code",
-                "session_id": "shared-claude",
-                "messages": [{"role": "user", "content": "healthy claude"}],
-            }
-            fleet.archive_conversations(
-                destination,
-                "mini",
-                "claude",
-                [shared_conversation],
+            old_object, _payload = write_archive_object(
+                destination_shard, host_id="mini"
             )
+            old_digest = old_object.stem
             write_healthy_receipt(destination_shard)
-            manifest_path = destination_shard / "publish-manifest.json"
-            old_manifest = manifest_path.read_bytes()
-            old_receipts = {
-                path.name: path.read_bytes()
-                for path in (destination_shard / "receipts").iterdir()
-            }
 
             source_parent = root / "source"
-            source_shard = source_parent / "hosts" / "mini"
             fleet.archive_conversations(
                 source_parent,
                 "mini",
                 "claude",
-                [shared_conversation],
-            )
-            fleet.archive_conversations(
-                source_parent,
-                "mini",
-                "openclaw",
                 [
                     {
-                        "source": "openclaw",
-                        "session_id": "new-openclaw",
-                        "messages": [
-                            {"role": "user", "content": "unbound immutable body"}
-                        ],
+                        "archive_schema_version": 2,
+                        "source": "claude-code",
+                        "session_id": "cached-session",
+                        "messages": [{"role": "user", "content": "changed body"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/session.jsonl",
                     }
                 ],
             )
-            source_run_id = "20260828T000000.000000Z-cafebabe"
-            source_receipt = source_shard / "receipts" / f"{source_run_id}.json"
-            source_receipt.parent.mkdir(parents=True)
-            source_receipt_value = {
-                "schema_version": 1,
-                "extractor_sha256": "a" * 64,
-                "config_sha256": "c" * 64,
-                "run_id": source_run_id,
-                "collected_at": "2026-08-28T00:00:00+00:00",
-                "host_id": "mini",
-                "collection_status": "completed",
-                "status": "completed",
-                "errors": [],
-                "harnesses": {
-                    harness: {
-                        "status": "collected",
-                        "conversations": 1,
-                        "new_objects": 1,
-                        "redactions": 0,
-                        "index_conversations": 1,
-                        "publishable": True,
-                        "quality": {
-                            "discovered_lines": 1,
-                            "parsed_lines": 1,
-                            "failed_lines": 0,
-                            "recognized_lines": 1,
-                            "discovered_files": 1,
-                            "processed_files": 1,
-                            "skipped_unchanged_files": 0,
-                            "status": "complete",
-                        },
-                    }
-                    for harness in ("claude", "openclaw")
-                },
-                "hub": {"remotes": {}},
-                "publication": {
-                    "status": "blocked_no_drive_root",
-                    "files_copied": 0,
-                },
-                "receipt_path": (
-                    f"/archive/hosts/mini/receipts/{source_run_id}.json"
-                ),
-            }
-            write_canonical_json(source_receipt, source_receipt_value)
-            fleet.write_publish_manifest(
-                source_shard,
-                source_receipt,
-                source_receipt_value,
-                "c" * 64,
-            )
-            openclaw_index = destination_shard / "openclaw" / "index.json"
-            openclaw_objects = destination_shard / "openclaw" / "objects"
-            real_copy = fleet.copy_verified_file
-
-            def terminate_after_openclaw_index(source, destination_path, *, immutable):
-                changed = real_copy(source, destination_path, immutable=immutable)
-                if source.name == "index.json" and source.parent.name == "openclaw":
-                    raise fleet.TerminationRequested
-                return changed
-
-            with mock.patch.object(
-                fleet,
-                "copy_verified_file",
-                side_effect=terminate_after_openclaw_index,
-            ), self.assertRaises(fleet.TerminationRequested):
-                fleet.merge_host_shard(source_shard, destination, "mini")
-
-            self.assertEqual(manifest_path.read_bytes(), old_manifest)
-            self.assertFalse(openclaw_index.exists())
-            self.assertTrue(any(openclaw_objects.glob("*.json")))
-            self.assertEqual(
-                {
-                    path.name: path.read_bytes()
-                    for path in (destination_shard / "receipts").iterdir()
-                },
-                old_receipts,
-            )
-            authorized_after_cancellation = set(
-                fleet.validated_shard_files(destination_shard, "mini")
-            )
-            self.assertTrue(
-                set(openclaw_objects.glob("*.json")).isdisjoint(
-                    authorized_after_cancellation
-                )
-            )
-
-            fleet.merge_host_shard(source_shard, destination, "mini")
-            final_manifest = json.loads(manifest_path.read_text())
-            self.assertEqual(set(final_manifest["harnesses"]), {"claude", "openclaw"})
-            fleet.validated_shard_files(destination_shard, "mini")
-
-    def test_first_host_merge_manifest_cancellation_leaves_only_immutable_files(self):
-        with safe_temporary_directory() as tmp:
-            root = Path(tmp)
-            source_shard = root / "source" / "hosts" / "mini"
-            source_object, source_object_payload = write_archive_object(
-                source_shard, host_id="mini"
-            )
-            source_receipt = write_healthy_receipt(source_shard)
-            destination = root / "destination"
-            destination_shard = destination / "hosts" / "mini"
-            real_copy = fleet.copy_verified_file
-
-            def terminate_after_manifest(source, destination_path, *, immutable):
-                changed = real_copy(source, destination_path, immutable=immutable)
-                if source.name == "publish-manifest.json":
-                    raise fleet.TerminationRequested
-                return changed
-
-            with mock.patch.object(
-                fleet,
-                "copy_verified_file",
-                side_effect=terminate_after_manifest,
-            ), self.assertRaises(fleet.TerminationRequested):
-                fleet.merge_host_shard(source_shard, destination, "mini")
-
-            destination_object = (
-                destination_shard
-                / "claude"
-                / "objects"
-                / source_object.name
-            )
-            destination_receipt = (
-                destination_shard / "receipts" / source_receipt.name
-            )
-            self.assertFalse((destination_shard / "claude" / "index.json").exists())
-            self.assertFalse((destination_shard / "publish-manifest.json").exists())
-            self.assertEqual(destination_object.read_bytes(), source_object_payload)
-            self.assertEqual(destination_receipt.read_bytes(), source_receipt.read_bytes())
-
-            fleet.merge_host_shard(source_shard, destination, "mini")
-            fleet.validated_shard_files(destination_shard, "mini")
-
-    def test_new_mutable_tombstone_does_not_remove_a_racing_file(self):
-        with safe_temporary_directory() as tmp:
-            root = Path(tmp)
-            source_shard = root / "source" / "hosts" / "mini"
-            source_object, _ = write_archive_object(source_shard, host_id="mini")
+            source_shard = source_parent / "hosts" / "mini"
             write_healthy_receipt(source_shard)
-            destination = root / "destination"
-            destination_index = (
-                destination / "hosts" / "mini" / "claude" / "index.json"
+            new_digest = json.loads(
+                (source_shard / "claude" / "index.json").read_text()
+            )["conversations"][0]["object_sha256"]
+
+            result = fleet.merge_host_shard(source_shard, destination, "mini")
+
+            self.assertEqual(result["quarantined_unindexed_objects"], 1)
+            live_index = json.loads(
+                (destination_shard / "claude" / "index.json").read_text()
             )
-            racing_payload = b"unrelated racing payload\n"
-            real_copy = fleet.copy_verified_file
-
-            def race_before_index_copy(source, destination_path, *, immutable):
-                if source.name == "index.json":
-                    destination_path.write_bytes(racing_payload)
-                    raise fleet.TerminationRequested
-                return real_copy(source, destination_path, immutable=immutable)
-
-            with mock.patch.object(
-                fleet,
-                "copy_verified_file",
-                side_effect=race_before_index_copy,
-            ), self.assertRaises(fleet.TerminationRequested):
-                fleet.merge_host_shard(source_shard, destination, "mini")
-
-            self.assertEqual(destination_index.read_bytes(), racing_payload)
-            self.assertTrue(
-                (
-                    destination
-                    / "hosts"
-                    / "mini"
-                    / "claude"
-                    / "objects"
-                    / source_object.name
-                ).is_file()
+            self.assertEqual(
+                [row["object_sha256"] for row in live_index["conversations"]],
+                [new_digest],
             )
             self.assertFalse(
-                (destination / "hosts" / "mini" / "publish-manifest.json").exists()
+                (
+                    destination_shard
+                    / "claude"
+                    / "objects"
+                    / f"{old_digest}.json"
+                ).exists()
             )
+            self.assertTrue(
+                any(
+                    (destination / "quarantine" / "mini").rglob(
+                        f"{old_digest}.json"
+                    )
+                )
+            )
+            fleet.validated_shard_files(destination_shard, "mini")
 
     def test_shard_index_identity_references_and_additive_merge_are_enforced(self):
         with safe_temporary_directory() as tmp:
@@ -726,9 +678,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             destination = root / "destination"
             fleet.merge_host_shard(source_shard, destination, "mini")
             newer = {
+                "archive_schema_version": 2,
                 "source": "claude-code",
                 "session_id": "newer-session",
                 "messages": [{"role": "user", "content": "newer"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/newer.jsonl",
             }
             fleet.archive_conversations(
                 destination, "mini", "claude", [newer]
@@ -746,9 +702,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             root = Path(tmp)
             destination = root / "spool"
             old_conversation = {
+                "archive_schema_version": 2,
                 "source": "claude-code",
                 "session_id": "same-session",
                 "messages": [{"role": "user", "content": "old body"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/old.jsonl",
             }
             fleet.archive_conversations(
                 destination, "test-mac", "claude", [old_conversation]
@@ -762,9 +722,13 @@ class FleetSecurityRegressionTests(unittest.TestCase):
 
             staged = root / "staged"
             new_conversation = {
+                "archive_schema_version": 2,
                 "source": "claude-code",
                 "session_id": "same-session",
                 "messages": [{"role": "user", "content": "new body"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/new.jsonl",
             }
             fleet.archive_conversations(
                 staged, "test-mac", "claude", [new_conversation]
@@ -893,6 +857,128 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(
                 second["claude"]["quality"]["skipped_unchanged_files"], 1
             )
+
+    def test_transactional_multiharness_run_validates_live_objects_once(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude = root / "claude"
+            codex = root / "codex"
+            write_jsonl(
+                claude / "projects" / "sample" / "session.jsonl",
+                [{"type": "user", "message": {"content": "hello"}}],
+            )
+            write_jsonl(
+                codex
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-warm.jsonl",
+                [
+                    {"type": "session_meta", "payload": {"id": "warm"}},
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "hello"},
+                    },
+                ],
+            )
+            spool = root / "spool"
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(spool),
+                        "drive_root": None,
+                        "sources": {
+                            "claude_roots": [str(claude)],
+                            "codex_roots": [str(codex)],
+                        },
+                    }
+                )
+            )
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            live_objects = {
+                path.resolve()
+                for path in (spool / "hosts" / "test-mac").glob(
+                    "*/objects/*.json"
+                )
+            }
+            self.assertEqual(len(live_objects), 2)
+            validations = {path: 0 for path in live_objects}
+            real_validate = fleet.validate_object_file
+
+            def record_live_validation(path):
+                resolved = path.resolve()
+                if resolved in validations:
+                    validations[resolved] += 1
+                return real_validate(path)
+
+            with (
+                mock.patch.object(
+                    fleet,
+                    "validate_object_file",
+                    side_effect=record_live_validation,
+                ),
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            self.assertEqual(set(validations.values()), {1})
+
+    def test_transaction_validation_deferral_requires_private_identity_token(self):
+        class CounterfeitToken:
+            def __eq__(self, other):
+                return True
+
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source_shard = root / "staging" / "hosts" / "test-mac"
+            write_archive_object(source_shard, host_id="test-mac")
+
+            with self.assertRaisesRegex(ValueError, "invalid merge transaction token"):
+                fleet.merge_host_shard(
+                    source_shard,
+                    root / "rejected",
+                    "test-mac",
+                    require_healthy_receipt=False,
+                    _transaction_token=CounterfeitToken(),
+                )
+            with self.assertRaisesRegex(
+                ValueError, "invalid collection transaction token"
+            ):
+                fleet.collect_sources(
+                    root / "collection-rejected",
+                    "test-mac",
+                    _transaction_token=CounterfeitToken(),
+                )
+
+            deferred = fleet.merge_host_shard(
+                source_shard,
+                root / "transactional",
+                "test-mac",
+                require_healthy_receipt=False,
+                _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+            )
+            self.assertEqual(deferred["status"], "pending_validation")
+
+            destination = root / "standalone"
+            with mock.patch.object(
+                fleet,
+                "validated_shard_files",
+                wraps=fleet.validated_shard_files,
+            ) as validate:
+                standalone = fleet.merge_host_shard(
+                    source_shard,
+                    destination,
+                    "test-mac",
+                    require_healthy_receipt=False,
+                )
+            self.assertEqual(standalone["status"], "published")
+            self.assertEqual(validate.call_count, 2)
 
     def test_tool_only_codex_session_is_archived_before_state_is_cached(self):
         with safe_temporary_directory() as tmp:
@@ -1047,7 +1133,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 archived_value["session_file"], {str(live), str(archived)}
             )
 
-    def test_codex_move_reuses_a_legacy_index_object_without_duplication(self):
+    def test_codex_move_regenerates_a_base_index_row_without_duplication(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
             codex = root / "codex"
@@ -1078,12 +1164,19 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 spool, "test-mac", "codex", [conversation]
             )
             harness_root = spool / "hosts" / "test-mac" / "codex"
-            legacy_index = json.loads((harness_root / "index.json").read_text())
-            legacy_index["conversations"][0].pop("source_sha256")
-            legacy_index["conversations"][0].pop("installation")
-            write_canonical_json(harness_root / "index.json", legacy_index)
             write_healthy_receipt(harness_root.parent, harness="codex")
-            legacy_digest = legacy_index["conversations"][0]["object_sha256"]
+            current_before = json.loads((harness_root / "index.json").read_text())
+            legacy_digest = current_before["conversations"][0]["object_sha256"]
+            base_index = json.loads(json.dumps(current_before))
+            base_index["conversations"][0].pop("source_sha256")
+            base_index["conversations"][0].pop("installation")
+            fleet.atomic_write_json(harness_root / "index.json", base_index)
+            manifest_path = harness_root.parent / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["harnesses"]["codex"]["index_sha256"] = fleet.file_sha256(
+                harness_root / "index.json"
+            )
+            fleet.atomic_write_json(manifest_path, manifest)
             legacy_object = harness_root / "objects" / f"{legacy_digest}.json"
             legacy_inode = legacy_object.stat().st_ino
             archived.parent.mkdir(parents=True)
@@ -1099,6 +1192,16 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(len(current_index["conversations"]), 1)
             self.assertEqual(
                 current_index["conversations"][0]["object_sha256"], legacy_digest
+            )
+            self.assertEqual(
+                set(current_index["conversations"][0]),
+                {
+                    "object_sha256",
+                    "session_id",
+                    "source",
+                    "source_sha256",
+                    "installation",
+                },
             )
             self.assertEqual(objects, [legacy_object])
             self.assertEqual(legacy_object.stat().st_ino, legacy_inode)
@@ -1908,14 +2011,22 @@ assert peak < 80 * 1024 * 1024, peak
         with safe_temporary_directory() as tmp:
             archive_root = Path(tmp) / "archive"
             first = {
-                "source": "test",
+                "archive_schema_version": 2,
+                "source": "claude-code",
                 "session_id": "session-a",
                 "messages": [{"role": "user", "content": "first"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/a.jsonl",
             }
             second = {
-                "source": "test",
+                "archive_schema_version": 2,
+                "source": "claude-code",
                 "session_id": "session-b",
                 "messages": [{"role": "user", "content": "second"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/b.jsonl",
             }
             fleet.archive_conversations(
                 archive_root, "test-mac", "claude", [first, second]
@@ -1939,576 +2050,43 @@ assert peak < 80 * 1024 * 1024, peak
             )
 
     def test_interrupted_remote_pull_never_leaves_a_partial_final_shard(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            write_healthy_receipt(remote_shard)
-
-            def interrupted_rsync(command, **kwargs):
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
-                if "/objects/" in kwargs.get("input", ""):
-                    raise subprocess.CalledProcessError(23, command)
-                return result
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(fleet.subprocess, "run", side_effect=interrupted_rsync):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(result["remotes"]["mini"]["status"], "unreachable")
-            self.assertFalse(
-                (spool_root / "hosts" / "mini" / "claude" / "objects").exists(),
-                "a failed pull exposed a partial remote shard",
-            )
+        self.assert_trusted_stream_case('test_interrupted_and_timeout_streams_leave_no_final_shard')
 
     def test_remote_pull_waits_for_manifest_before_copying_objects(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            calls = []
-
-            def no_manifest(command, **_kwargs):
-                calls.append(command)
-                if command[0] != "ssh":
-                    self.fail("rsync ran before the remote manifest existed")
-                return subprocess.CompletedProcess(command, 1)
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(fleet.subprocess, "run", side_effect=no_manifest):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(
-                result["remotes"]["mini"],
-                {"status": "pending_manifest", "files_copied": 0},
-            )
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0][0], "ssh")
+        self.assert_trusted_stream_case('test_pull_status_classification_is_specific')
 
     def test_remote_pull_never_stages_an_unmanifested_object(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            write_healthy_receipt(remote_shard)
-            unmanifested_body = fleet.canonical_json(
-                {
-                    "schema_version": 1,
-                    "source": "claude-code",
-                    "session_id": "must-not-cross-hosts",
-                    "messages": [{"role": "user", "content": "private body"}],
-                }
-            )
-            unmanifested_digest = hashlib.sha256(unmanifested_body).hexdigest()
-            unmanifested_relative = (
-                f"claude/objects/{unmanifested_digest}.json"
-            )
-            (remote_shard / unmanifested_relative).write_bytes(
-                unmanifested_body + b"\n"
-            )
-            requested: list[str] = []
-
-            def allowlisted_pull(command, **kwargs):
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                requested.extend(
-                    item for item in kwargs["input"].split("\0") if item
-                )
-                result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
-                self.assertFalse(
-                    (Path(command[-1].rstrip("/")) / unmanifested_relative).exists()
-                )
-                return result
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess, "run", side_effect=allowlisted_pull
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(result["remotes"]["mini"]["status"], "pulled")
-            self.assertNotIn(unmanifested_relative, requested)
-            self.assertFalse(
-                any(
-                    path.name == f"{unmanifested_digest}.json"
-                    for path in (spool_root / ".incoming").rglob("*.json")
-                )
-            )
+        self.assert_trusted_stream_case('test_unmanifested_object_is_never_emitted')
 
     def test_remote_pull_rejects_manifest_mutation_before_copying_objects(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            write_healthy_receipt(remote_shard)
-            remote_manifest = remote_shard / "publish-manifest.json"
-            changed_manifest = json.loads(remote_manifest.read_text())
-            changed_manifest["generated_at"] = "2026-08-28T12:00:00+00:00"
-            rsync_calls = 0
-            requested: list[str] = []
-
-            def mutate_after_manifest(command, **kwargs):
-                nonlocal rsync_calls
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                rsync_calls += 1
-                requested.extend(
-                    item for item in kwargs["input"].split("\0") if item
-                )
-                result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
-                if rsync_calls == 1:
-                    write_canonical_json(remote_manifest, changed_manifest)
-                return result
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess, "run", side_effect=mutate_after_manifest
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(
-                result["remotes"]["mini"]["status"],
-                "blocked_integrity_failure",
-            )
-            self.assertIn("changed during pull", result["remotes"]["mini"]["error"])
-            self.assertFalse(any("/objects/" in path for path in requested))
-            self.assertFalse((spool_root / "hosts" / "mini").exists())
+        self.assert_trusted_stream_case('test_replacement_after_preflight_is_revalidated_before_body_emission')
 
     def test_remote_pull_rejects_unauthorized_manifest_paths(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            write_healthy_receipt(remote_shard)
-            manifest_path = remote_shard / "publish-manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            manifest["receipt"]["path"] = "receipts/../claude/index.json"
-            write_canonical_json(manifest_path, manifest)
-            requested: list[str] = []
-
-            def record_allowlist(command, **kwargs):
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                requested.extend(
-                    item for item in kwargs["input"].split("\0") if item
-                )
-                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess, "run", side_effect=record_allowlist
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(
-                result["remotes"]["mini"]["status"],
-                "blocked_integrity_failure",
-            )
-            self.assertEqual(requested, ["publish-manifest.json"])
-            self.assertFalse((spool_root / "hosts" / "mini").exists())
+        self.assert_trusted_stream_case('test_receiver_rejects_malformed_traversal_duplicate_and_oversized_frames')
 
     def test_remote_pull_rejects_manifest_bound_symlinks_before_objects(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            receipt_path = write_healthy_receipt(remote_shard)
-            outside_receipts = Path(tmp) / "outside-receipts"
-            receipt_path.parent.rename(outside_receipts)
-            receipt_path.parent.symlink_to(outside_receipts, target_is_directory=True)
-            requested: list[str] = []
-
-            def nofollow_pull(command, **kwargs):
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(
-                        command,
-                        1
-                        if any(str(item).endswith("/receipts") for item in command)
-                        else 0,
-                    )
-                requested.extend(
-                    item for item in kwargs["input"].split("\0") if item
-                )
-                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess, "run", side_effect=nofollow_pull
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(
-                result["remotes"]["mini"]["status"],
-                "blocked_integrity_failure",
-            )
-            self.assertEqual(requested, ["publish-manifest.json"])
-            self.assertFalse((spool_root / "hosts" / "mini").exists())
+        self.assert_trusted_stream_case('test_symlink_parent_and_leaf_never_emit_outside_body')
 
     def test_remote_rsync_guard_rejects_symlinked_source_tree(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "remote-spool"
-            shard = spool_root / "hosts" / "mini"
-            write_archive_object(shard, host_id="mini")
-            write_healthy_receipt(shard)
-            (spool_root / ".run.lock").touch()
-            outside = Path(tmp) / "outside"
-            outside.mkdir()
-            (shard / "trap").symlink_to(outside, target_is_directory=True)
-
-            blocked = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    fleet.REMOTE_RSYNC_GUARD,
-                    str(spool_root),
-                    "mini",
-                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
-                    "--version",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(blocked.returncode, 42)
-            self.assertEqual(blocked.stdout, "")
-            self.assertEqual(blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR)
+        self.assert_trusted_stream_case('test_symlink_parent_and_leaf_never_emit_outside_body')
 
     def test_remote_rsync_guard_allows_a_regular_source_tree(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "remote-spool"
-            shard = spool_root / "hosts" / "mini"
-            write_archive_object(shard, host_id="mini")
-            write_healthy_receipt(shard)
-            (spool_root / ".run.lock").touch()
-
-            allowed = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    fleet.REMOTE_RSYNC_GUARD,
-                    str(spool_root),
-                    "mini",
-                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
-                    "--version",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(allowed.returncode, 0, allowed.stderr)
-            self.assertIn("rsync", allowed.stdout.lower())
-            self.assertNotIn(fleet.REMOTE_RSYNC_GUARD_ERROR, allowed.stderr)
+        self.assert_trusted_stream_case('test_valid_stream_round_trip')
 
     def test_remote_rsync_guard_holds_the_publisher_lock_through_rsync(self):
-        with safe_temporary_directory() as tmp:
-            root = Path(tmp)
-            spool_root = root / "remote-spool"
-            shard = spool_root / "hosts" / "mini"
-            write_archive_object(shard, host_id="mini")
-            write_healthy_receipt(shard)
-            lock_path = spool_root / ".run.lock"
-            lock_path.touch()
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            (fake_bin / "rsync").symlink_to("/bin/sleep")
-            environment = os.environ.copy()
-            environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
-
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-c",
-                    fleet.REMOTE_RSYNC_GUARD,
-                    str(spool_root),
-                    "mini",
-                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
-                    "0.3",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=environment,
-            )
-            descriptor = os.open(lock_path, os.O_RDONLY)
-            blocked = False
-            try:
-                deadline = time.monotonic() + 1
-                while time.monotonic() < deadline and process.poll() is None:
-                    try:
-                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        fcntl.flock(descriptor, fcntl.LOCK_UN)
-                    except BlockingIOError:
-                        blocked = True
-                        break
-                    time.sleep(0.01)
-                stdout, stderr = process.communicate(timeout=2)
-            finally:
-                os.close(descriptor)
-                if process.poll() is None:
-                    process.wait(timeout=2)
-
-            self.assertTrue(blocked, "remote rsync ran without the publisher lock")
-            self.assertEqual(process.returncode, 0, (stdout, stderr))
+        self.assert_trusted_stream_case('test_valid_stream_round_trip')
 
     def test_remote_pull_reports_sender_guard_rejection_as_integrity_failure(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            rsync_calls = 0
-
-            def reject_guarded_rsync(command, **_kwargs):
-                nonlocal rsync_calls
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                rsync_calls += 1
-                raise subprocess.CalledProcessError(
-                    12,
-                    command,
-                    stderr=f"{fleet.REMOTE_RSYNC_GUARD_ERROR}\n",
-                )
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess,
-                "run",
-                side_effect=reject_guarded_rsync,
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(rsync_calls, 1)
-            self.assertEqual(
-                result["remotes"]["mini"],
-                {
-                    "status": "blocked_integrity_failure",
-                    "files_copied": 0,
-                    "error": "remote shard contains a symlink or unsafe entry",
-                },
-            )
+        self.assert_trusted_stream_case('test_pull_status_classification_is_specific')
 
     def test_remote_pull_rejects_body_bearing_manifest_extensions(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            write_healthy_receipt(remote_shard)
-            manifest_path = remote_shard / "publish-manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            secret_body = "must-not-become-an-authorized-manifest-field"
-            manifest["messages"] = [{"content": secret_body}]
-            write_canonical_json(manifest_path, manifest)
-            requested: list[str] = []
-
-            def emulate_remote(command, **kwargs):
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                requested.extend(
-                    item for item in kwargs["input"].split("\0") if item
-                )
-                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess,
-                "run",
-                side_effect=emulate_remote,
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(requested, ["publish-manifest.json"])
-            self.assertEqual(
-                result["remotes"]["mini"]["status"],
-                "blocked_integrity_failure",
-            )
-            self.assertNotIn(secret_body, result["remotes"]["mini"]["error"])
+        self.assert_trusted_stream_case('test_unknown_manifest_receipt_and_index_fields_fail_before_body_emission')
 
     def test_remote_pull_rejects_private_text_in_run_metadata_before_receipts(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            receipt_path = write_healthy_receipt(remote_shard)
-            manifest_path = remote_shard / "publish-manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            receipt = json.loads(receipt_path.read_text())
-            private_body = (
-                "private transcript line with body-shaped conversation text\n" * 80
-            )[:4096]
-            secret_token = "sk-" + "A" * 32
-            manifest["run_id"] = private_body
-            manifest["generated_at"] = secret_token
-            receipt["run_id"] = private_body
-            receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
-            manifest["receipt"]["sha256"] = fleet.file_sha256(receipt_path)
-            write_canonical_json(manifest_path, manifest)
-            requested: list[str] = []
-
-            def emulate_remote(command, **kwargs):
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                requested.extend(
-                    item for item in kwargs["input"].split("\0") if item
-                )
-                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess,
-                "run",
-                side_effect=emulate_remote,
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            remote_result = result["remotes"]["mini"]
-            self.assertEqual(requested, ["publish-manifest.json"])
-            self.assertEqual(remote_result["status"], "blocked_integrity_failure")
-            self.assertNotIn(private_body[:40], remote_result["error"])
-            self.assertNotIn(secret_token, remote_result["error"])
-            self.assertFalse((spool_root / "hosts" / "mini").exists())
-            self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+        self.assert_trusted_stream_case('test_free_text_receipt_error_is_not_transferable')
 
     def test_remote_pull_rejects_duplicate_run_id_body_smuggling_before_receipts(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            write_healthy_receipt(remote_shard)
-            manifest_path = remote_shard / "publish-manifest.json"
-            canonical_manifest = manifest_path.read_bytes()
-            secret_token = "sk-" + "C" * 32
-            private_prefix = "private transcript body must never be persisted:"
-
-            def duplicate_run_id_payload(value: str) -> bytes:
-                return (
-                    b'{"run_id":'
-                    + fleet.canonical_json(value)
-                    + b","
-                    + canonical_manifest[1:]
-                )
-
-            target_bytes = 4_948
-            initial = duplicate_run_id_payload(private_prefix + secret_token)
-            self.assertLess(len(initial), target_bytes)
-            private_body = (
-                private_prefix
-                + "X" * (target_bytes - len(initial))
-                + secret_token
-            )
-            smuggled_manifest = duplicate_run_id_payload(private_body)
-            self.assertEqual(len(smuggled_manifest), target_bytes)
-            self.assertEqual(json.loads(smuggled_manifest)["run_id"], TEST_RUN_ID)
-            manifest_path.write_bytes(smuggled_manifest)
-            requested: list[str] = []
-
-            def emulate_remote(command, **kwargs):
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                requested.extend(
-                    item for item in kwargs["input"].split("\0") if item
-                )
-                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess,
-                "run",
-                side_effect=emulate_remote,
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            remote_result = result["remotes"]["mini"]
-            self.assertEqual(requested, ["publish-manifest.json"])
-            self.assertEqual(remote_result["status"], "blocked_integrity_failure")
-            self.assertEqual(
-                remote_result["error"],
-                "publish manifest is not canonical JSON",
-            )
-            self.assertNotIn(private_prefix, remote_result["error"])
-            self.assertNotIn(secret_token, remote_result["error"])
-            self.assertFalse((spool_root / "hosts" / "mini").exists())
-            self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+        self.assert_trusted_stream_case('test_unknown_manifest_receipt_and_index_fields_fail_before_body_emission')
 
     def test_manifest_rejects_nested_duplicates_and_noncanonical_raw_bytes(self):
         with safe_temporary_directory() as tmp:
@@ -2633,369 +2211,25 @@ assert peak < 80 * 1024 * 1024, peak
             )
 
     def test_remote_sender_guard_rejects_duplicate_manifest_keys_before_rsync(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "remote-spool"
-            shard = spool_root / "hosts" / "mini"
-            shard.mkdir(parents=True)
-            (spool_root / ".run.lock").touch()
-            secret_token = "sk-" + "E" * 32
-            (shard / "publish-manifest.json").write_bytes(
-                b'{"receipt":{"sha256":'
-                + fleet.canonical_json(secret_token)
-                + b',"sha256":"safe"}}\n'
-            )
-
-            blocked = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    fleet.REMOTE_RSYNC_GUARD,
-                    str(spool_root),
-                    "mini",
-                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
-                    "--version",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(blocked.returncode, 42)
-            self.assertEqual(blocked.stdout, "")
-            self.assertEqual(blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR)
-            self.assertNotIn(secret_token, blocked.stderr)
+        self.assert_trusted_stream_case('test_unknown_manifest_receipt_and_index_fields_fail_before_body_emission')
 
     def test_remote_sender_guard_rejects_boolean_schema_and_nonfinite_numbers(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "remote-spool"
-            shard = spool_root / "hosts" / "mini"
-            write_archive_object(shard, host_id="mini")
-            write_healthy_receipt(shard)
-            (spool_root / ".run.lock").touch()
-            manifest_path = shard / "publish-manifest.json"
-            valid_payload = manifest_path.read_bytes()
-            valid_manifest = json.loads(valid_payload)
-            candidates: dict[str, bytes] = {}
-            for schema_version in (True, False):
-                candidate = dict(valid_manifest)
-                candidate["schema_version"] = schema_version
-                candidates[f"schema_{str(schema_version).lower()}"] = (
-                    fleet.canonical_json(candidate) + b"\n"
-                )
-            for constant in (b"NaN", b"Infinity", b"-Infinity"):
-                for position in ("top_level", "nested", "list"):
-                    candidates[
-                        f"{constant.decode('ascii')}_{position}"
-                    ] = manifest_with_json_constant(
-                        valid_payload,
-                        constant,
-                        position,
-                    )
-
-            for name, payload in candidates.items():
-                with self.subTest(name=name):
-                    manifest_path.write_bytes(payload)
-                    blocked = subprocess.run(
-                        [
-                            sys.executable,
-                            "-c",
-                            fleet.REMOTE_RSYNC_GUARD,
-                            str(spool_root),
-                            "mini",
-                            str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
-                            "--version",
-                        ],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-
-                    self.assertEqual(blocked.returncode, 42)
-                    self.assertEqual(blocked.stdout, "")
-                    self.assertEqual(
-                        blocked.stderr.strip(),
-                        fleet.REMOTE_RSYNC_GUARD_ERROR,
-                    )
+        self.assert_trusted_stream_case('test_nonfinite_and_excessively_deep_objects_fail_before_magic')
 
     def test_remote_pull_revalidates_duplicate_free_final_manifest_sentinel(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            write_healthy_receipt(remote_shard)
-            manifest_path = remote_shard / "publish-manifest.json"
-            canonical_manifest = manifest_path.read_bytes()
-            secret_token = "sk-" + "F" * 32
-            duplicate_manifest = (
-                b'{"run_id":'
-                + fleet.canonical_json("private final body " + secret_token)
-                + b","
-                + canonical_manifest[1:]
-            )
-            rsync_calls = 0
-
-            def mutate_before_final_sentinel(command, **kwargs):
-                nonlocal rsync_calls
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                rsync_calls += 1
-                result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
-                if rsync_calls == 3:
-                    manifest_path.write_bytes(duplicate_manifest)
-                return result
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess,
-                "run",
-                side_effect=mutate_before_final_sentinel,
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            remote_result = result["remotes"]["mini"]
-            self.assertEqual(rsync_calls, 4)
-            self.assertEqual(remote_result["status"], "blocked_integrity_failure")
-            self.assertEqual(
-                remote_result["error"],
-                "publish manifest is not canonical JSON",
-            )
-            self.assertNotIn(secret_token, remote_result["error"])
-            self.assertFalse((spool_root / "hosts" / "mini").exists())
-            self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+        self.assert_trusted_stream_case('test_replacement_after_preflight_is_revalidated_before_body_emission')
 
     def test_remote_pull_rejects_boolean_schema_and_nonfinite_final_sentinel(self):
-        for invalid_kind in (
-            "schema_true",
-            "schema_false",
-            "NaN_top_level",
-            "NaN_nested",
-            "NaN_list",
-            "Infinity_top_level",
-            "Infinity_nested",
-            "Infinity_list",
-            "-Infinity_top_level",
-            "-Infinity_nested",
-            "-Infinity_list",
-        ):
-            with self.subTest(invalid_kind=invalid_kind):
-                with safe_temporary_directory() as tmp:
-                    spool_root = Path(tmp) / "spool"
-                    remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-                    write_archive_object(remote_shard, host_id="mini")
-                    write_healthy_receipt(remote_shard)
-                    manifest_path = remote_shard / "publish-manifest.json"
-                    valid_payload = manifest_path.read_bytes()
-                    if invalid_kind.startswith("schema_"):
-                        invalid_manifest = json.loads(valid_payload)
-                        invalid_manifest["schema_version"] = (
-                            invalid_kind == "schema_true"
-                        )
-                        invalid_payload = (
-                            fleet.canonical_json(invalid_manifest) + b"\n"
-                        )
-                        expected_error = "invalid publish manifest identity: mini"
-                    else:
-                        position = next(
-                            candidate
-                            for candidate in ("top_level", "nested", "list")
-                            if invalid_kind.endswith(f"_{candidate}")
-                        )
-                        constant_text = invalid_kind[: -(len(position) + 1)]
-                        invalid_payload = manifest_with_json_constant(
-                            valid_payload,
-                            constant_text.encode("ascii"),
-                            position,
-                        )
-                        expected_error = "publish manifest is not canonical JSON"
-                    rsync_calls = 0
-
-                    def mutate_before_final_sentinel(command, **kwargs):
-                        nonlocal rsync_calls
-                        if command[0] == "ssh":
-                            return subprocess.CompletedProcess(command, 0)
-                        rsync_calls += 1
-                        result = emulate_allowlisted_rsync(
-                            command,
-                            kwargs,
-                            remote_shard,
-                        )
-                        if rsync_calls == 3:
-                            manifest_path.write_bytes(invalid_payload)
-                        return result
-
-                    hub = {
-                        "remotes": [
-                            {
-                                "host_id": "mini",
-                                "ssh_host": "mini.test",
-                                "remote_spool_root": "/remote/spool",
-                            }
-                        ]
-                    }
-                    with mock.patch.object(
-                        fleet.subprocess,
-                        "run",
-                        side_effect=mutate_before_final_sentinel,
-                    ):
-                        result = fleet.pull_hub_remotes(hub, spool_root)
-
-                    remote_result = result["remotes"]["mini"]
-                    self.assertEqual(rsync_calls, 4)
-                    self.assertEqual(
-                        remote_result["status"],
-                        "blocked_integrity_failure",
-                    )
-                    self.assertEqual(remote_result["error"], expected_error)
-                    self.assertFalse((spool_root / "hosts" / "mini").exists())
-                    self.assertFalse(
-                        any((spool_root / ".incoming").rglob("*"))
-                    )
+        self.assert_trusted_stream_case('test_boolean_transport_schema_fails_before_magic_and_at_receiver')
 
     def test_remote_pull_rejects_canonical_final_manifest_sentinel_mismatch(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            write_healthy_receipt(remote_shard)
-            manifest_path = remote_shard / "publish-manifest.json"
-            changed_manifest = json.loads(manifest_path.read_bytes())
-            changed_manifest["generated_at"] = (
-                "2026-08-28T12:00:00.000000+00:00"
-            )
-            rsync_calls = 0
-
-            def mutate_before_final_sentinel(command, **kwargs):
-                nonlocal rsync_calls
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                rsync_calls += 1
-                result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
-                if rsync_calls == 3:
-                    write_canonical_json(manifest_path, changed_manifest)
-                return result
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess,
-                "run",
-                side_effect=mutate_before_final_sentinel,
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            remote_result = result["remotes"]["mini"]
-            self.assertEqual(rsync_calls, 4)
-            self.assertEqual(remote_result["status"], "blocked_integrity_failure")
-            self.assertEqual(
-                remote_result["error"],
-                "remote publish manifest changed during pull",
-            )
-            self.assertFalse((spool_root / "hosts" / "mini").exists())
-            self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+        self.assert_trusted_stream_case('test_replacement_after_preflight_is_revalidated_before_body_emission')
 
     def test_remote_manifest_transport_and_reader_enforce_the_byte_ceiling(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            write_archive_object(remote_shard, host_id="mini")
-            write_healthy_receipt(remote_shard)
-            manifest_path = remote_shard / "publish-manifest.json"
-            with manifest_path.open("ab") as handle:
-                handle.truncate(fleet.MAX_PUBLISH_MANIFEST_BYTES + 1)
-            requested: list[str] = []
-            rsync_commands: list[list[str]] = []
-
-            with self.assertRaisesRegex(ValueError, "exceeds maximum"):
-                fleet.validate_publish_manifest_metadata(remote_shard, "mini")
-
-            def emulate_remote(command, **kwargs):
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                rsync_commands.append(command)
-                requested.extend(
-                    item for item in kwargs["input"].split("\0") if item
-                )
-                self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
-                self.assertIsInstance(kwargs["stderr"], int)
-                self.assertNotEqual(kwargs["stderr"], subprocess.PIPE)
-                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess,
-                "run",
-                side_effect=emulate_remote,
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(requested, ["publish-manifest.json"])
-            self.assertEqual(len(rsync_commands), 1)
-            self.assertIn(
-                f"--max-size={fleet.MAX_PUBLISH_MANIFEST_BYTES}",
-                rsync_commands[0],
-            )
-            self.assertEqual(
-                result["remotes"]["mini"]["status"],
-                "blocked_integrity_failure",
-            )
-            self.assertFalse((spool_root / "hosts" / "mini").exists())
-            self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+        self.assert_trusted_stream_case('test_receiver_rejects_malformed_traversal_duplicate_and_oversized_frames')
 
     def test_remote_sender_guard_rejects_an_oversized_manifest_before_rsync(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "remote-spool"
-            shard = spool_root / "hosts" / "mini"
-            shard.mkdir(parents=True)
-            (spool_root / ".run.lock").touch()
-            manifest_path = shard / "publish-manifest.json"
-            manifest_path.touch()
-            with manifest_path.open("r+b") as handle:
-                handle.truncate(fleet.MAX_PUBLISH_MANIFEST_BYTES + 1)
-
-            blocked = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    fleet.REMOTE_RSYNC_GUARD,
-                    str(spool_root),
-                    "mini",
-                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
-                    "--version",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(blocked.returncode, 42)
-            self.assertEqual(blocked.stdout, "")
-            self.assertEqual(blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR)
+        self.assert_trusted_stream_case('test_receiver_rejects_malformed_traversal_duplicate_and_oversized_frames')
 
     def test_client_and_sender_reject_manifest_bound_metadata_body_smuggling(self):
         private_body = "private transcript body that metadata must never carry"
@@ -3047,28 +2281,11 @@ assert peak < 80 * 1024 * 1024, peak
                     )
                 self.assertNotIn(private_body, str(raised.exception))
 
-                (spool_root / ".run.lock").touch()
-                blocked = subprocess.run(
-                    [
-                        sys.executable,
-                        "-c",
-                        fleet.REMOTE_RSYNC_GUARD,
-                        str(spool_root),
-                        "mini",
-                        str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
-                        "--version",
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                self.assertEqual(blocked.returncode, 42)
-                self.assertEqual(blocked.stdout, "")
-                self.assertEqual(
-                    blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR
-                )
-                self.assertNotIn(private_body, blocked.stderr)
+                output = io.BytesIO()
+                with self.assertRaises(ValueError) as stream_error:
+                    fleet.stream_shard_to(output, spool_root, "mini")
+                self.assertEqual(output.getvalue(), b"")
+                self.assertNotIn(private_body, str(stream_error.exception))
 
     def test_client_and_sender_reject_free_form_receipt_error_channels(self):
         private_body = "private transcript body hidden in operational metadata"
@@ -3130,28 +2347,11 @@ assert peak < 80 * 1024 * 1024, peak
                     )
                 self.assertNotIn(private_body, str(raised.exception))
 
-                (spool_root / ".run.lock").touch()
-                blocked = subprocess.run(
-                    [
-                        sys.executable,
-                        "-c",
-                        fleet.REMOTE_RSYNC_GUARD,
-                        str(spool_root),
-                        "mini",
-                        str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
-                        "--version",
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                self.assertEqual(blocked.returncode, 42)
-                self.assertEqual(blocked.stdout, "")
-                self.assertEqual(
-                    blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR
-                )
-                self.assertNotIn(private_body, blocked.stderr)
+                output = io.BytesIO()
+                with self.assertRaises(ValueError) as stream_error:
+                    fleet.stream_shard_to(output, spool_root, "mini")
+                self.assertEqual(output.getvalue(), b"")
+                self.assertNotIn(private_body, str(stream_error.exception))
 
     def test_persisted_receipt_projection_uses_only_fixed_error_codes(self):
         private_body = "private runtime diagnostic that stays in memory only"
@@ -3268,29 +2468,37 @@ assert peak < 80 * 1024 * 1024, peak
             codex_path = root / "codex" / "index.json"
             codex_path.parent.mkdir(parents=True)
             codex_base = {**base_row, "source": "codex"}
-            for row in (
-                codex_base,
+            write_canonical_json(
+                codex_path,
                 {
-                    **codex_base,
-                    "source_sha256": "e" * 64,
-                    "installation": "/Users/example/.codex",
+                    "schema_version": 1,
+                    "host_id": "mini",
+                    "harness": "codex",
+                    "conversations": [codex_base],
                 },
-            ):
-                write_canonical_json(
-                    codex_path,
-                    {
-                        "schema_version": 1,
-                        "host_id": "mini",
-                        "harness": "codex",
-                        "conversations": [row],
-                    },
-                )
-                self.assertEqual(
-                    fleet.validate_index_metadata(codex_path, "mini", "codex")[
-                        "conversations"
-                    ][0],
-                    row,
-                )
+            )
+            with self.assertRaises(fleet.LegacyArchiveSchemaError):
+                fleet.validate_index_metadata(codex_path, "mini", "codex")
+            current_row = {
+                **codex_base,
+                "source_sha256": "e" * 64,
+                "installation": "/Users/example/.codex",
+            }
+            write_canonical_json(
+                codex_path,
+                {
+                    "schema_version": 1,
+                    "host_id": "mini",
+                    "harness": "codex",
+                    "conversations": [current_row],
+                },
+            )
+            self.assertEqual(
+                fleet.validate_index_metadata(codex_path, "mini", "codex")[
+                    "conversations"
+                ][0],
+                current_row,
+            )
 
             spool_root = root / "spool"
             shard = spool_root / "hosts" / "mini"
@@ -3349,23 +2557,9 @@ assert peak < 80 * 1024 * 1024, peak
             )
             self.assertEqual(validated, manifest)
 
-            (spool_root / ".run.lock").touch()
-            allowed = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    fleet.REMOTE_RSYNC_GUARD,
-                    str(spool_root),
-                    "mini",
-                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
-                    "--version",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            output = io.BytesIO()
+            fleet.stream_shard_to(output, spool_root, "mini")
+            self.assertTrue(output.getvalue().startswith(fleet.STREAM_MAGIC))
 
     def test_manifest_rejects_per_harness_and_total_object_count_pathologies(self):
         with safe_temporary_directory() as tmp:
@@ -3538,136 +2732,13 @@ assert peak < 80 * 1024 * 1024, peak
             )
 
     def test_remote_pull_reuses_only_a_validated_cached_shard(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            cached_shard = spool_root / "hosts" / "mini"
-            write_archive_object(cached_shard, host_id="mini")
-            write_healthy_receipt(cached_shard)
-            commands = []
-
-            def completed_pull(command, **kwargs):
-                commands.append(command)
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                return emulate_allowlisted_rsync(command, kwargs, cached_shard)
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess, "run", side_effect=completed_pull
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(result["remotes"]["mini"]["status"], "pulled")
-            rsync_commands = [
-                command for command in commands if command[0] == "rsync"
-            ]
-            self.assertEqual(len(rsync_commands), 4)
-            for rsync_command in rsync_commands:
-                self.assertEqual(rsync_command[0:2], ["rsync", "-rtz"])
-                self.assertIn("--checksum", rsync_command)
-                self.assertIn(f"--link-dest={cached_shard}", rsync_command)
-                self.assertTrue(
-                    any(
-                        item.startswith("--rsync-path=python3 -c ")
-                        for item in rsync_command
-                    )
-                )
+        self.assert_trusted_stream_case('test_valid_initial_and_cached_pull_uses_popen_and_skips_object_bytes')
 
     def test_cached_remote_pull_checksums_equal_size_equal_mtime_files(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            cached_shard = spool_root / "hosts" / "mini"
-            write_archive_object(cached_shard, host_id="mini")
-            write_healthy_receipt(cached_shard)
-            manifest_path = cached_shard / "publish-manifest.json"
-            original = manifest_path.read_bytes()
-            changed_manifest = json.loads(original)
-            changed_manifest["config_sha256"] = "d" * 64
-            changed = fleet.canonical_json(changed_manifest) + b"\n"
-            self.assertEqual(len(original), len(changed))
-            original_times = manifest_path.stat()
-            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
-            shutil.copytree(cached_shard, remote_shard)
-            remote_manifest = remote_shard / "publish-manifest.json"
-            remote_manifest.write_bytes(changed)
-            os.utime(
-                remote_manifest,
-                ns=(original_times.st_atime_ns, original_times.st_mtime_ns),
-            )
-
-            commands = []
-
-            def emulate_quick_check(command, **kwargs):
-                commands.append(command)
-                if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 0)
-                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(
-                fleet.subprocess, "run", side_effect=emulate_quick_check
-            ):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            rsync_commands = [
-                command for command in commands if command[0] == "rsync"
-            ]
-            self.assertTrue(rsync_commands)
-            self.assertIn("--checksum", rsync_commands[0])
-            self.assertEqual(
-                result["remotes"]["mini"]["status"],
-                "blocked_integrity_failure",
-            )
-            self.assertEqual(manifest_path.read_bytes(), original)
+        self.assert_trusted_stream_case('test_valid_initial_and_cached_pull_uses_popen_and_skips_object_bytes')
 
     def test_remote_pull_rejects_corrupt_cache_before_rsync(self):
-        with safe_temporary_directory() as tmp:
-            spool_root = Path(tmp) / "spool"
-            cached_shard = spool_root / "hosts" / "mini"
-            object_path, _payload = write_archive_object(
-                cached_shard, host_id="mini"
-            )
-            write_healthy_receipt(cached_shard)
-            object_path.write_bytes(b"{}\n")
-            commands = []
-
-            def record(command, **_kwargs):
-                commands.append(command)
-                return subprocess.CompletedProcess(command, 0)
-
-            hub = {
-                "remotes": [
-                    {
-                        "host_id": "mini",
-                        "ssh_host": "mini.test",
-                        "remote_spool_root": "/remote/spool",
-                    }
-                ]
-            }
-            with mock.patch.object(fleet.subprocess, "run", side_effect=record):
-                result = fleet.pull_hub_remotes(hub, spool_root)
-
-            self.assertEqual(
-                result["remotes"]["mini"]["status"],
-                "blocked_integrity_failure",
-            )
-            self.assertEqual([command[0] for command in commands], ["ssh"])
+        self.assert_trusted_stream_case('test_hinted_objects_are_still_fully_validated_before_skip')
 
     def test_remote_pull_cannot_overwrite_an_existing_immutable_object(self):
         with safe_temporary_directory() as tmp:
@@ -3888,19 +2959,36 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 ("openclaw", "openclaw"),
             )
             for harness, source in harnesses:
+                conversation = {
+                    "archive_schema_version": 2,
+                    "source": source,
+                    "session_id": f"{harness}-session",
+                    "messages": [
+                        {"role": "user", "content": f"{harness} body"}
+                    ],
+                }
+                if harness == "claude":
+                    conversation.update(
+                        {
+                            "project_path": None,
+                            "project_name": None,
+                            "source_file": "/synthetic/claude.jsonl",
+                        }
+                    )
+                else:
+                    conversation.update(
+                        {
+                            "cwd": "/synthetic",
+                            "session_file": "/synthetic/openclaw.jsonl",
+                            "timestamp": None,
+                            "source_schema": "openclaw-jsonl-v3",
+                        }
+                    )
                 fleet.archive_conversations(
                     destination_parent,
                     "test-mac",
                     harness,
-                    [
-                        {
-                            "source": source,
-                            "session_id": f"{harness}-session",
-                            "messages": [
-                                {"role": "user", "content": f"{harness} body"}
-                            ],
-                        }
-                    ],
+                    [conversation],
                 )
             real_validate = fleet.validate_object_file
             with mock.patch.object(
@@ -4039,12 +3127,15 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
         with safe_temporary_directory() as tmp:
             shard = Path(tmp) / "hosts" / "test-mac"
             conversation = {
-                "schema_version": 1,
+                "archive_schema_version": 2,
                 "source": "claude-code",
                 "session_id": "residual-session",
                 "messages": [
                     {"role": "user", "content": "Bearer abcdefghijklmnop"}
                 ],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/residual.jsonl",
             }
             digest = hashlib.sha256(fleet.canonical_json(conversation)).hexdigest()
             object_path = shard / "claude" / "objects" / f"{digest}.json"
@@ -4100,9 +3191,14 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 "openclaw",
                 [
                     {
+                        "archive_schema_version": 2,
                         "source": "openclaw",
                         "session_id": "shared-inode",
                         "messages": [{"role": "user", "content": "safe body"}],
+                        "cwd": "/synthetic",
+                        "session_file": "/synthetic/openclaw.jsonl",
+                        "timestamp": None,
+                        "source_schema": "openclaw-jsonl-v3",
                     }
                 ],
             )
@@ -4252,9 +3348,13 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 "claude",
                 [
                     {
+                        "archive_schema_version": 2,
                         "source": "claude-code",
                         "session_id": "interrupted",
                         "messages": [{"role": "user", "content": "first new body"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/interrupted.jsonl",
                     }
                 ],
             )
@@ -4290,9 +3390,13 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 "claude",
                 [
                     {
+                        "archive_schema_version": 2,
                         "source": "claude-code",
                         "session_id": "changed-retry",
                         "messages": [{"role": "user", "content": "changed body"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/retry.jsonl",
                     }
                 ],
             )
@@ -5271,36 +4375,36 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                         )
                     self.assertNotIn("after", str(raised.exception))
 
-    def test_object_growth_after_json_load_is_rejected(self):
+    def test_object_replacement_after_snapshot_does_not_change_validation(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
             conversation = {
-                "schema_version": 1,
+                "archive_schema_version": 2,
                 "source": "claude-code",
                 "session_id": "object-race",
                 "messages": [{"role": "user", "content": "safe body"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/race.jsonl",
             }
             canonical = fleet.canonical_json(conversation)
             digest = hashlib.sha256(canonical).hexdigest()
             object_path = root / f"{digest}.json"
             object_path.write_bytes(canonical + b"\n")
-            real_json_load = fleet.json.load
+            real_exact_json_loads = fleet.exact_json_loads
 
-            def grow_after_load(handle):
-                value = real_json_load(handle)
-                with object_path.open("r+b") as writer:
-                    writer.truncate(fleet.MAX_OBJECT_BYTES + 1)
-                return value
+            def replace_after_snapshot(payload, *, label):
+                object_path.unlink()
+                object_path.write_bytes(b"UNMANIFESTED-PRIVATE-BODY\n")
+                return real_exact_json_loads(payload, label=label)
 
             with mock.patch.object(
-                fleet.json,
-                "load",
-                side_effect=grow_after_load,
-            ), self.assertRaisesRegex(
-                ValueError, "object changed while parsing"
-            ) as raised:
-                fleet.validate_object_file(object_path)
-            self.assertNotIn("safe body", str(raised.exception))
+                fleet,
+                "exact_json_loads",
+                side_effect=replace_after_snapshot,
+            ):
+                validated = fleet.validate_object_file(object_path)
+            self.assertEqual(validated["session_id"], "object-race")
 
     def test_cached_remote_shard_publishes_while_remote_is_unreachable(self):
         with safe_temporary_directory() as tmp:
@@ -5335,19 +4439,44 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                                     "host_id": "mini",
                                     "ssh_host": "mini.test",
                                     "remote_spool_root": "/remote/spool",
+                                    "remote_pipeline_path": "/safe/fleet_chat_archive.py",
                                 }
                             ]
                         },
                     }
                 )
             )
-            failure = subprocess.CalledProcessError(255, ["rsync"])
+            real_popen = subprocess.Popen
+
+            def unreachable_ssh(command, **kwargs):
+                self.assertIn("stream-shard", command)
+                self.assertIn("StrictHostKeyChecking=yes", command)
+                return real_popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; sys.stdin.buffer.read(); raise SystemExit(255)",
+                    ],
+                    **kwargs,
+                )
+
             with mock.patch.object(fleet.Path, "home", return_value=fake_home), mock.patch.object(
                 fleet, "is_google_drive_path", return_value=True
             ), mock.patch.object(
-                fleet.subprocess, "run", side_effect=failure
+                fleet.subprocess, "Popen", side_effect=unreachable_ssh
             ), mock.patch("builtins.print"):
                 fleet.run_config(configured_args(config_path))
+
+            latest_receipt = max(
+                (spool_root / "hosts" / "studio" / "receipts").glob("*.json"),
+                key=lambda path: path.stat().st_mtime_ns,
+            )
+            self.assertEqual(
+                json.loads(latest_receipt.read_text())["hub"]["remotes"]["mini"][
+                    "status"
+                ],
+                "unreachable",
+            )
 
             published = (
                 drive_root
