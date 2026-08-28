@@ -32,6 +32,9 @@ class TerminationRequested(BaseException):
     """Cancellation signal that operational exception handlers must not swallow."""
 
 
+_RUN_CONFIG_TRANSACTION = object()
+
+
 HOST_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62})\Z")
 SSH_HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._@-]{0,254})\Z")
 REMOTE_SPOOL_ROOT_RE = re.compile(
@@ -857,7 +860,13 @@ def collect_sources(
     codex_roots=(),
     openclaw_roots=(),
     hermes_exports=(),
+    _transaction_token: object | None = None,
 ) -> dict:
+    if (
+        _transaction_token is not None
+        and _transaction_token is not _RUN_CONFIG_TRANSACTION
+    ):
+        raise ValueError("invalid collection transaction token")
     archive_root = validate_output_root(archive_root)
     secure_mkdir(archive_root)
     harnesses = {}
@@ -942,6 +951,7 @@ def collect_sources(
                     archive_root,
                     host_id,
                     require_healthy_receipt=False,
+                    _transaction_token=_transaction_token,
                 )
                 live_index = read_json_nofollow(
                     archive_root / "hosts" / host_id / harness / "index.json"
@@ -1964,7 +1974,14 @@ def merge_host_shard(
     host_id: str,
     *,
     require_healthy_receipt: bool = True,
+    _transaction_token: object | None = None,
 ) -> dict:
+    if (
+        _transaction_token is not None
+        and _transaction_token is not _RUN_CONFIG_TRANSACTION
+    ):
+        raise ValueError("invalid merge transaction token")
+    defer_destination_validation = _transaction_token is _RUN_CONFIG_TRANSACTION
     source_root = assert_no_symlink_components(source_root)
     destination_root = destination_parent / "hosts" / host_id
     quarantined_unindexed = (
@@ -2063,17 +2080,22 @@ def merge_host_shard(
             if changed:
                 copied += 1
             verified += 1
-        validated_shard_files(
-            destination_root,
-            host_id,
-            require_healthy_receipt=require_healthy_receipt,
-        )
+        if not defer_destination_validation:
+            validated_shard_files(
+                destination_root,
+                host_id,
+                require_healthy_receipt=require_healthy_receipt,
+            )
     except BaseException:
         for destination, payload in rollback_payloads.items():
             atomic_write_bytes(destination, payload)
         raise
     return {
-        "status": "published",
+        "status": (
+            "pending_validation"
+            if defer_destination_validation
+            else "published"
+        ),
         "files_copied": copied,
         "files_verified": verified,
         "quarantined_unindexed_objects": quarantined_unindexed,
@@ -2619,7 +2641,14 @@ def run_config(args: argparse.Namespace) -> int:
                     continue
                 try:
                     options = {source_key: path_list(sources[source_key])}
-                    harnesses.update(collect_sources(spool_root, host_id, **options))
+                    harnesses.update(
+                        collect_sources(
+                            spool_root,
+                            host_id,
+                            _transaction_token=_RUN_CONFIG_TRANSACTION,
+                            **options,
+                        )
+                    )
                 except Exception as error:  # keep other harnesses collectable
                     record_failure(harness, error)
 
@@ -2641,6 +2670,7 @@ def run_config(args: argparse.Namespace) -> int:
                                 spool_root,
                                 host_id,
                                 hermes_exports=hermes_exports,
+                                _transaction_token=_RUN_CONFIG_TRANSACTION,
                             )
                         )
                 except Exception as error:

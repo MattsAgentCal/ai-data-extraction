@@ -475,6 +475,128 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 second["claude"]["quality"]["skipped_unchanged_files"], 1
             )
 
+    def test_transactional_multiharness_run_validates_live_objects_once(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude = root / "claude"
+            codex = root / "codex"
+            write_jsonl(
+                claude / "projects" / "sample" / "session.jsonl",
+                [{"type": "user", "message": {"content": "hello"}}],
+            )
+            write_jsonl(
+                codex
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-warm.jsonl",
+                [
+                    {"type": "session_meta", "payload": {"id": "warm"}},
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "hello"},
+                    },
+                ],
+            )
+            spool = root / "spool"
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(spool),
+                        "drive_root": None,
+                        "sources": {
+                            "claude_roots": [str(claude)],
+                            "codex_roots": [str(codex)],
+                        },
+                    }
+                )
+            )
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            live_objects = {
+                path.resolve()
+                for path in (spool / "hosts" / "test-mac").glob(
+                    "*/objects/*.json"
+                )
+            }
+            self.assertEqual(len(live_objects), 2)
+            validations = {path: 0 for path in live_objects}
+            real_validate = fleet.validate_object_file
+
+            def record_live_validation(path):
+                resolved = path.resolve()
+                if resolved in validations:
+                    validations[resolved] += 1
+                return real_validate(path)
+
+            with (
+                mock.patch.object(
+                    fleet,
+                    "validate_object_file",
+                    side_effect=record_live_validation,
+                ),
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            self.assertEqual(set(validations.values()), {1})
+
+    def test_transaction_validation_deferral_requires_private_identity_token(self):
+        class CounterfeitToken:
+            def __eq__(self, other):
+                return True
+
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source_shard = root / "staging" / "hosts" / "test-mac"
+            write_archive_object(source_shard, host_id="test-mac")
+
+            with self.assertRaisesRegex(ValueError, "invalid merge transaction token"):
+                fleet.merge_host_shard(
+                    source_shard,
+                    root / "rejected",
+                    "test-mac",
+                    require_healthy_receipt=False,
+                    _transaction_token=CounterfeitToken(),
+                )
+            with self.assertRaisesRegex(
+                ValueError, "invalid collection transaction token"
+            ):
+                fleet.collect_sources(
+                    root / "collection-rejected",
+                    "test-mac",
+                    _transaction_token=CounterfeitToken(),
+                )
+
+            deferred = fleet.merge_host_shard(
+                source_shard,
+                root / "transactional",
+                "test-mac",
+                require_healthy_receipt=False,
+                _transaction_token=fleet._RUN_CONFIG_TRANSACTION,
+            )
+            self.assertEqual(deferred["status"], "pending_validation")
+
+            destination = root / "standalone"
+            with mock.patch.object(
+                fleet,
+                "validated_shard_files",
+                wraps=fleet.validated_shard_files,
+            ) as validate:
+                standalone = fleet.merge_host_shard(
+                    source_shard,
+                    destination,
+                    "test-mac",
+                    require_healthy_receipt=False,
+                )
+            self.assertEqual(standalone["status"], "published")
+            self.assertEqual(validate.call_count, 2)
+
     def test_tool_only_codex_session_is_archived_before_state_is_cached(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
