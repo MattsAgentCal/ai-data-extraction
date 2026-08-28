@@ -418,6 +418,47 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 second["claude"]["quality"]["skipped_unchanged_files"], 1
             )
 
+    def test_tool_only_codex_session_is_archived_before_state_is_cached(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            codex = root / "codex"
+            session = (
+                codex
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-tool-only.jsonl"
+            )
+            write_jsonl(
+                session,
+                [
+                    {"type": "session_meta", "payload": {"id": "tool-only"}},
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "exec_command_end",
+                            "status": "complete",
+                        },
+                    },
+                ],
+            )
+            spool = root / "spool"
+
+            first = fleet.collect_sources(
+                spool, "test-mac", codex_roots=[codex]
+            )
+            second = fleet.collect_sources(
+                spool, "test-mac", codex_roots=[codex]
+            )
+
+            self.assertEqual(first["codex"]["conversations"], 1)
+            self.assertEqual(first["codex"]["index_conversations"], 1)
+            self.assertEqual(second["codex"]["quality"]["processed_files"], 0)
+            self.assertEqual(
+                second["codex"]["quality"]["skipped_unchanged_files"], 1
+            )
+
     def test_incremental_state_detects_same_size_rewrite_with_restored_mtime(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -1015,6 +1056,211 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                     shard, "test-mac", require_healthy_receipt=False
                 )
             self.assertEqual(validate.call_count, 1)
+
+    def test_local_staging_merge_links_objects_without_duplicate_disk_blocks(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source_shard = root / "staging" / "hosts" / "test-mac"
+            source_object, payload = write_archive_object(
+                source_shard, host_id="test-mac"
+            )
+            destination_parent = root / "spool"
+
+            fleet.merge_host_shard(
+                source_shard,
+                destination_parent,
+                "test-mac",
+                require_healthy_receipt=False,
+            )
+
+            destination_object = (
+                destination_parent
+                / "hosts"
+                / "test-mac"
+                / "claude"
+                / "objects"
+                / source_object.name
+            )
+            self.assertEqual(source_object.stat().st_ino, destination_object.stat().st_ino)
+            source_object.unlink()
+            self.assertEqual(destination_object.read_bytes(), payload)
+            fleet.validated_shard_files(
+                destination_parent / "hosts" / "test-mac",
+                "test-mac",
+                require_healthy_receipt=False,
+            )
+
+    def test_local_object_link_parent_swap_cannot_escape_spool(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source_shard = root / "staging" / "hosts" / "test-mac"
+            source_object, payload = write_archive_object(
+                source_shard, host_id="test-mac"
+            )
+            destination = (
+                root
+                / "spool"
+                / "hosts"
+                / "test-mac"
+                / "claude"
+                / "objects"
+                / source_object.name
+            )
+            escaped = root / "escaped"
+            escaped.mkdir()
+            held_target = root / "held-target"
+            real_link = fleet.os.link
+
+            def swap_parent_then_link(*args, **kwargs):
+                destination.parent.rename(held_target)
+                destination.parent.symlink_to(escaped, target_is_directory=True)
+                return real_link(*args, **kwargs)
+
+            with mock.patch.object(
+                fleet.os, "link", side_effect=swap_parent_then_link
+            ):
+                self.assertTrue(
+                    fleet.link_verified_local_object(source_object, destination)
+                )
+
+            self.assertFalse((escaped / source_object.name).exists())
+            self.assertEqual((held_target / source_object.name).read_bytes(), payload)
+
+    def test_interrupted_local_link_then_changed_source_retry_quarantines_orphan(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination_parent = root / "spool"
+            destination_shard = destination_parent / "hosts" / "test-mac"
+            write_archive_object(destination_shard, host_id="test-mac")
+
+            first_source_parent = root / "first-source"
+            fleet.archive_conversations(
+                first_source_parent,
+                "test-mac",
+                "claude",
+                [
+                    {
+                        "source": "claude-code",
+                        "session_id": "interrupted",
+                        "messages": [{"role": "user", "content": "first new body"}],
+                    }
+                ],
+            )
+            with mock.patch.object(
+                fleet, "merge_index_file", side_effect=KeyboardInterrupt
+            ), self.assertRaises(KeyboardInterrupt):
+                fleet.merge_host_shard(
+                    first_source_parent / "hosts" / "test-mac",
+                    destination_parent,
+                    "test-mac",
+                    require_healthy_receipt=False,
+                )
+
+            second_source_parent = root / "second-source"
+            fleet.archive_conversations(
+                second_source_parent,
+                "test-mac",
+                "claude",
+                [
+                    {
+                        "source": "claude-code",
+                        "session_id": "changed-retry",
+                        "messages": [{"role": "user", "content": "changed body"}],
+                    }
+                ],
+            )
+            result = fleet.merge_host_shard(
+                second_source_parent / "hosts" / "test-mac",
+                destination_parent,
+                "test-mac",
+                require_healthy_receipt=False,
+            )
+
+            self.assertEqual(result["quarantined_unindexed_objects"], 1)
+            fleet.validated_shard_files(
+                destination_shard,
+                "test-mac",
+                require_healthy_receipt=False,
+            )
+            quarantine_objects = list(
+                (destination_parent / "quarantine" / "test-mac").rglob("*.json")
+            )
+            self.assertEqual(len(quarantine_objects), 1)
+
+    def test_quarantine_parent_swap_cannot_escape_owner_only_spool(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination_parent = root / "spool"
+            destination_shard = destination_parent / "hosts" / "test-mac"
+            orphan, payload = write_archive_object(
+                destination_shard, host_id="test-mac"
+            )
+            (destination_shard / "claude" / "index.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "harness": "claude",
+                        "conversations": [],
+                    }
+                )
+                + "\n"
+            )
+            escaped = root / "escaped"
+            escaped.mkdir()
+            held_target = root / "held-target"
+            real_link = fleet.os.link
+
+            def swap_parent_then_link(*args, **kwargs):
+                target_roots = list(
+                    (destination_parent / "quarantine" / "test-mac").rglob("objects")
+                )
+                self.assertEqual(len(target_roots), 1)
+                target_root = target_roots[0]
+                target_root.rename(held_target)
+                target_root.symlink_to(escaped, target_is_directory=True)
+                return real_link(*args, **kwargs)
+
+            with mock.patch.object(
+                fleet.os, "link", side_effect=swap_parent_then_link
+            ):
+                self.assertEqual(
+                    fleet.quarantine_unindexed_objects(
+                        destination_parent, "test-mac"
+                    ),
+                    1,
+                )
+
+            self.assertFalse(orphan.exists())
+            self.assertFalse((escaped / orphan.name).exists())
+            self.assertEqual((held_target / orphan.name).read_bytes(), payload)
+
+    def test_quarantine_never_moves_last_good_manifest_objects(self):
+        with safe_temporary_directory() as tmp:
+            destination_parent = Path(tmp) / "spool"
+            shard = destination_parent / "hosts" / "test-mac"
+            manifested_object, _ = write_archive_object(shard, host_id="test-mac")
+            write_healthy_receipt(shard)
+            (shard / "claude" / "index.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "harness": "claude",
+                        "conversations": [],
+                    }
+                )
+                + "\n"
+            )
+
+            moved = fleet.quarantine_unindexed_objects(
+                destination_parent, "test-mac"
+            )
+
+            self.assertEqual(moved, 0)
+            self.assertTrue(manifested_object.is_file())
+            with self.assertRaisesRegex(ValueError, "manifest snapshot mismatch"):
+                fleet.validated_shard_files(shard, "test-mac")
 
     def test_spool_preflight_happens_before_hermes_export(self):
         with safe_temporary_directory() as tmp:

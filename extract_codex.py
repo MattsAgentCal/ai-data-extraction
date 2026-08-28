@@ -190,7 +190,18 @@ def extract_codex_session(session_file, *, quality_out=None):
     recognized_lines = 0
     known_event_payloads = {
         "agent_reasoning",
+        "collab_agent_interaction_end",
+        "collab_agent_spawn_end",
+        "collab_close_end",
+        "collab_waiting_end",
         "context_compacted",
+        "dynamic_tool_call_request",
+        "dynamic_tool_call_response",
+        "entered_review_mode",
+        "error",
+        "exec_command_end",
+        "exited_review_mode",
+        "image_generation_end",
         "item_completed",
         "mcp_tool_call_end",
         "patch_apply_end",
@@ -198,10 +209,19 @@ def extract_codex_session(session_file, *, quality_out=None):
         "task_complete",
         "task_started",
         "thread_goal_updated",
+        "thread_name_updated",
+        "thread_rolled_back",
         "thread_settings_applied",
         "token_count",
         "turn_aborted",
+        "view_image_tool_call",
         "web_search_end",
+    }
+    known_response_payloads = {
+        "image_generation_call",
+        "tool_search_call",
+        "tool_search_output",
+        "web_search_call",
     }
 
     with _open_regular_jsonl(session_file) as f:
@@ -312,6 +332,7 @@ def extract_codex_session(session_file, *, quality_out=None):
                             failed_lines += 1
                             continue
                         text_parts = []
+                        content_items = []
                         invalid_content = False
                         for item in content:
                             if not isinstance(item, dict):
@@ -324,20 +345,42 @@ def extract_codex_session(session_file, *, quality_out=None):
                                 elif not isinstance(text, str):
                                     invalid_content = True
                                     break
+                            elif item.get('type') == 'input_image':
+                                image_url = item.get('image_url')
+                                detail = item.get('detail')
+                                if not isinstance(image_url, str) or (
+                                    detail is not None and not isinstance(detail, str)
+                                ):
+                                    invalid_content = True
+                                    break
+                                content_items.append(item)
                             else:
                                 invalid_content = True
                                 break
-                        if invalid_content or not text_parts:
+                        if invalid_content:
                             failed_lines += 1
                             continue
                         recognized_lines += 1
-                        if text_parts:
-                            _append_message(messages, message_origins, {
+                        if text_parts or content_items:
+                            message = {
                                 'role': role,
                                 'content': '\n'.join(text_parts),
                                 'message_id': payload.get('id'),
                                 'timestamp': obj.get('timestamp')
+                            }
+                            if content_items:
+                                message['content_items'] = content_items
+                            _append_message(messages, message_origins, {
+                                **message,
                             }, "response_item")
+                        else:
+                            tool_results.append(
+                                {
+                                    "type": "response_item:message_empty",
+                                    "payload": payload,
+                                    "timestamp": obj.get("timestamp"),
+                                }
+                            )
 
                     elif payload_type in {
                         'custom_tool_call', 'custom_tool_call_output',
@@ -355,6 +398,15 @@ def extract_codex_session(session_file, *, quality_out=None):
                                 tool_event[key] = payload[key]
                         tool_results.append(tool_event)
                     elif payload_type in {'reasoning', 'agent_message'}:
+                        recognized_lines += 1
+                        tool_results.append(
+                            {
+                                "type": f"response_item:{payload_type}",
+                                "payload": payload,
+                                "timestamp": obj.get("timestamp"),
+                            }
+                        )
+                    elif payload_type in known_response_payloads:
                         recognized_lines += 1
                         tool_results.append(
                             {
@@ -391,7 +443,7 @@ def extract_codex_session(session_file, *, quality_out=None):
     quality["recognized_lines"] = recognized_lines
     quality["discovered_files"] = 1
     _publish_quality(quality_out, quality)
-    if messages:
+    if messages or tool_results:
         conv = {
             'messages': messages,
             'session_id': session_meta.get('id'),

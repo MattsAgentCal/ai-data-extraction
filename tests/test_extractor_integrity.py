@@ -179,6 +179,121 @@ class ExtractorIntegrityTests(unittest.TestCase):
             self.assertNotIn(private_body, json.dumps(conversation))
             self.assertNotIn(private_body, json.dumps(quality))
 
+    def test_codex_preserves_current_tool_image_and_lifecycle_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "rollout-current.jsonl"
+            event_types = (
+                "exec_command_end",
+                "error",
+                "view_image_tool_call",
+                "thread_name_updated",
+                "thread_rolled_back",
+                "image_generation_end",
+                "collab_waiting_end",
+                "collab_agent_spawn_end",
+                "collab_close_end",
+                "dynamic_tool_call_request",
+                "dynamic_tool_call_response",
+                "collab_agent_interaction_end",
+                "entered_review_mode",
+                "exited_review_mode",
+            )
+            response_types = (
+                "web_search_call",
+                "tool_search_call",
+                "tool_search_output",
+                "image_generation_call",
+            )
+            rows = [
+                {
+                    "type": "event_msg",
+                    "payload": {"type": event_type, "status": "complete"},
+                }
+                for event_type in event_types
+            ]
+            rows.extend(
+                {
+                    "type": "response_item",
+                    "payload": {"type": response_type, "status": "complete"},
+                }
+                for response_type in response_types
+            )
+            rows.extend(
+                [
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "image attached"},
+                                {
+                                    "type": "input_image",
+                                    "image_url": "data:image/png;base64,AAAA",
+                                    "detail": "high",
+                                },
+                            ],
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": ""}],
+                        },
+                    },
+                ]
+            )
+            write_lines(session, [json_line(row) for row in rows])
+            quality = {}
+
+            conversation = extract_codex_session(session, quality_out=quality)
+
+            self.assertEqual(quality["status"], "complete")
+            self.assertEqual(quality["failed_lines"], 0)
+            self.assertEqual(quality["recognized_lines"], len(rows))
+            self.assertEqual(
+                conversation["messages"][0]["content_items"][0]["type"],
+                "input_image",
+            )
+            tool_types = {item["type"] for item in conversation["tool_results"]}
+            self.assertIn("event_msg:exec_command_end", tool_types)
+            self.assertIn("response_item:web_search_call", tool_types)
+            self.assertIn("response_item:message_empty", tool_types)
+
+    def test_codex_returns_tool_only_session_instead_of_silently_caching_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "rollout-tool-only.jsonl"
+            rows = [
+                {"type": "session_meta", "payload": {"id": "tool-only"}},
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": ""}],
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "exec_command_end", "status": "complete"},
+                },
+            ]
+            write_lines(session, [json_line(row) for row in rows])
+            quality = {}
+
+            conversation = extract_codex_session(session, quality_out=quality)
+
+            self.assertIsNotNone(conversation)
+            self.assertEqual(conversation["messages"], [])
+            self.assertEqual(quality["status"], "complete")
+            self.assertEqual(quality["recognized_lines"], len(rows))
+            self.assertEqual(
+                {item["type"] for item in conversation["tool_results"]},
+                {"response_item:message_empty", "event_msg:exec_command_end"},
+            )
+
     def test_openclaw_preserves_plain_text_tool_result_and_reports_partial_parse(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "openclaw.jsonl"

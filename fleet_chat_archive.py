@@ -888,6 +888,14 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def descriptor_sha256(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def validate_object_file(path: Path) -> dict:
     assert_no_symlink_components(path)
     if not OBJECT_NAME_RE.fullmatch(path.name):
@@ -1244,6 +1252,74 @@ def copy_verified_file(source: Path, destination: Path, *, immutable: bool) -> b
     return True
 
 
+def link_verified_local_object(source: Path, destination: Path) -> bool:
+    """Link a validated staging object without consuming a second copy's blocks."""
+    assert_no_symlink_components(source)
+    destination = assert_no_symlink_components(destination, include_leaf=False)
+    secure_mkdir(destination.parent)
+    _, source_directory_fd = open_directory_fd(source.parent)
+    _, target_directory_fd = open_directory_fd(destination.parent)
+    source_descriptor = -1
+    target_descriptor = -1
+    cross_device = False
+    try:
+        source_descriptor = os.open(
+            source.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=source_directory_fd,
+        )
+        source_stat = os.fstat(source_descriptor)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise ValueError(f"refusing unsafe local object: {source.name}")
+        source_digest = descriptor_sha256(source_descriptor)
+        try:
+            os.link(
+                source.name,
+                destination.name,
+                src_dir_fd=source_directory_fd,
+                dst_dir_fd=target_directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            target_descriptor = os.open(
+                destination.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=target_directory_fd,
+            )
+            if descriptor_sha256(target_descriptor) != source_digest:
+                raise ValueError(f"immutable archive collision: {destination.name}")
+            return False
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+            cross_device = True
+        if not cross_device:
+            target_descriptor = os.open(
+                destination.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=target_directory_fd,
+            )
+            target_stat = os.fstat(target_descriptor)
+            if (
+                target_stat.st_dev != source_stat.st_dev
+                or target_stat.st_ino != source_stat.st_ino
+                or descriptor_sha256(target_descriptor) != source_digest
+            ):
+                raise ValueError(f"local object link verification failed: {source.name}")
+            os.fchmod(target_descriptor, 0o600)
+            os.fsync(target_directory_fd)
+    finally:
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        if target_descriptor >= 0:
+            os.close(target_descriptor)
+        os.close(source_directory_fd)
+        os.close(target_directory_fd)
+    if cross_device:
+        return copy_verified_file(source, destination, immutable=True)
+    return True
+
+
 def merge_index_file(source: Path, destination: Path) -> bool:
     source_index = read_json_nofollow(source)
     if not destination.exists():
@@ -1270,6 +1346,127 @@ def merge_index_file(source: Path, destination: Path) -> bool:
         return False
     atomic_write_json(destination, destination_index)
     return True
+
+
+def quarantine_unindexed_objects(destination_parent: Path, host_id: str) -> int:
+    """Move local objects not named by their current index out of the live shard."""
+    destination_parent = assert_no_symlink_components(destination_parent)
+    host_id = validate_host_id(host_id)
+    host_root = destination_parent / "hosts" / host_id
+    if not host_root.exists():
+        return 0
+    assert_no_symlink_components(host_root)
+    manifest_references: dict[str, set[str]] = {}
+    manifest_path = host_root / "publish-manifest.json"
+    if manifest_path.is_file():
+        manifest = read_json_nofollow(manifest_path)
+        if (
+            manifest.get("schema_version") != 1
+            or manifest.get("host_id") != host_id
+            or not isinstance(manifest.get("harnesses"), dict)
+        ):
+            raise ValueError("invalid publish manifest identity")
+        for harness, binding in manifest["harnesses"].items():
+            object_digests = binding.get("object_sha256") if isinstance(binding, dict) else None
+            if (
+                harness not in APPROVED_HARNESSES
+                or not isinstance(object_digests, list)
+                or any(
+                    not OBJECT_NAME_RE.fullmatch(f"{digest}.json")
+                    for digest in object_digests
+                )
+            ):
+                raise ValueError("invalid publish manifest object binding")
+            manifest_references[harness] = {
+                f"{digest}.json" for digest in object_digests
+            }
+    orphans: list[tuple[str, Path]] = []
+    for harness in sorted(APPROVED_HARNESSES):
+        harness_root = host_root / harness
+        if not harness_root.exists():
+            continue
+        assert_no_symlink_components(harness_root)
+        referenced: set[str] = set(manifest_references.get(harness, set()))
+        index_path = harness_root / "index.json"
+        if index_path.is_file():
+            index = read_json_nofollow(index_path)
+            if (
+                index.get("schema_version") != 1
+                or index.get("host_id") != host_id
+                or index.get("harness") != harness
+                or not isinstance(index.get("conversations"), list)
+            ):
+                raise ValueError(f"invalid archive index identity: {index_path.name}")
+            for row in index["conversations"]:
+                digest = row.get("object_sha256") if isinstance(row, dict) else None
+                if not OBJECT_NAME_RE.fullmatch(f"{digest}.json"):
+                    raise ValueError(f"invalid archive index row: {index_path.name}")
+                referenced.add(f"{digest}.json")
+        object_root = harness_root / "objects"
+        if not object_root.exists():
+            continue
+        assert_no_symlink_components(object_root)
+        for candidate in object_root.iterdir():
+            if candidate.is_symlink() or not candidate.is_file():
+                raise ValueError(f"refusing unsafe local object: {candidate.name}")
+            if not OBJECT_NAME_RE.fullmatch(candidate.name):
+                raise ValueError(f"invalid archive object filename: {candidate.name}")
+            if candidate.name not in referenced:
+                orphans.append((harness, candidate))
+    if not orphans:
+        return 0
+    quarantine_root = (
+        destination_parent
+        / "quarantine"
+        / host_id
+        / f"unindexed-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}-{uuid.uuid4().hex[:8]}"
+    )
+    for harness, source in orphans:
+        target_root = quarantine_root / harness / "objects"
+        secure_mkdir(target_root)
+        _, source_directory_fd = open_directory_fd(source.parent)
+        _, target_directory_fd = open_directory_fd(target_root)
+        target_descriptor = -1
+        try:
+            source_stat = os.stat(
+                source.name, dir_fd=source_directory_fd, follow_symlinks=False
+            )
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise ValueError(f"refusing unsafe local object: {source.name}")
+            try:
+                os.link(
+                    source.name,
+                    source.name,
+                    src_dir_fd=source_directory_fd,
+                    dst_dir_fd=target_directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as error:
+                raise ValueError(f"quarantine object collision: {source.name}") from error
+            target_stat = os.stat(
+                source.name, dir_fd=target_directory_fd, follow_symlinks=False
+            )
+            if (
+                not stat.S_ISREG(target_stat.st_mode)
+                or target_stat.st_dev != source_stat.st_dev
+                or target_stat.st_ino != source_stat.st_ino
+            ):
+                raise ValueError(f"quarantine link verification failed: {source.name}")
+            target_descriptor = os.open(
+                source.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=target_directory_fd,
+            )
+            os.fchmod(target_descriptor, 0o600)
+            os.unlink(source.name, dir_fd=source_directory_fd)
+            os.fsync(source_directory_fd)
+            os.fsync(target_directory_fd)
+        finally:
+            if target_descriptor >= 0:
+                os.close(target_descriptor)
+            os.close(source_directory_fd)
+            os.close(target_directory_fd)
+    return len(orphans)
 
 
 def restore_indexes_to_manifest(source_root: Path, host_id: str) -> bool:
@@ -1319,10 +1516,15 @@ def merge_host_shard(
     require_healthy_receipt: bool = True,
 ) -> dict:
     source_root = assert_no_symlink_components(source_root)
+    destination_root = destination_parent / "hosts" / host_id
+    quarantined_unindexed = (
+        0
+        if require_healthy_receipt
+        else quarantine_unindexed_objects(destination_parent, host_id)
+    )
     files = validated_shard_files(
         source_root, host_id, require_healthy_receipt=require_healthy_receipt
     )
-    destination_root = destination_parent / "hosts" / host_id
     source_wins = True
     if (
         require_healthy_receipt
@@ -1404,6 +1606,8 @@ def merge_host_shard(
                     if require_healthy_receipt
                     else merge_index_file(source, destination)
                 )
+            elif immutable and not require_healthy_receipt and "objects" in relative.parts:
+                changed = link_verified_local_object(source, destination)
             else:
                 changed = copy_verified_file(source, destination, immutable=immutable)
             if changed:
@@ -1418,7 +1622,12 @@ def merge_host_shard(
         for destination, payload in rollback_payloads.items():
             atomic_write_bytes(destination, payload)
         raise
-    return {"status": "published", "files_copied": copied, "files_verified": verified}
+    return {
+        "status": "published",
+        "files_copied": copied,
+        "files_verified": verified,
+        "quarantined_unindexed_objects": quarantined_unindexed,
+    }
 
 
 def publish_host_shard(
