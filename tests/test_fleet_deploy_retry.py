@@ -28,6 +28,20 @@ def remote_helper_namespace():
     return namespace
 
 
+def launchctl_loaded(command, target):
+    return subprocess.CompletedProcess(command, 0, f"{target} = {{\n}}\n", "")
+
+
+def launchctl_missing(command, target):
+    domain, label = target.rsplit("/", 1)
+    uid = domain.rsplit("/", 1)[-1]
+    stderr = (
+        f'Bad request.\nCould not find service "{label}" '
+        f"in domain for user gui: {uid}\n"
+    )
+    return subprocess.CompletedProcess(command, 113, "", stderr)
+
+
 def inventory_response(
     *,
     claude=True,
@@ -656,11 +670,12 @@ class FleetDeployRetryTests(unittest.TestCase):
     def test_archive_activation_boots_out_before_mutation_and_print_verifies_loaded(self):
         remote = remote_helper_namespace()
         calls = []
-        returncodes = iter((0, 0, 113))
 
         def fake_launchctl(arguments):
             calls.append(arguments)
-            return subprocess.CompletedProcess(arguments, next(returncodes), "", "")
+            if arguments[0] == "print":
+                return launchctl_missing(arguments, arguments[1])
+            return subprocess.CompletedProcess(arguments, 0, "", "")
 
         remote["launchctl"] = fake_launchctl
         with mock.patch.object(remote["os"], "getuid", return_value=501):
@@ -701,7 +716,7 @@ class FleetDeployRetryTests(unittest.TestCase):
             remote["subprocess"] = types.SimpleNamespace(run=fake_run)
             remote["launchctl"] = lambda arguments: print_calls.append(
                 arguments
-            ) or subprocess.CompletedProcess(arguments, 0, "", "")
+            ) or launchctl_loaded(arguments, arguments[1])
             request = {
                 "expected_remote_home": str(home),
                 "host_id": "old-macbook",
@@ -713,13 +728,76 @@ class FleetDeployRetryTests(unittest.TestCase):
             self.assertTrue(launchd["loaded"])
             self.assertEqual(print_calls, [["print", f"gui/{os.getuid()}/{label}"]])
             self.assertEqual(len(subprocess_calls), 1)
-            remote["launchctl"] = lambda arguments: subprocess.CompletedProcess(
-                arguments, 113, "", ""
+            remote["launchctl"] = lambda arguments: launchctl_missing(
+                arguments, arguments[1]
             )
             with self.assertRaisesRegex(
                 remote["ControlledFailure"], "archive_launchd_failed"
             ):
                 remote["install_archive_job"](request, repo)
+
+    def test_remote_launchctl_print_classification_is_strict_and_accepts_canonical_absence(self):
+        request = {"host_id": "old-macbook"}
+        label = "com.mattrotundo.ai-chat-archive.old-macbook"
+        target = f"gui/501/{label}"
+        cases = (
+            (
+                "unexpected_rc",
+                lambda command: subprocess.CompletedProcess(
+                    command, 70, "", "I/O error\n"
+                ),
+            ),
+            (
+                "malformed_success",
+                lambda command: subprocess.CompletedProcess(
+                    command, 0, "gui/501/wrong-label = {\n}\n", ""
+                ),
+            ),
+            (
+                "timeout",
+                lambda command: (_ for _ in ()).throw(
+                    subprocess.TimeoutExpired(command, 120)
+                ),
+            ),
+        )
+        for name, result in cases:
+            with self.subTest(name=name):
+                remote = remote_helper_namespace()
+                calls = []
+
+                def launchctl(arguments):
+                    calls.append(list(arguments))
+                    return result(arguments)
+
+                remote["launchctl"] = launchctl
+                with mock.patch.object(remote["os"], "getuid", return_value=501):
+                    with self.assertRaisesRegex(
+                        remote["ControlledFailure"], "archive_launchd_failed"
+                    ):
+                        remote["snapshot_archive_state"](request)
+                self.assertEqual(calls, [["print", target]])
+
+        remote = remote_helper_namespace()
+        calls = []
+
+        def canonically_missing(arguments):
+            calls.append(list(arguments))
+            if arguments[0] == "print":
+                return launchctl_missing(arguments, arguments[1])
+            return subprocess.CompletedProcess(
+                arguments, 0, f'"{label}" => false\n', ""
+            )
+
+        remote["launchctl"] = canonically_missing
+        with mock.patch.object(remote["os"], "getuid", return_value=501):
+            self.assertEqual(
+                remote["snapshot_archive_state"](request),
+                {"enabled": True, "loaded": False},
+            )
+        self.assertEqual(
+            calls,
+            [["print", target], ["print-disabled", "gui/501"]],
+        )
 
     def test_hard_exit_after_first_rename_is_recovered_from_persistent_journal(self):
         remote = remote_helper_namespace()
@@ -988,8 +1066,10 @@ remote['install_files'](request)
                 calls.append(list(arguments))
                 action = arguments[0]
                 if action == "print":
-                    return subprocess.CompletedProcess(
-                        arguments, 0 if state["loaded"] else 113, "", ""
+                    return (
+                        launchctl_loaded(arguments, arguments[1])
+                        if state["loaded"]
+                        else launchctl_missing(arguments, arguments[1])
                     )
                 if action == "print-disabled":
                     return subprocess.CompletedProcess(
@@ -1049,8 +1129,10 @@ remote['install_files'](request)
                     if action == "print":
                         if failure == "print" and counts[action] == 2:
                             return subprocess.CompletedProcess(command, 70, "", "proof failed")
-                        return subprocess.CompletedProcess(
-                            command, 0 if state["loaded"] else 113, "", ""
+                        return (
+                            launchctl_loaded(command, command[2])
+                            if state["loaded"]
+                            else launchctl_missing(command, command[2])
                         )
                     if action == "print-disabled":
                         if failure == "print-disabled" and counts[action] == 2:
@@ -1090,6 +1172,108 @@ remote['install_files'](request)
                 self.assertGreaterEqual(counts["print"], 3)
                 self.assertGreaterEqual(counts["print-disabled"], 2)
 
+    def test_local_initial_print_failure_precedes_all_mutation(self):
+        for operation in ("install", "disable"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                agents = root / "LaunchAgents"
+                agents.mkdir(mode=0o700)
+                plist_path = agents / f"{retry.RETRY_LAUNCHD_LABEL}.plist"
+                prior_plist = b"prior retry plist"
+                plist_path.write_bytes(prior_plist)
+                os.chmod(plist_path, 0o600)
+                logs = root / "Logs"
+                commands = []
+
+                def runner(command, **_kwargs):
+                    commands.append(command)
+                    return subprocess.CompletedProcess(
+                        command, 70, "", "I/O error\n"
+                    )
+
+                with mock.patch.object(retry.platform, "system", return_value="Darwin"):
+                    with self.assertRaisesRegex(
+                        retry.DeployError, "retry_launchd_failed"
+                    ):
+                        if operation == "install":
+                            retry.install_retry_launchd(
+                                CONFIG_PATH,
+                                self.config,
+                                launch_agents_dir=agents,
+                                logs_dir=logs,
+                                load=True,
+                                runner=runner,
+                            )
+                        else:
+                            retry.disable_retry_launchd(
+                                launch_agents_dir=agents,
+                                runner=runner,
+                            )
+                self.assertEqual([command[1] for command in commands], ["print"])
+                self.assertEqual(plist_path.read_bytes(), prior_plist)
+                self.assertFalse(logs.exists())
+
+    def test_local_launchctl_print_classification_rejects_malformed_and_accepts_absence(self):
+        domain = f"gui/{os.getuid()}"
+        label = retry.RETRY_LAUNCHD_LABEL
+        target = f"{domain}/{label}"
+        for name, result in (
+            (
+                "malformed_success",
+                subprocess.CompletedProcess(
+                    ["launchctl", "print", target],
+                    0,
+                    f"{domain}/wrong-label = {{\n}}\n",
+                    "",
+                ),
+            ),
+            (
+                "unexpected_rc",
+                subprocess.CompletedProcess(
+                    ["launchctl", "print", target], 70, "", "I/O error\n"
+                ),
+            ),
+        ):
+            with self.subTest(name=name):
+                commands = []
+
+                def runner(command, **_kwargs):
+                    commands.append(command)
+                    return result
+
+                with self.assertRaisesRegex(retry.DeployError, "retry_launchd_failed"):
+                    retry.retry_launchd_state(runner, domain, label)
+                self.assertEqual([command[1] for command in commands], ["print"])
+
+        commands = []
+
+        def missing_runner(command, **_kwargs):
+            commands.append(command)
+            if command[1] == "print":
+                return launchctl_missing(command, command[2])
+            return subprocess.CompletedProcess(
+                command, 0, f'"{label}" => false\n', ""
+            )
+
+        self.assertEqual(
+            retry.retry_launchd_state(missing_runner, domain, label),
+            {"enabled": True, "loaded": False},
+        )
+        self.assertEqual(
+            [command[1] for command in commands],
+            ["print", "print-disabled"],
+        )
+
+        timeout_commands = []
+
+        def timeout_runner(command, **_kwargs):
+            timeout_commands.append(command)
+            raise subprocess.TimeoutExpired(command, 120)
+
+        with self.assertRaisesRegex(retry.DeployError, "retry_launchd_failed"):
+            retry.retry_launchd_state(timeout_runner, domain, label)
+        self.assertEqual([command[1] for command in timeout_commands], ["print"])
+
     def test_retry_launchd_self_disable_print_proof_failure_restores_prior_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -1106,8 +1290,10 @@ remote['install_files'](request)
                 nonlocal print_disabled_count
                 action = command[1]
                 if action == "print":
-                    return subprocess.CompletedProcess(
-                        command, 0 if state["loaded"] else 113, "", ""
+                    return (
+                        launchctl_loaded(command, command[2])
+                        if state["loaded"]
+                        else launchctl_missing(command, command[2])
                     )
                 if action == "print-disabled":
                     print_disabled_count += 1
@@ -1148,8 +1334,10 @@ remote['install_files'](request)
                 commands.append(command)
                 action = command[1]
                 if action == "print":
-                    return subprocess.CompletedProcess(
-                        command, 0 if state["loaded"] else 113, "", ""
+                    return (
+                        launchctl_loaded(command, command[2])
+                        if state["loaded"]
+                        else launchctl_missing(command, command[2])
                     )
                 if action == "print-disabled":
                     stdout = (
@@ -1193,7 +1381,7 @@ remote['install_files'](request)
             def unverified_runner(command, **_kwargs):
                 action = command[1]
                 if action == "print":
-                    return subprocess.CompletedProcess(command, 113, "", "")
+                    return launchctl_missing(command, command[2])
                 if action == "print-disabled":
                     return subprocess.CompletedProcess(
                         command,
@@ -1224,8 +1412,10 @@ remote['install_files'](request)
                 disable_commands.append(command)
                 action = command[1]
                 if action == "print":
-                    return subprocess.CompletedProcess(
-                        command, 0 if disable_state["loaded"] else 113, "", ""
+                    return (
+                        launchctl_loaded(command, command[2])
+                        if disable_state["loaded"]
+                        else launchctl_missing(command, command[2])
                     )
                 if action == "print-disabled":
                     stdout = (

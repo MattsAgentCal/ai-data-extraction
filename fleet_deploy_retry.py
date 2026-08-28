@@ -1342,11 +1342,42 @@ def launchd_disabled(response, label, error_code):
     return False
 
 
+def launchctl_service_loaded(target, error_code):
+    try:
+        response = launchctl(["print", target])
+    except (OSError, subprocess.TimeoutExpired):
+        fail(error_code)
+    label = target.rsplit("/", 1)[-1]
+    uid = os.getuid()
+    loaded_header = target + " = {\n"
+    if response.returncode == 0:
+        if (
+            response.stderr != ""
+            or not isinstance(response.stdout, str)
+            or not response.stdout.startswith(loaded_header)
+            or not response.stdout.endswith("}\n")
+        ):
+            fail(error_code)
+        return True
+    missing_stderr = (
+        "Bad request.\nCould not find service \"{}\" in domain for user gui: {}\n".format(
+            label, uid
+        )
+    )
+    if (
+        response.returncode == 113
+        and response.stdout == ""
+        and response.stderr == missing_stderr
+    ):
+        return False
+    fail(error_code)
+
+
 def snapshot_archive_state(request):
     label = archive_label(request)
     domain = "gui/{}".format(os.getuid())
     target = domain + "/" + label
-    loaded = launchctl(["print", target]).returncode == 0
+    loaded = launchctl_service_loaded(target, "archive_launchd_failed")
     disabled = launchd_disabled(
         launchctl(["print-disabled", domain]),
         label,
@@ -1361,7 +1392,7 @@ def quiesce_archive(request):
     if launchctl(["disable", target]).returncode != 0:
         fail("archive_quiesce_failed")
     launchctl(["bootout", target])
-    if launchctl(["print", target]).returncode == 0:
+    if launchctl_service_loaded(target, "archive_quiesce_failed"):
         fail("archive_still_loaded")
 
 
@@ -1372,7 +1403,7 @@ def restore_archive_state(request, state):
     if launchctl(["disable", target]).returncode != 0:
         fail("rollback_failed")
     launchctl(["bootout", target])
-    if launchctl(["print", target]).returncode == 0:
+    if launchctl_service_loaded(target, "rollback_failed"):
         fail("rollback_failed")
     if state["loaded"]:
         install_archive_job(request, lexical_absolute(request["remote_repo_root"]))
@@ -1432,7 +1463,7 @@ def install_archive_job(request, repo):
     ):
         fail("archive_launchd_failed")
     target = "gui/{}/{}".format(os.getuid(), label)
-    if launchctl(["print", target]).returncode != 0:
+    if not launchctl_service_loaded(target, "archive_launchd_failed"):
         fail("archive_launchd_failed")
     return launchd
 
@@ -2502,6 +2533,24 @@ def secure_directory(path: Path) -> Path:
     return absolute
 
 
+def inspect_directory_path(path: Path) -> Path:
+    absolute = Path(os.path.abspath(os.path.expanduser(str(path))))
+    current = Path(absolute.anchor)
+    missing = False
+    for part in absolute.parts[1:]:
+        current = current / part
+        if missing:
+            continue
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            missing = True
+            continue
+        if current.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+            raise DeployError("unsafe_path")
+    return absolute
+
+
 def atomic_owner_write(path: Path, payload: bytes) -> None:
     parent = secure_directory(path.parent)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
@@ -2555,12 +2604,16 @@ def launchctl_result(
     runner: Callable[..., subprocess.CompletedProcess],
     command: list[str],
 ) -> subprocess.CompletedProcess:
-    return runner(
-        ["launchctl", *command],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        return runner(
+            ["launchctl", *command],
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise DeployError("retry_launchd_failed") from error
 
 
 def local_launchd_disabled(
@@ -2589,11 +2642,41 @@ def retry_launchd_state(
 ) -> dict:
     target = f"{domain}/{label}"
     printed = launchctl_result(runner, ["print", target])
+    loaded = local_launchctl_service_loaded(printed, target)
     disabled = local_launchd_disabled(
         launchctl_result(runner, ["print-disabled", domain]),
         label,
     )
-    return {"enabled": not disabled, "loaded": printed.returncode == 0}
+    return {"enabled": not disabled, "loaded": loaded}
+
+
+def local_launchctl_service_loaded(
+    response: subprocess.CompletedProcess,
+    target: str,
+) -> bool:
+    label = target.rsplit("/", 1)[-1]
+    uid = os.getuid()
+    loaded_header = f"{target} = {{\n"
+    if response.returncode == 0:
+        if (
+            response.stderr != ""
+            or not isinstance(response.stdout, str)
+            or not response.stdout.startswith(loaded_header)
+            or not response.stdout.endswith("}\n")
+        ):
+            raise DeployError("retry_launchd_failed")
+        return True
+    missing_stderr = (
+        f'Bad request.\nCould not find service "{label}" '
+        f"in domain for user gui: {uid}\n"
+    )
+    if (
+        response.returncode == 113
+        and response.stdout == ""
+        and response.stderr == missing_stderr
+    ):
+        return False
+    raise DeployError("retry_launchd_failed")
 
 
 def snapshot_owner_file(path: Path) -> dict:
@@ -2682,7 +2765,9 @@ def restore_retry_launchd(
 ) -> None:
     target = f"{domain}/{label}"
     launchctl_result(runner, ["bootout", target])
-    if launchctl_result(runner, ["print", target]).returncode == 0:
+    if local_launchctl_service_loaded(
+        launchctl_result(runner, ["print", target]), target
+    ):
         raise DeployError("retry_launchd_restore_failed")
     restore_owner_file(plist_path, file_snapshot)
     if launchd_snapshot["loaded"]:
@@ -2722,13 +2807,21 @@ def install_retry_launchd(
     config_path = Path(os.path.abspath(os.path.expanduser(str(config_path))))
     if config_path.is_symlink() or not config_path.is_file():
         raise DeployError("unsafe_path")
-    agents_dir = secure_directory(
+    agents_candidate = inspect_directory_path(
         launch_agents_dir or Path.home() / "Library" / "LaunchAgents"
     )
-    logs_root = secure_directory(
+    logs_candidate = inspect_directory_path(
         logs_dir or Path.home() / "Library" / "Logs" / "AIChatArchiveDeploy"
     )
     label = RETRY_LAUNCHD_LABEL
+    plist_path = agents_candidate / f"{label}.plist"
+    if load:
+        domain = f"gui/{os.getuid()}"
+        target = f"{domain}/{label}"
+        launchd_snapshot = retry_launchd_state(runner, domain, label)
+        file_snapshot = snapshot_owner_file(plist_path)
+    agents_dir = secure_directory(agents_candidate)
+    logs_root = secure_directory(logs_candidate)
     stdout_path = logs_root / "old-macbook.out.log"
     stderr_path = logs_root / "old-macbook.err.log"
     ensure_owner_log(stdout_path)
@@ -2757,10 +2850,6 @@ def install_retry_launchd(
     if not load:
         atomic_owner_write(plist_path, payload)
     else:
-        domain = f"gui/{os.getuid()}"
-        target = f"{domain}/{label}"
-        file_snapshot = snapshot_owner_file(plist_path)
-        launchd_snapshot = retry_launchd_state(runner, domain, label)
         signals_restore = block_local_termination_signals()
         try:
             atomic_owner_write(plist_path, payload)
@@ -2817,12 +2906,12 @@ def disable_retry_launchd(
     domain = f"gui/{os.getuid()}"
     label = RETRY_LAUNCHD_LABEL
     target = f"{domain}/{label}"
-    agents_dir = secure_directory(
+    agents_dir = inspect_directory_path(
         launch_agents_dir or Path.home() / "Library" / "LaunchAgents"
     )
     plist_path = agents_dir / f"{label}.plist"
-    file_snapshot = snapshot_owner_file(plist_path)
     launchd_snapshot = retry_launchd_state(runner, domain, label)
+    file_snapshot = snapshot_owner_file(plist_path)
     signals_restore = block_local_termination_signals()
     try:
         if launchctl_result(runner, ["disable", target]).returncode != 0:
