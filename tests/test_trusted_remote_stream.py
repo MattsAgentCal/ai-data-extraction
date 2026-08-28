@@ -190,6 +190,322 @@ def one_frame(path: str, payload: bytes) -> bytes:
 
 
 class TrustedRemoteStreamTests(unittest.TestCase):
+    def test_two_codex_rollouts_without_session_meta_have_stable_private_identities(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            codex_root = root / "private-codex-installation"
+            sessions = codex_root / "sessions" / "2026" / "08" / "28"
+            first_file = (
+                sessions
+                / "rollout-2026-08-28T10-00-00-019f0000-0000-7000-8000-000000000001.jsonl"
+            )
+            second_file = (
+                sessions
+                / "rollout-2026-08-28T10-00-01-019f0000-0000-7000-8000-000000000002.jsonl"
+            )
+            sessions.mkdir(parents=True)
+            first_file.write_text(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "first"},
+                    }
+                )
+                + "\n"
+            )
+            spool = root / "spool"
+
+            first_result = fleet.collect_sources(
+                spool, "mini", codex_roots=[codex_root]
+            )
+            index_path = spool / "hosts" / "mini" / "codex" / "index.json"
+            first_index = json.loads(index_path.read_text())
+            first_rows = {
+                row["session_id"]: row["object_sha256"]
+                for row in first_index["conversations"]
+            }
+            self.assertEqual(first_result["codex"]["conversations"], 1)
+            self.assertEqual(len(first_rows), 1)
+            self.assertTrue(
+                all(value.startswith("codex-fallback-") for value in first_rows)
+            )
+            first_identity = fleet.extract_codex_session(
+                first_file, installation_identity=codex_root
+            )["session_id"]
+
+            # Simulate a fresh process with no incremental cache and prove the
+            # fallback identity/object mapping is deterministic.
+            (spool / "state" / "mini" / "codex.json").unlink()
+            fleet.collect_sources(spool, "mini", codex_roots=[codex_root])
+            restarted_index = json.loads(index_path.read_text())
+            self.assertEqual(
+                {
+                    row["session_id"]: row["object_sha256"]
+                    for row in restarted_index["conversations"]
+                },
+                first_rows,
+            )
+
+            shard = spool / "hosts" / "mini"
+            receipt_path = shard / "receipts" / "healthy-fallback.json"
+            receipt = {
+                "schema_version": 1,
+                "extractor_sha256": "a" * 64,
+                "config_sha256": "c" * 64,
+                "run_id": "healthy-fallback-test",
+                "collected_at": "2026-08-28T00:00:00+00:00",
+                "host_id": "mini",
+                "collection_status": "completed",
+                "status": "completed",
+                "harnesses": {"codex": {"status": "collected"}},
+                "hub": {"remotes": {}},
+                "publication": {"status": "blocked_no_drive_root", "files_copied": 0},
+                "errors": [],
+                "receipt_path": str(receipt_path),
+            }
+            fleet.atomic_write_json(receipt_path, receipt)
+            fleet.write_publish_manifest(shard, receipt_path, receipt, "c" * 64)
+            fleet.finalize_manifested_object_set(spool, "mini")
+
+            archived_file = codex_root / "archived_sessions" / first_file.name
+            archived_file.parent.mkdir()
+            first_file.replace(archived_file)
+            fleet.collect_sources(spool, "mini", codex_roots=[codex_root])
+            moved_index = json.loads(index_path.read_text())
+            moved_rows = {
+                row["session_id"]: row["object_sha256"]
+                for row in moved_index["conversations"]
+            }
+            self.assertEqual(moved_rows, first_rows)
+            self.assertEqual(
+                fleet.extract_codex_session(
+                    archived_file, installation_identity=codex_root
+                )["session_id"],
+                first_identity,
+            )
+            self.assertEqual(
+                {
+                    path.stem
+                    for path in (shard / "codex" / "objects").glob("*.json")
+                },
+                set(first_rows.values()),
+            )
+
+            with archived_file.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "agent_message",
+                                "message": "changed",
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            fleet.collect_sources(spool, "mini", codex_roots=[codex_root])
+            changed_index = json.loads(index_path.read_text())
+            changed_rows = {
+                row["session_id"]: row["object_sha256"]
+                for row in changed_index["conversations"]
+            }
+            self.assertEqual(len(changed_rows), 1)
+            self.assertEqual(set(changed_rows), set(first_rows))
+            self.assertNotEqual(
+                changed_rows[first_identity], first_rows[first_identity]
+            )
+
+            fleet.atomic_write_json(receipt_path, receipt)
+            fleet.write_publish_manifest(shard, receipt_path, receipt, "c" * 64)
+            fleet.finalize_manifested_object_set(spool, "mini")
+            self.assertEqual(
+                {
+                    path.stem
+                    for path in (shard / "codex" / "objects").glob("*.json")
+                },
+                set(changed_rows.values()),
+            )
+
+            second_file.write_text(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "second"},
+                    }
+                )
+                + "\n"
+            )
+            fleet.collect_sources(spool, "mini", codex_roots=[codex_root])
+            final_index = json.loads(index_path.read_text())
+            final_rows = {
+                row["session_id"]: row["object_sha256"]
+                for row in final_index["conversations"]
+            }
+            second_identity = fleet.extract_codex_session(
+                second_file, installation_identity=codex_root
+            )["session_id"]
+            self.assertNotEqual(first_identity, second_identity)
+            self.assertEqual(len(final_rows), 2)
+            self.assertEqual(final_rows[first_identity], changed_rows[first_identity])
+            self.assertIn(second_identity, final_rows)
+
+            fleet.atomic_write_json(receipt_path, receipt)
+            fleet.write_publish_manifest(shard, receipt_path, receipt, "c" * 64)
+            fleet.finalize_manifested_object_set(spool, "mini")
+            self.assertEqual(
+                {
+                    path.stem
+                    for path in (shard / "codex" / "objects").glob("*.json")
+                },
+                set(final_rows.values()),
+            )
+            output = io.BytesIO()
+            fleet.stream_shard_to(output, spool, "mini")
+            metadata = b"".join(
+                payload
+                for path, payload in frames(output.getvalue())
+                if "/objects/" not in path
+            )
+            for private_value in (
+                str(codex_root),
+                str(first_file),
+                str(archived_file),
+                str(second_file),
+                *final_rows.keys(),
+            ):
+                self.assertNotIn(private_value.encode(), metadata)
+
+    def test_v2_codex_base_row_rejected_before_magic(self):
+        with safe_temporary_directory() as tmp:
+            spool = Path(tmp) / "source"
+            shard, _digest = make_codex_shard(
+                spool,
+                session_id="codex-base-row",
+                installation="/synthetic/codex",
+            )
+            index_path = shard / "codex" / "index.json"
+            index = json.loads(index_path.read_text())
+            index["conversations"][0].pop("source_sha256")
+            index["conversations"][0].pop("installation")
+            fleet.atomic_write_json(index_path, index)
+            manifest_path = shard / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["harnesses"]["codex"]["index_sha256"] = fleet.file_sha256(
+                index_path
+            )
+            fleet.atomic_write_json(manifest_path, manifest)
+
+            output = io.BytesIO()
+            with self.assertRaises((fleet.LegacyArchiveSchemaError, ValueError)):
+                fleet.stream_shard_to(output, spool, "mini")
+            self.assertEqual(output.getvalue(), b"")
+
+    def test_installation_mismatch_has_zero_output(self):
+        with safe_temporary_directory() as tmp:
+            spool = Path(tmp) / "source"
+            shard, _digest = make_codex_shard(
+                spool,
+                session_id="codex-installation-mismatch",
+                installation="/synthetic/codex-a",
+            )
+            index_path = shard / "codex" / "index.json"
+            index = json.loads(index_path.read_text())
+            index["conversations"][0]["installation"] = "/synthetic/codex-b"
+            fleet.atomic_write_json(index_path, index)
+            manifest_path = shard / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["harnesses"]["codex"]["index_sha256"] = fleet.file_sha256(
+                index_path
+            )
+            fleet.atomic_write_json(manifest_path, manifest)
+
+            output = io.BytesIO()
+            with self.assertRaisesRegex(ValueError, "installation identity mismatch"):
+                fleet.stream_shard_to(output, spool, "mini")
+            self.assertEqual(output.getvalue(), b"")
+
+    def test_reversed_index_has_zero_output(self):
+        with safe_temporary_directory() as tmp:
+            spool = Path(tmp) / "source"
+            shard, first_digest, first_payload = make_shard(
+                spool, session_id="session-a"
+            )
+            second = json.loads(first_payload)
+            second["session_id"] = "session-b"
+            second["messages"][0]["content"] = "second body"
+            canonical = fleet.canonical_json(second)
+            second_digest = hashlib.sha256(canonical).hexdigest()
+            (shard / "claude" / "objects" / f"{second_digest}.json").write_bytes(
+                canonical + b"\n"
+            )
+            index_path = shard / "claude" / "index.json"
+            index = json.loads(index_path.read_text())
+            index["conversations"].append(
+                {
+                    "object_sha256": second_digest,
+                    "session_id": "session-b",
+                    "source": "claude-code",
+                }
+            )
+            index["conversations"].sort(
+                key=lambda row: (str(row["session_id"]), row["object_sha256"])
+            )
+            index["conversations"].reverse()
+            fleet.atomic_write_json(index_path, index)
+            manifest_path = shard / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["harnesses"]["claude"] = {
+                "index_sha256": fleet.file_sha256(index_path),
+                "object_sha256": sorted([first_digest, second_digest]),
+            }
+            fleet.atomic_write_json(manifest_path, manifest)
+
+            output = io.BytesIO()
+            with self.assertRaisesRegex(ValueError, "row order"):
+                fleet.stream_shard_to(output, spool, "mini")
+            self.assertEqual(output.getvalue(), b"")
+
+    def test_context_and_tool_container_unknown_envelopes_fail_before_magic(self):
+        mutations = (
+            {
+                "context": {
+                    "type": "context",
+                    "payload": {"cwd": "/safe"},
+                    "timestamp": None,
+                    "future": "not allowed",
+                }
+            },
+            {
+                "tool_use": {
+                    "type": "future_tool",
+                    "payload": {"name": "shell"},
+                    "timestamp": None,
+                }
+            },
+            {
+                "tool_uses": [
+                    {
+                        "type": "tool_use",
+                        "payload": {"name": "shell"},
+                        "timestamp": None,
+                        "future": "not allowed",
+                    }
+                ]
+            },
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), safe_temporary_directory() as tmp:
+                spool = Path(tmp) / "source"
+                shard, digest, payload = make_shard(spool)
+                value = json.loads(payload)
+                value["messages"][0].update(mutation)
+                replace_only_object(shard, value, old_digest=digest)
+                output = io.BytesIO()
+                with self.assertRaises(ValueError):
+                    fleet.stream_shard_to(output, spool, "mini")
+                self.assertEqual(output.getvalue(), b"")
+
     def test_transport_projection_hides_native_id_and_round_trips_it(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -217,6 +533,49 @@ class TrustedRemoteStreamTests(unittest.TestCase):
             )
             index = json.loads((incoming / "claude" / "index.json").read_text())
             self.assertEqual(index["conversations"][0]["session_id"], native_id)
+
+    def test_boolean_transport_schema_fails_before_magic_and_at_receiver(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source_spool = root / "source"
+            make_shard(source_spool)
+            original_builder = fleet.build_transport_projection
+
+            def boolean_schema(index: dict, harness: str) -> dict:
+                projection = original_builder(index, harness)
+                projection["schema_version"] = True
+                return projection
+
+            output = io.BytesIO()
+            with mock.patch.object(
+                fleet, "build_transport_projection", side_effect=boolean_schema
+            ):
+                with self.assertRaises(ValueError):
+                    fleet.stream_shard_to(output, source_spool, "mini")
+            self.assertEqual(output.getvalue(), b"")
+
+            valid = io.BytesIO()
+            fleet.stream_shard_to(valid, source_spool, "mini")
+            tampered = bytearray(fleet.STREAM_MAGIC)
+            for relative, payload in frames(valid.getvalue()):
+                if relative == "transport-index/claude.json":
+                    projection = json.loads(payload)
+                    projection["schema_version"] = True
+                    payload = fleet.canonical_json(projection) + b"\n"
+                tampered.extend(one_frame(relative, payload))
+            tampered.extend(fleet.STREAM_FRAME_HEADER.pack(0, 0))
+
+            incoming = root / "incoming"
+            incoming.mkdir()
+            with self.assertRaises(fleet.LocalStreamIntegrityError):
+                fleet.receive_stream_to_directory(
+                    io.BytesIO(tampered),
+                    incoming,
+                    "mini",
+                    str(source_spool),
+                    time.monotonic() + 10,
+                )
+            self.assertFalse((incoming / "claude" / "index.json").exists())
 
     def test_codex_projection_hashes_and_binds_installation(self):
         with safe_temporary_directory() as tmp:
@@ -268,6 +627,7 @@ class TrustedRemoteStreamTests(unittest.TestCase):
     def test_legacy_v1_and_unknown_v2_shapes_fail_before_magic(self):
         mutations = (
             lambda value: {**value, "archive_schema_version": 1},
+            lambda value: {**value, "archive_schema_version": 2.0},
             lambda value: {**value, "future_metadata": "private"},
             lambda value: {
                 **value,
@@ -551,24 +911,93 @@ class TrustedRemoteStreamTests(unittest.TestCase):
                 )
             self.assertNotIn(private, output.getvalue())
 
-    def test_index_session_id_may_be_null_but_not_a_container(self):
-        base = {
-            "schema_version": 1,
-            "host_id": "mini",
-            "harness": "hermes",
-            "conversations": [
-                {
+    def test_all_v2_harnesses_reject_nullable_session_identity(self):
+        objects = {
+            "claude": {
+                "archive_schema_version": 2,
+                "source": "claude-code",
+                "session_id": None,
+                "messages": [],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/claude.jsonl",
+            },
+            "codex": {
+                "archive_schema_version": 2,
+                "source": "codex",
+                "session_id": None,
+                "messages": [],
+                "cwd": None,
+                "session_file": "/synthetic/codex.jsonl",
+                "timestamp": None,
+                "installation": "/synthetic/codex",
+            },
+            "openclaw": {
+                "archive_schema_version": 2,
+                "source": "openclaw",
+                "session_id": None,
+                "messages": [],
+                "cwd": None,
+                "session_file": "/synthetic/openclaw.jsonl",
+                "timestamp": None,
+                "source_schema": "openclaw-jsonl-v3",
+            },
+            "hermes": {
+                "archive_schema_version": 2,
+                "source": "hermes",
+                "session_id": None,
+                "messages": [],
+                "native_source": "hermes-cli",
+                "source_schema": "hermes-sessions-export-jsonl-v1",
+            },
+        }
+        for harness, value in objects.items():
+            with self.subTest(harness=harness):
+                with self.assertRaisesRegex(ValueError, "non-empty string"):
+                    fleet.validate_archive_object(value, harness=harness)
+                row = {
                     "object_sha256": "a" * 64,
                     "session_id": None,
-                    "source": "hermes",
+                    "source": value["source"],
                 }
-            ],
-        }
-        fleet.validate_index_value(base, "mini", "hermes")
-        invalid = json.loads(json.dumps(base))
-        invalid["conversations"][0]["session_id"] = {"private": "body"}
-        with self.assertRaises(ValueError):
-            fleet.validate_index_value(invalid, "mini", "hermes")
+                if harness == "codex":
+                    row.update(
+                        {
+                            "source_sha256": "b" * 64,
+                            "installation": "/synthetic/codex",
+                        }
+                    )
+                index = {
+                    "schema_version": 1,
+                    "host_id": "mini",
+                    "harness": harness,
+                    "conversations": [row],
+                }
+                with self.assertRaises(fleet.LegacyArchiveSchemaError):
+                    fleet.validate_index_value(index, "mini", harness)
+
+    def test_local_merge_replaces_legacy_nullable_index(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            source_spool = root / "source"
+            source_shard, _digest, _payload = make_shard(
+                source_spool, session_id="stable-session"
+            )
+            source_index_path = source_shard / "claude" / "index.json"
+            source_index = json.loads(source_index_path.read_text())
+
+            destination_index_path = root / "destination" / "claude" / "index.json"
+            destination_index_path.parent.mkdir(parents=True)
+            legacy_index = json.loads(source_index_path.read_text())
+            legacy_index["conversations"][0]["session_id"] = None
+            fleet.atomic_write_json(destination_index_path, legacy_index)
+
+            self.assertTrue(
+                fleet.merge_index_file(source_index_path, destination_index_path)
+            )
+            self.assertEqual(
+                json.loads(destination_index_path.read_text()), source_index
+            )
 
     def test_receiver_rejects_malformed_traversal_duplicate_and_oversized_frames(self):
         with safe_temporary_directory() as tmp:

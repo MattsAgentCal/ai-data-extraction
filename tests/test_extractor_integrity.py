@@ -20,6 +20,79 @@ def json_line(value: object) -> str:
 
 
 class ExtractorIntegrityTests(unittest.TestCase):
+    def test_current_producers_normalize_context_and_message_tool_containers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            claude_session = root / "claude.jsonl"
+            write_lines(
+                claude_session,
+                [
+                    json_line(
+                        {
+                            "type": "user",
+                            "message": {"content": "run it"},
+                            "toolUse": {"name": "shell", "input": "pwd"},
+                        }
+                    ),
+                    json_line(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": "running"},
+                                    {
+                                        "type": "tool_use",
+                                        "name": "shell",
+                                        "input": "pwd",
+                                    },
+                                ]
+                            },
+                        }
+                    ),
+                    json_line(
+                        {
+                            "type": "tool_result",
+                            "toolResult": {"output": "/repo"},
+                        }
+                    ),
+                ],
+            )
+            claude = extract_claude_session(claude_session)
+            self.assertEqual(claude["messages"][0]["tool_use"]["type"], "tool_use")
+            self.assertEqual(
+                claude["messages"][1]["tool_uses"][0]["type"], "tool_use"
+            )
+            self.assertEqual(
+                claude["messages"][1]["tool_results"][0]["type"], "tool_result"
+            )
+            validate_archive_object(claude, harness="claude")
+
+            codex_session = root / "codex.jsonl"
+            write_lines(
+                codex_session,
+                [
+                    json_line(
+                        {"type": "session_meta", "payload": {"id": "context-1"}}
+                    ),
+                    json_line(
+                        {
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "user_message",
+                                "message": "continue",
+                                "context": {"cwd": "/repo", "mode": "default"},
+                            },
+                        }
+                    ),
+                ],
+            )
+            codex = extract_codex_session(codex_session)
+            self.assertEqual(codex["messages"][0]["context"]["type"], "context")
+            self.assertEqual(
+                codex["messages"][0]["context"]["payload"]["cwd"], "/repo"
+            )
+            validate_archive_object(codex, harness="codex")
+
     def test_claude_reports_partial_parse_and_rejects_contained_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "claude"

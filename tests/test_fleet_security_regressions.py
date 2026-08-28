@@ -96,6 +96,90 @@ def safe_temporary_directory():
 
 
 class FleetSecurityRegressionTests(unittest.TestCase):
+    def test_changed_session_replaces_stale_row_for_every_v2_harness(self):
+        base_conversations = {
+            "claude": {
+                "archive_schema_version": 2,
+                "source": "claude-code",
+                "session_id": "same-session",
+                "messages": [{"role": "user", "content": "first body"}],
+                "project_path": None,
+                "project_name": None,
+                "source_file": "/synthetic/claude.jsonl",
+            },
+            "codex": {
+                "archive_schema_version": 2,
+                "source": "codex",
+                "session_id": "same-session",
+                "messages": [{"role": "user", "content": "first body"}],
+                "cwd": "/synthetic/project",
+                "session_file": "/synthetic/codex.jsonl",
+                "timestamp": None,
+                "installation": "/synthetic/codex",
+                "_archive_source_sha256": "d" * 64,
+            },
+            "openclaw": {
+                "archive_schema_version": 2,
+                "source": "openclaw",
+                "session_id": "same-session",
+                "messages": [{"role": "user", "content": "first body"}],
+                "cwd": "/synthetic/project",
+                "session_file": "/synthetic/openclaw.jsonl",
+                "timestamp": None,
+                "source_schema": "openclaw-jsonl-v3",
+            },
+            "hermes": {
+                "archive_schema_version": 2,
+                "source": "hermes",
+                "session_id": "same-session",
+                "messages": [{"role": "user", "content": "first body"}],
+                "native_source": "hermes-cli",
+                "source_schema": "hermes-sessions-export-jsonl-v1",
+            },
+        }
+        for harness, initial in base_conversations.items():
+            with self.subTest(harness=harness), safe_temporary_directory() as tmp:
+                spool = Path(tmp) / "spool"
+                fleet.archive_conversations(
+                    spool, "test-mac", harness, [dict(initial)]
+                )
+                harness_root = spool / "hosts" / "test-mac" / harness
+                first_index = json.loads((harness_root / "index.json").read_text())
+                old_digest = first_index["conversations"][0]["object_sha256"]
+
+                changed = json.loads(json.dumps(initial))
+                changed["messages"][0]["content"] = "changed body"
+                if harness == "codex":
+                    changed["_archive_source_sha256"] = "d" * 64
+                fleet.archive_conversations(
+                    spool, "test-mac", harness, [changed]
+                )
+
+                current_index = json.loads((harness_root / "index.json").read_text())
+                self.assertEqual(len(current_index["conversations"]), 1)
+                current_digest = current_index["conversations"][0]["object_sha256"]
+                self.assertNotEqual(current_digest, old_digest)
+                self.assertTrue(
+                    (harness_root / "objects" / f"{old_digest}.json").is_file()
+                )
+
+                write_healthy_receipt(harness_root.parent, harness=harness)
+                self.assertEqual(
+                    fleet.finalize_manifested_object_set(spool, "test-mac"), 1
+                )
+                self.assertEqual(
+                    {path.stem for path in (harness_root / "objects").glob("*.json")},
+                    {current_digest},
+                )
+                self.assertTrue(
+                    any(
+                        (spool / "quarantine" / "test-mac").rglob(
+                            f"{old_digest}.json"
+                        )
+                    )
+                )
+                fleet.validated_shard_files(harness_root.parent, "test-mac")
+
     def test_manifest_receipt_hash_and_json_use_one_byte_snapshot(self):
         with safe_temporary_directory() as tmp:
             shard = Path(tmp) / "hosts" / "mini"
@@ -389,6 +473,67 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(
                 len(final_manifest["harnesses"]["claude"]["object_sha256"]), 2
             )
+
+    def test_healthy_changed_session_replaces_live_row_and_quarantines_last_good(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            destination = root / "destination"
+            destination_shard = destination / "hosts" / "mini"
+            old_object, _payload = write_archive_object(
+                destination_shard, host_id="mini"
+            )
+            old_digest = old_object.stem
+            write_healthy_receipt(destination_shard)
+
+            source_parent = root / "source"
+            fleet.archive_conversations(
+                source_parent,
+                "mini",
+                "claude",
+                [
+                    {
+                        "archive_schema_version": 2,
+                        "source": "claude-code",
+                        "session_id": "cached-session",
+                        "messages": [{"role": "user", "content": "changed body"}],
+                        "project_path": None,
+                        "project_name": None,
+                        "source_file": "/synthetic/session.jsonl",
+                    }
+                ],
+            )
+            source_shard = source_parent / "hosts" / "mini"
+            write_healthy_receipt(source_shard)
+            new_digest = json.loads(
+                (source_shard / "claude" / "index.json").read_text()
+            )["conversations"][0]["object_sha256"]
+
+            result = fleet.merge_host_shard(source_shard, destination, "mini")
+
+            self.assertEqual(result["quarantined_unindexed_objects"], 1)
+            live_index = json.loads(
+                (destination_shard / "claude" / "index.json").read_text()
+            )
+            self.assertEqual(
+                [row["object_sha256"] for row in live_index["conversations"]],
+                [new_digest],
+            )
+            self.assertFalse(
+                (
+                    destination_shard
+                    / "claude"
+                    / "objects"
+                    / f"{old_digest}.json"
+                ).exists()
+            )
+            self.assertTrue(
+                any(
+                    (destination / "quarantine" / "mini").rglob(
+                        f"{old_digest}.json"
+                    )
+                )
+            )
+            fleet.validated_shard_files(destination_shard, "mini")
 
     def test_shard_index_identity_references_and_additive_merge_are_enforced(self):
         with safe_temporary_directory() as tmp:
@@ -749,7 +894,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 archived_value["session_file"], {str(live), str(archived)}
             )
 
-    def test_codex_move_reuses_a_legacy_index_object_without_duplication(self):
+    def test_codex_move_regenerates_a_base_index_row_without_duplication(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
             codex = root / "codex"
@@ -780,14 +925,19 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 spool, "test-mac", "codex", [conversation]
             )
             harness_root = spool / "hosts" / "test-mac" / "codex"
-            legacy_index = json.loads((harness_root / "index.json").read_text())
-            legacy_index["conversations"][0].pop("source_sha256")
-            legacy_index["conversations"][0].pop("installation")
-            (harness_root / "index.json").write_text(
-                json.dumps(legacy_index, sort_keys=True) + "\n"
-            )
             write_healthy_receipt(harness_root.parent, harness="codex")
-            legacy_digest = legacy_index["conversations"][0]["object_sha256"]
+            current_before = json.loads((harness_root / "index.json").read_text())
+            legacy_digest = current_before["conversations"][0]["object_sha256"]
+            base_index = json.loads(json.dumps(current_before))
+            base_index["conversations"][0].pop("source_sha256")
+            base_index["conversations"][0].pop("installation")
+            fleet.atomic_write_json(harness_root / "index.json", base_index)
+            manifest_path = harness_root.parent / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["harnesses"]["codex"]["index_sha256"] = fleet.file_sha256(
+                harness_root / "index.json"
+            )
+            fleet.atomic_write_json(manifest_path, manifest)
             legacy_object = harness_root / "objects" / f"{legacy_digest}.json"
             legacy_inode = legacy_object.stat().st_ino
             archived.parent.mkdir(parents=True)
@@ -803,6 +953,16 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(len(current_index["conversations"]), 1)
             self.assertEqual(
                 current_index["conversations"][0]["object_sha256"], legacy_digest
+            )
+            self.assertEqual(
+                set(current_index["conversations"][0]),
+                {
+                    "object_sha256",
+                    "session_id",
+                    "source",
+                    "source_sha256",
+                    "installation",
+                },
             )
             self.assertEqual(objects, [legacy_object])
             self.assertEqual(legacy_object.stat().st_ino, legacy_inode)

@@ -5,8 +5,8 @@ This local extension turns the upstream one-shot extractors into a recurring pri
 ## Data path
 
 1. When its reviewed scheduler is enabled, each Mac collects local harness data every six hours into an owner-only spool at `~/.local/share/ai-chat-archive/spool`. Unchanged transcript files are fingerprinted and skipped; changed sessions are streamed one at a time.
-2. Conversations are normalized into the closed archive-object v2 contract, credential-redacted locally, staged until parsing is complete, stored as immutable content-addressed objects, and indexed separately by host and harness. Message content and normalized tool/event `payload` values are the only intentionally opaque body-bearing fields; their wrappers remain exact and bounded.
-3. The Mac Studio invokes the same trusted Python pipeline on each source host over authenticated SSH. The source validates one manifest-bound shard under its archive lock and emits a bounded binary stream; the Studio stages and validates that stream before an additive merge.
+2. Conversations are normalized into the closed archive-object v2 contract, credential-redacted locally, staged until parsing is complete, stored as immutable content-addressed objects, and indexed separately by host and harness. Message content and normalized context/tool/event `payload` values are the only intentionally opaque body-bearing fields; their wrappers remain exact and bounded.
+3. The Mac Studio invokes the same trusted Python pipeline on each source host over authenticated SSH. The source validates one manifest-bound shard under its archive lock and emits a bounded binary stream; the Studio stages and validates that stream before a transactional logical-session merge.
 4. Once Google Drive is signed in on the Studio, the Studio publishes the fleet tree into one private `AI Chat Archive` folder. Until then, collection continues locally and receipts say exactly why publication is blocked.
 
 The Google Drive account is needed on only the Studio. Host folders never share mutable object files, preventing cross-machine filename collisions.
@@ -24,7 +24,7 @@ The Google Drive account is needed on only the Studio. Host folders never share 
 - Remote shards are emitted from no-follow byte snapshots while the source archive lock is held, staged owner-only on the receiver, symlink-rejected, content-hash verified, and transactionally published without overwriting a differing immutable object. A process lock serializes scheduled and manual runs.
 - Publication positively requires a mounted path below the current user's `~/Library/CloudStorage/GoogleDrive-*`. Production configs cannot bypass this gate.
 - Existing and newly copied objects are verified against their content-addressed filenames and approved harness provenance before publication; receipts, indexes, and the final manifest are verified after copying.
-- Sync is additive. No pipeline command deletes a source chat, spool object, remote shard, or Drive object.
+- No pipeline command deletes a source chat or destroys a superseded archive body. A changed `(harness, source, session_id)` replaces its live index row; the prior object remains available for rollback until the healthy manifest commits, then moves to owner-only quarantine. Healthy remote snapshot replacement likewise quarantines a superseded last-good tree instead of discarding its stale body.
 
 ## Trusted remote stream
 
@@ -46,21 +46,36 @@ alias must already resolve to the intended pinned host key.
 The helper validates the exact manifest, receipt, local index, v2 per-harness
 object schema, provenance, canonical JSON, redactor idempotence, hash, and
 residual-secret rules for the whole authorized snapshot before emitting even
-the protocol magic. It then takes and revalidates a fresh no-follow object
+the protocol magic. Its preflight also performs the receiver-equivalent
+projection binding, canonical row reconstruction, ordering, and manifest index
+hash check. It then takes and revalidates a fresh no-follow object
 snapshot immediately before emitting that body. The receiver uses one
 end-to-end monotonic deadline, writes into an owner-only incoming directory,
 rejects malformed, duplicate, traversing, extra, or oversized frames, then runs
 the full shard validator before transactional merge.
 
+All v2 archive objects and indexes require a stable, non-empty session ID.
+Claude and OpenClaw can fall back to their transcript filename identity;
+Hermes requires its exported row ID; and a Codex rollout without
+`session_meta.id` receives a deterministic opaque ID derived from hashed
+installation identity plus its validated rollout filename. That filename is
+stable when Codex moves a transcript from `sessions/YYYY/MM/DD` to
+`archived_sessions`; nonstandard locations retain a hashed relative-path
+identity. These fallback inputs never appear in transport metadata. Historical
+nullable rows are replaced by a complete local regeneration and cannot enter
+the remote stream.
+
 Ordinary indexes never cross SSH. The source emits a fixed-format transport
 projection containing the object digest, approved source enum, and a SHA-256
-commitment to the native session ID. Current Codex rows additionally carry the
-source digest, a commitment to `installation`, and an explicit schema
+commitment to the native session ID. Every v2 Codex row must use the current
+schema carrying the source digest, a commitment to `installation`, and an explicit schema
 discriminator. The receiver validates each v2 object, checks those commitments,
 reconstructs the ordinary canonical index (including the unrestricted native
 ID and Codex installation from the sanitized body), and requires its hash to
 equal the original manifest binding. Thus source-controlled session IDs and
 installation paths do not appear in pre-body transport metadata.
+Archive-object, manifest, index, transport, and receipt schema discriminators
+must be exact JSON integers; booleans and floating-point lookalikes fail closed.
 
 Each metadata frame is capped at 16 MiB and all metadata together at 32 MiB;
 the observed indexes are below 174 KiB and the observed manifest is 78 KiB.
@@ -96,7 +111,8 @@ when the new remote attempt reports `unreachable`.
 Google Drive is absent on the Studio and remains a human-gated completion step.
 No scheduler should be enabled merely to test Drive publication.
 
-Existing v1 objects are not trusted or silently migrated by the new stream.
+Existing v1 objects, nullable-session rows, and legacy base-format Codex rows
+are not trusted or silently migrated by the new stream.
 The extractor hash forces a fresh v2 collection while the previous manifested
 snapshot remains the rollback point. A source reports `legacy_schema` until a
 complete v2 manifest commits. Reviewed deployment therefore requires new v2

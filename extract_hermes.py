@@ -159,7 +159,8 @@ def iter_hermes_export(
                 }
                 if (
                     not isinstance(row, dict)
-                    or not row.get("id")
+                    or type(row.get("id")) not in {str, int}
+                    or not str(row["id"])
                     or set(row) - allowed_row_keys
                 ):
                     failed_lines += 1

@@ -318,7 +318,9 @@ def extract_claude_session(
                         "timestamp": obj.get("timestamp"),
                     }
                     if "toolUse" in obj:
-                        record["tool_use"] = obj["toolUse"]
+                        record["tool_use"] = event_envelope(
+                            "tool_use", obj["toolUse"], obj.get("timestamp")
+                        )
                     messages.append(record)
                 project_path = obj.get("cwd", project_path)
             elif msg_type == "assistant":
@@ -338,10 +340,10 @@ def extract_claude_session(
                             break
                         if item.get("type") == "text" and isinstance(item.get("text"), str):
                             text_parts.append(item.get("text", ""))
-                        elif isinstance(item, dict) and item.get("type") == "tool_use":
-                            tool_uses.append(item)
                         else:
-                            tool_uses.append(item)
+                            tool_uses.append(
+                                event_envelope("tool_use", item, obj.get("timestamp"))
+                            )
                     if invalid_content:
                         failed_lines += 1
                         recognized_lines -= 1
@@ -367,7 +369,9 @@ def extract_claude_session(
                 recognized_lines += 1
                 tool_result = obj.get("toolResult", {})
                 if tool_result and messages:
-                    messages[-1].setdefault("tool_results", []).append(tool_result)
+                    messages[-1].setdefault("tool_results", []).append(
+                        event_envelope("tool_result", tool_result, obj.get("timestamp"))
+                    )
             elif _is_strict_auxiliary_record(obj):
                 recognized_lines += 1
                 auxiliary_events.append(

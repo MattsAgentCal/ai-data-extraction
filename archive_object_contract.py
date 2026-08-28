@@ -150,9 +150,53 @@ def _validate_message(record: object, *, harness: str) -> None:
                 item["detail"], str
             ):
                 raise ValueError("invalid Codex image detail")
-    for key in ("tool_uses", "tool_results"):
-        if key in record and not isinstance(record[key], list):
+    if "context" in record:
+        _validate_message_envelope(
+            record["context"],
+            harness=harness,
+            container="context",
+            expected_type="context",
+        )
+    if "tool_use" in record:
+        _validate_message_envelope(
+            record["tool_use"],
+            harness=harness,
+            container="tool_use",
+            expected_type="tool_use",
+        )
+    for key, expected_type in (("tool_uses", "tool_use"), ("tool_results", "tool_result")):
+        if key not in record:
+            continue
+        if not isinstance(record[key], list):
             raise ValueError(f"invalid {harness} message {key}")
+        for item in record[key]:
+            _validate_message_envelope(
+                item,
+                harness=harness,
+                container=key,
+                expected_type=expected_type,
+            )
+
+
+def _validate_message_envelope(
+    record: object,
+    *,
+    harness: str,
+    container: str,
+    expected_type: str,
+) -> None:
+    record = _exact(
+        record,
+        required={"type", "payload"},
+        optional={"timestamp"},
+        label=f"{harness} message {container} envelope",
+    )
+    if record["type"] != expected_type:
+        raise ValueError(f"invalid {harness} message {container} envelope type")
+    if "timestamp" in record and record["timestamp"] is not None and type(
+        record["timestamp"]
+    ) not in {str, int, float}:
+        raise ValueError(f"invalid {harness} message {container} timestamp")
 
 
 def _validate_event(record: object, *, harness: str) -> None:
@@ -222,10 +266,18 @@ def validate_archive_object(value: object, *, harness: str | None = None) -> dic
         optional=common_optional | harness_optional,
         label=f"{harness} archive object",
     )
-    if value["archive_schema_version"] != ARCHIVE_OBJECT_SCHEMA_VERSION:
+    if (
+        type(value["archive_schema_version"]) is not int
+        or value["archive_schema_version"] != ARCHIVE_OBJECT_SCHEMA_VERSION
+    ):
         raise ValueError("legacy or unsupported archive object schema")
-    if value["session_id"] is not None and not isinstance(value["session_id"], str):
-        raise ValueError("archive object session_id must be a string or null")
+    if (
+        not isinstance(value["session_id"], str)
+        or not value["session_id"]
+        or "\x00" in value["session_id"]
+        or len(value["session_id"].encode("utf-8")) > 4096
+    ):
+        raise ValueError("archive object session_id must be a non-empty string")
     if not isinstance(value["messages"], list):
         raise ValueError("archive object messages must be a list")
     for message in value["messages"]:

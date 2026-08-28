@@ -277,10 +277,16 @@ def extract_openclaw_session(
     _publish_quality(quality_out, quality)
     if not session_version_valid or (not messages and not tool_results):
         return None
+    native_session_id = session_meta.get("id")
+    session_id = (
+        native_session_id
+        if isinstance(native_session_id, str) and native_session_id
+        else session_file.stem
+    )
     conversation = {
         "archive_schema_version": ARCHIVE_OBJECT_SCHEMA_VERSION,
         "messages": messages,
-        "session_id": session_meta.get("id") or session_file.stem,
+        "session_id": session_id,
         "cwd": session_meta.get("cwd"),
         "source": "openclaw",
         "session_file": str(session_file),
