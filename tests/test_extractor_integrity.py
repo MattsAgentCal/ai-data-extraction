@@ -52,23 +52,44 @@ class ExtractorIntegrityTests(unittest.TestCase):
     def test_claude_preserves_current_auxiliary_record_types(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session.jsonl"
-            current_types = (
-                "frame-link",
-                "permission-mode",
-                "bridge-session",
-                "ai-title",
-                "file-history-delta",
+            current_records = (
+                {"type": "frame-link"},
+                {"type": "permission-mode"},
+                {"type": "bridge-session"},
+                {"type": "ai-title"},
+                {"type": "file-history-delta"},
+                {
+                    "type": "agent-name",
+                    "agentName": "reviewer",
+                    "sessionId": "session-1",
+                },
+                {
+                    "type": "artifact-comment-monitor",
+                    "v": 1,
+                    "sessionId": "session-1",
+                    "artifacts": {
+                        "artifact-1": {
+                            "state": "written",
+                            "title": "Review",
+                            "writtenAtMs": 1,
+                        }
+                    },
+                },
             )
             write_lines(
                 session,
-                [json_line({"type": record_type}) for record_type in current_types],
+                [json_line(record) for record in current_records],
             )
             quality = {}
             conversation = extract_claude_session(session, quality_out=quality)
             self.assertEqual(quality["status"], "complete")
             self.assertEqual(
                 [event["type"] for event in conversation["events"]],
-                list(current_types),
+                [record["type"] for record in current_records],
+            )
+            self.assertEqual(
+                conversation["events"][-1]["artifacts"]["artifact-1"]["state"],
+                "written",
             )
 
     def test_codex_merges_and_deduplicates_legacy_and_modern_messages_in_source_order(self):
@@ -364,6 +385,73 @@ class ExtractorIntegrityTests(unittest.TestCase):
             self.assertEqual(quality["parsed_lines"], 1)
             self.assertEqual(quality["failed_lines"], 2)
             self.assertNotIn("extraction_quality", conversations[0])
+
+    def test_hermes_preserves_session_metadata_outside_chat_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export = Path(tmp) / "hermes.jsonl"
+            session_metadata = {
+                "id": 1,
+                "role": "session_meta",
+                "content": None,
+                "created_at": 1,
+                "is_meta": 1,
+                "tool_name": None,
+            }
+            write_lines(
+                export,
+                [
+                    json_line(
+                        {
+                            "id": "hermes-1",
+                            "source": "desktop",
+                            "messages": [
+                                session_metadata,
+                                {"role": "user", "content": "hello"},
+                                {"role": "assistant", "content": "ready"},
+                            ],
+                        }
+                    )
+                ],
+            )
+            quality = {}
+
+            conversations = extract_hermes_export(export, quality_out=quality)
+
+            self.assertEqual(quality["status"], "complete")
+            self.assertEqual(quality["failed_lines"], 0)
+            self.assertEqual(
+                [message["role"] for message in conversations[0]["messages"]],
+                ["user", "assistant"],
+            )
+            self.assertEqual(conversations[0]["events"], [session_metadata])
+
+    def test_hermes_other_unknown_or_null_content_shapes_still_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export = Path(tmp) / "hermes.jsonl"
+            write_lines(
+                export,
+                [
+                    json_line(
+                        {
+                            "id": "unknown-role",
+                            "messages": [{"role": "future", "content": None}],
+                        }
+                    ),
+                    json_line(
+                        {
+                            "id": "null-user",
+                            "messages": [{"role": "user", "content": None}],
+                        }
+                    ),
+                ],
+            )
+            quality = {}
+
+            conversations = extract_hermes_export(export, quality_out=quality)
+
+            self.assertEqual(conversations, [])
+            self.assertEqual(quality["status"], "partial")
+            self.assertEqual(quality["failed_lines"], 2)
 
     def test_current_record_types_with_invalid_nested_shapes_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

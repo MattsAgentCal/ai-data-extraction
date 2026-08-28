@@ -33,6 +33,10 @@ class TerminationRequested(BaseException):
 
 
 HOST_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62})\Z")
+SSH_HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._@-]{0,254})\Z")
+REMOTE_SPOOL_ROOT_RE = re.compile(
+    r"/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\Z"
+)
 APPROVED_SOURCE_KEYS = {
     "claude_roots",
     "codex_roots",
@@ -323,9 +327,7 @@ def redact_text(value: str) -> tuple[str, int]:
     # than risk preserving a suffix the parser cannot safely delimit.
     if has_residual_assignment(value, lowered):
         return "[REDACTED]", 1
-    if value.isascii() and not any(
-        marker in lowered for marker in REDACTABLE_TEXT_MARKERS
-    ):
+    if not any(marker in lowered for marker in REDACTABLE_TEXT_MARKERS):
         return value, 0
     return REDACTABLE_SECRET_RE.subn("[REDACTED]", value)
 
@@ -366,10 +368,16 @@ def residual_secret_paths(value: object, path: str = "$") -> list[str]:
     findings: list[str] = []
     if isinstance(value, dict):
         for key, item in value.items():
-            key_has_secret = isinstance(key, str) and (
-                bool(RESIDUAL_SECRET_RE.search(key))
-                or has_residual_assignment(key)
-            )
+            key_has_secret = False
+            if isinstance(key, str):
+                lowered_key = regex_compatible_lower(key)
+                key_has_secret = has_residual_assignment(key, lowered_key) or (
+                    any(
+                        marker in lowered_key
+                        for marker in REDACTABLE_TEXT_MARKERS
+                    )
+                    and bool(RESIDUAL_SECRET_RE.search(key))
+                )
             child_path = f"{path}.<sensitive-key>" if key_has_secret else f"{path}.{key}"
             if key_has_secret:
                 findings.append(child_path)
@@ -382,10 +390,7 @@ def residual_secret_paths(value: object, path: str = "$") -> list[str]:
     elif isinstance(value, str):
         lowered = regex_compatible_lower(value)
         if has_residual_assignment(value, lowered) or (
-            (
-                not value.isascii()
-                or any(marker in lowered for marker in REDACTABLE_TEXT_MARKERS)
-            )
+            any(marker in lowered for marker in REDACTABLE_TEXT_MARKERS)
             and RESIDUAL_SECRET_RE.search(value)
         ):
             findings.append(path)
@@ -1700,8 +1705,49 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
 
         ssh_host = remote.get("ssh_host")
         remote_spool_root = remote.get("remote_spool_root")
-        if not ssh_host or not remote_spool_root:
+        if (
+            not isinstance(ssh_host, str)
+            or not SSH_HOST_RE.fullmatch(ssh_host)
+            or not isinstance(remote_spool_root, str)
+            or not REMOTE_SPOOL_ROOT_RE.fullmatch(remote_spool_root)
+            or any(part in {".", ".."} for part in remote_spool_root.split("/"))
+        ):
             statuses[remote_host_id] = {"status": "invalid_remote", "files_copied": 0}
+            continue
+        ssh_options = [
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
+        ]
+        manifest_path = (
+            f"{remote_spool_root.rstrip('/')}/hosts/{remote_host_id}/"
+            "publish-manifest.json"
+        )
+        try:
+            manifest_probe = subprocess.run(
+                ["ssh", *ssh_options, ssh_host, "test", "-f", manifest_path],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=min(int(remote.get("timeout_seconds", 300)), 30),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            statuses[remote_host_id] = {"status": "unreachable", "files_copied": 0}
+            continue
+        if manifest_probe.returncode != 0:
+            statuses[remote_host_id] = {
+                "status": (
+                    "pending_manifest"
+                    if manifest_probe.returncode == 1
+                    else "unreachable"
+                ),
+                "files_copied": 0,
+            }
             continue
         source = (
             f"{ssh_host}:{remote_spool_root.rstrip('/')}/hosts/{remote_host_id}/"

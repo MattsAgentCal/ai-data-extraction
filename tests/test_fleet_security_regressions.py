@@ -738,6 +738,47 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(fleet.residual_secret_paths(cleaned), [])
             self.assertEqual(fleet.residual_secret_paths(sample), ["$"])
 
+    def test_clean_unicode_keys_and_values_do_not_invoke_secret_regex(self):
+        value = {"naïve-İıſK": "café İ ı ſ K"}
+        redactable = mock.Mock(wraps=fleet.REDACTABLE_SECRET_RE)
+        residual = mock.Mock(wraps=fleet.RESIDUAL_SECRET_RE)
+
+        with mock.patch.object(
+            fleet, "REDACTABLE_SECRET_RE", redactable
+        ), mock.patch.object(fleet, "RESIDUAL_SECRET_RE", residual):
+            cleaned, count = fleet.redact_value(value)
+            findings = fleet.residual_secret_paths(value)
+
+        self.assertEqual(cleaned, value)
+        self.assertEqual(count, 0)
+        self.assertEqual(findings, [])
+        redactable.subn.assert_not_called()
+        residual.search.assert_not_called()
+
+    def test_marker_prefilter_covers_every_secret_pattern_branch(self):
+        examples = [
+            "-----BEGIN PRIVATE KEY-----\nbody\n-----END PRIVATE KEY-----",
+            "sk-" + "a" * 20,
+            "ghp_" + "a" * 20,
+            "AKIA" + "A" * 16,
+            "eyJ" + "a" * 10 + "." + "b" * 10 + "." + "c" * 10,
+            "Authorization: synthetic-value",
+            "Set-Cookie: synthetic=value",
+            "Bearer syntheticvalue",
+            "Basic syntheticvalue",
+            "AUTHORİZATİON: synthetic-value",
+            "COOKIE: synthetic=value",
+            "BAſIC syntheticvalue",
+        ]
+
+        for example in examples:
+            with self.subTest(example=example[:20]):
+                self.assertIsNotNone(fleet.RESIDUAL_SECRET_RE.search(example))
+                lowered = fleet.regex_compatible_lower(example)
+                self.assertTrue(
+                    any(marker in lowered for marker in fleet.REDACTABLE_TEXT_MARKERS)
+                )
+
     def test_archive_blocks_a_residual_structured_secret(self):
         with safe_temporary_directory() as tmp:
             archive_root = Path(tmp) / "archive"
@@ -880,6 +921,8 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             spool_root = Path(tmp) / "spool"
 
             def interrupted_rsync(command, **_kwargs):
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
                 destination = Path(command[-1].rstrip("/"))
                 write_archive_object(destination)
                 raise subprocess.CalledProcessError(23, command)
@@ -902,6 +945,36 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 "a failed pull exposed a partial remote shard",
             )
 
+    def test_remote_pull_waits_for_manifest_before_copying_objects(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            calls = []
+
+            def no_manifest(command, **_kwargs):
+                calls.append(command)
+                if command[0] != "ssh":
+                    self.fail("rsync ran before the remote manifest existed")
+                return subprocess.CompletedProcess(command, 1)
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(fleet.subprocess, "run", side_effect=no_manifest):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertEqual(
+                result["remotes"]["mini"],
+                {"status": "pending_manifest", "files_copied": 0},
+            )
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "ssh")
+
     def test_remote_pull_cannot_overwrite_an_existing_immutable_object(self):
         with safe_temporary_directory() as tmp:
             spool_root = Path(tmp) / "spool"
@@ -910,6 +983,8 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             )
 
             def tampering_rsync(command, **_kwargs):
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
                 destination = Path(command[-1].rstrip("/"))
                 target = destination / "claude" / "objects" / existing.name
                 target.parent.mkdir(parents=True, exist_ok=True)

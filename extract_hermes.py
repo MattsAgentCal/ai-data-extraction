@@ -102,18 +102,46 @@ def iter_hermes_export(export_file, *, quality_out=None):
                 if not isinstance(row.get("messages"), list):
                     failed_lines += 1
                     continue
-                valid_roles = {"user", "assistant", "system", "developer", "tool", "toolResult"}
-                valid_messages = all(
-                    isinstance(message, dict)
-                    and message.get("role") in valid_roles
-                    and isinstance(message.get("content"), (str, list))
-                    for message in row["messages"]
-                )
+                valid_roles = {
+                    "user",
+                    "assistant",
+                    "system",
+                    "developer",
+                    "tool",
+                    "toolResult",
+                }
+                chat_messages = []
+                auxiliary_events = []
+                valid_messages = True
+                for message in row["messages"]:
+                    if not isinstance(message, dict):
+                        valid_messages = False
+                        break
+                    role = message.get("role")
+                    content = message.get("content")
+                    if role == "session_meta" and content is None:
+                        auxiliary_events.append(message)
+                    elif role in valid_roles and isinstance(content, (str, list)):
+                        chat_messages.append(message)
+                    else:
+                        valid_messages = False
+                        break
                 if not valid_messages:
                     failed_lines += 1
                     continue
                 parsed_lines += 1
                 conversation = dict(row)
+                conversation["messages"] = chat_messages
+                if auxiliary_events:
+                    existing_events = conversation.get("events")
+                    if existing_events is None:
+                        conversation["events"] = auxiliary_events
+                    elif isinstance(existing_events, list):
+                        conversation["events"] = [*existing_events, *auxiliary_events]
+                    else:
+                        failed_lines += 1
+                        parsed_lines -= 1
+                        continue
                 conversation["native_source"] = row.get("source")
                 conversation["source"] = "hermes"
                 conversation["session_id"] = row["id"]

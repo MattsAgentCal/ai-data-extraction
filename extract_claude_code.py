@@ -151,7 +151,9 @@ def find_claude_installations():
     return list(set(locations))  # Remove duplicates
 
 CLAUDE_IGNORED_RECORD_TYPES = {
+    "agent-name",
     "atis-latch",
+    "artifact-comment-monitor",
     "attachment",
     "ai-title",
     "bridge-session",
