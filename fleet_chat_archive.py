@@ -2159,6 +2159,7 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                 rsync_command = [
                     "rsync",
                     "-rtz",
+                    "--checksum",
                     "--no-links",
                     "--safe-links",
                     "--exclude=.*",

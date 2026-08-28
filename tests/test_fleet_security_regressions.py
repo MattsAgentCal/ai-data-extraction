@@ -1336,7 +1336,65 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(result["remotes"]["mini"]["status"], "pulled")
             rsync_command = commands[1]
             self.assertEqual(rsync_command[0:2], ["rsync", "-rtz"])
+            self.assertIn("--checksum", rsync_command)
             self.assertIn(f"--link-dest={cached_shard}", rsync_command)
+
+    def test_cached_remote_pull_checksums_equal_size_equal_mtime_files(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            cached_shard = spool_root / "hosts" / "mini"
+            write_archive_object(cached_shard, host_id="mini")
+            write_healthy_receipt(cached_shard)
+            manifest_path = cached_shard / "publish-manifest.json"
+            original = manifest_path.read_bytes()
+            changed = original.replace(b"healthy-test", b"updated-test", 1)
+            self.assertEqual(len(original), len(changed))
+            original_times = manifest_path.stat()
+            remote_manifest = Path(tmp) / "remote-manifest.json"
+            remote_manifest.write_bytes(changed)
+            os.utime(
+                remote_manifest,
+                ns=(original_times.st_atime_ns, original_times.st_mtime_ns),
+            )
+
+            commands = []
+
+            def emulate_quick_check(command, **_kwargs):
+                commands.append(command)
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                destination = Path(command[-1].rstrip("/"))
+                shutil.copytree(
+                    cached_shard,
+                    destination,
+                    dirs_exist_ok=True,
+                    copy_function=os.link,
+                )
+                destination_manifest = destination / "publish-manifest.json"
+                if "--checksum" in command:
+                    destination_manifest.unlink()
+                    shutil.copy2(remote_manifest, destination_manifest)
+                return subprocess.CompletedProcess(command, 0)
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess, "run", side_effect=emulate_quick_check
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertIn("--checksum", commands[1])
+            self.assertEqual(
+                result["remotes"]["mini"]["status"],
+                "blocked_integrity_failure",
+            )
 
     def test_remote_pull_rejects_corrupt_cache_before_rsync(self):
         with safe_temporary_directory() as tmp:
