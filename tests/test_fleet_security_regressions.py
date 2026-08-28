@@ -1456,6 +1456,58 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             outside_home.mkdir(parents=True)
             self.assertFalse(fleet.is_google_drive_path(outside_home))
 
+    def test_auto_drive_root_requires_exactly_one_live_provider(self):
+        with safe_temporary_directory() as tmp:
+            fake_home = Path(tmp) / "home"
+            cloud_root = fake_home / "Library" / "CloudStorage"
+            cloud_root.mkdir(parents=True)
+            with mock.patch.object(fleet.Path, "home", return_value=fake_home):
+                missing, missing_status = fleet.configured_drive_root("auto")
+            self.assertIsNone(missing)
+            self.assertEqual(missing_status, "blocked_drive_unavailable")
+
+            first = cloud_root / "GoogleDrive-first@example.com" / "My Drive"
+            first.mkdir(parents=True)
+            with (
+                mock.patch.object(fleet.Path, "home", return_value=fake_home),
+                mock.patch.object(fleet, "is_google_drive_path", return_value=True),
+            ):
+                resolved, status = fleet.configured_drive_root("auto")
+            self.assertEqual(status, "auto")
+            self.assertEqual(resolved, first / "AI Chat Archive")
+            self.assertTrue(resolved.is_dir())
+
+            second = cloud_root / "GoogleDrive-second@example.com" / "My Drive"
+            second.mkdir(parents=True)
+            with (
+                mock.patch.object(fleet.Path, "home", return_value=fake_home),
+                mock.patch.object(fleet, "is_google_drive_path", return_value=True),
+            ):
+                ambiguous, ambiguous_status = fleet.configured_drive_root("auto")
+            self.assertIsNone(ambiguous)
+            self.assertEqual(ambiguous_status, "blocked_ambiguous_drive_root")
+            self.assertFalse((second / "AI Chat Archive").exists())
+
+    def test_auto_drive_root_skips_a_google_shaped_symlink(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            fake_home = root / "home"
+            cloud_root = fake_home / "Library" / "CloudStorage"
+            cloud_root.mkdir(parents=True)
+            escaped = root / "escaped" / "My Drive"
+            escaped.mkdir(parents=True)
+            (cloud_root / "GoogleDrive-link").symlink_to(
+                escaped.parent, target_is_directory=True
+            )
+            with (
+                mock.patch.object(fleet.Path, "home", return_value=fake_home),
+                mock.patch.object(fleet, "is_google_drive_path", return_value=True),
+            ):
+                drive_root, status = fleet.configured_drive_root("auto")
+            self.assertIsNone(drive_root)
+            self.assertEqual(status, "blocked_drive_unavailable")
+            self.assertFalse((escaped / "AI Chat Archive").exists())
+
     def test_publish_blocks_a_missing_or_empty_source_shard(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)

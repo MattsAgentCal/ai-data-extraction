@@ -2,7 +2,7 @@
   "schema_version": 1,
   "host_id": "mac-studio",
   "spool_root": "/Users/calstudio/.local/share/ai-chat-archive/spool",
-  "drive_root": null,
+  "drive_root": "auto",
   "inventory_harnesses": ["claude", "codex", "openclaw", "hermes"],
   "sources": {
     "claude_roots": ["/Users/calstudio/.claude"],

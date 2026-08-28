@@ -1211,6 +1211,43 @@ def is_google_drive_path(path: Path) -> bool:
     return completed.returncode == 0 and "no item for url" not in output
 
 
+def configured_drive_root(value: object) -> tuple[Path | None, str]:
+    """Resolve an explicit Drive path or exactly one live Google provider."""
+    if value is None:
+        return None, "blocked_no_drive_root"
+    if value != "auto":
+        if not isinstance(value, str) or not value:
+            raise ValueError("drive_root must be an absolute path, 'auto', or null")
+        return assert_no_symlink_components(Path(value)), "configured"
+
+    cloud_root = lexical_absolute(Path.home() / "Library" / "CloudStorage")
+    if not cloud_root.is_dir() or cloud_root.is_symlink():
+        return None, "blocked_drive_unavailable"
+    assert_no_symlink_components(cloud_root)
+    providers: list[Path] = []
+    for candidate in sorted(cloud_root.iterdir(), key=lambda path: path.name):
+        if not candidate.name.startswith("GoogleDrive-"):
+            continue
+        try:
+            candidate = assert_no_symlink_components(candidate)
+        except ValueError:
+            continue
+        my_drive = candidate / "My Drive"
+        if (
+            candidate.is_dir()
+            and my_drive.is_dir()
+            and is_google_drive_path(candidate)
+        ):
+            providers.append(my_drive)
+    if not providers:
+        return None, "blocked_drive_unavailable"
+    if len(providers) != 1:
+        return None, "blocked_ambiguous_drive_root"
+    archive_root = providers[0] / "AI Chat Archive"
+    secure_mkdir(archive_root)
+    return assert_no_symlink_components(archive_root), "auto"
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     descriptor = open_regular_fd(path)
@@ -2403,14 +2440,15 @@ def run_config(args: argparse.Namespace) -> int:
                 }
                 run_errors.append({"component": "hub", "error_type": type(error).__name__})
 
-            drive_root_value = config.get("drive_root")
+            drive_root, drive_root_status = configured_drive_root(
+                config.get("drive_root")
+            )
             local_publishable = all(
                 result.get("publishable", True)
                 for result in harnesses.values()
                 if result.get("status") != "not_present_on_host"
             ) and not any(result.get("status") == "failed" for result in harnesses.values())
-            if drive_root_value:
-                drive_root = assert_no_symlink_components(Path(drive_root_value))
+            if drive_root is not None:
                 publication = (
                     {"status": "pending_manifest", "files_copied": 0}
                     if local_publishable
@@ -2453,7 +2491,7 @@ def run_config(args: argparse.Namespace) -> int:
                         }
                     )
             else:
-                publication = {"status": "blocked_no_drive_root", "files_copied": 0}
+                publication = {"status": drive_root_status, "files_copied": 0}
             collection_finished = True
         except Exception as error:
             body_free_error = {"component": "run", "error_type": type(error).__name__}
@@ -2503,10 +2541,7 @@ def run_config(args: argparse.Namespace) -> int:
                         source_root, receipt_path, receipt, config_digest
                     )
                     manifest_committed = True
-                    if config.get("drive_root"):
-                        drive_root = assert_no_symlink_components(
-                            Path(config["drive_root"])
-                        )
+                    if drive_root is not None:
                         publication = publish_host_shard(
                             spool_root, drive_root, host_id
                         )

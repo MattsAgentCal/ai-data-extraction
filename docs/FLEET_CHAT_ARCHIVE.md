@@ -55,10 +55,21 @@ The Studio config also polls `newmac`, `cals-mac-mini`, and `oldmac`. An offline
 
 ## Google Drive completion gate
 
-Install and sign in to Google Drive on the Mac Studio. After the File Provider folder appears, set `drive_root` in `configs/mac-studio.json` to the absolute private folder, typically:
+On the Mac Studio, open the pre-staged installer at
+`/Users/calstudio/Downloads/GoogleDrive-2026-08-28.dmg`, open
+`GoogleDrive.pkg`, and sign in. If that dated file is unavailable, use Google's
+official installer: <https://dl.google.com/drive-file-stream/GoogleDrive.dmg>.
+
+The Studio config uses `drive_root: "auto"`. Once exactly one live Google Drive
+File Provider appears, the pipeline creates and uses this private folder:
 
 ```text
 /Users/calstudio/Library/CloudStorage/GoogleDrive-<account>/My Drive/AI Chat Archive
 ```
 
-The next scheduled Studio run will pull current remote shards and publish them. Completion requires a real host object and its body-free receipt to appear in the mounted Drive folder, pass the built-in content-hash verification, and report `published`. This gate has not yet been run against a live Google Drive mount.
+Zero providers remain blocked as unavailable; multiple signed-in Google accounts
+remain blocked as ambiguous instead of guessing. The next scheduled Studio run
+will pull current remote shards and publish them. Completion requires a new chat
+object and its body-free receipt to appear in the mounted Drive folder, pass the
+built-in content-hash verification, and report `published`. This gate has not yet
+been run against a live Google Drive mount.
