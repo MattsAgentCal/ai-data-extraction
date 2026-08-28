@@ -1,4 +1,5 @@
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -6,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1514,6 +1516,218 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(requested, ["publish-manifest.json"])
             self.assertFalse((spool_root / "hosts" / "mini").exists())
 
+    def test_remote_rsync_guard_rejects_symlinked_source_tree(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "remote-spool"
+            shard = spool_root / "hosts" / "mini"
+            shard.mkdir(parents=True)
+            (spool_root / ".run.lock").touch()
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (shard / "receipts").symlink_to(outside, target_is_directory=True)
+
+            blocked = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    fleet.REMOTE_RSYNC_GUARD,
+                    str(spool_root),
+                    "mini",
+                    "--version",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertEqual(blocked.returncode, 42)
+            self.assertEqual(blocked.stdout, "")
+            self.assertEqual(blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR)
+
+    def test_remote_rsync_guard_allows_a_regular_source_tree(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "remote-spool"
+            shard = spool_root / "hosts" / "mini"
+            shard.mkdir(parents=True)
+            (spool_root / ".run.lock").touch()
+            (shard / "publish-manifest.json").write_text("{}\n")
+
+            allowed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    fleet.REMOTE_RSYNC_GUARD,
+                    str(spool_root),
+                    "mini",
+                    "--version",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            self.assertIn("rsync", allowed.stdout.lower())
+            self.assertNotIn(fleet.REMOTE_RSYNC_GUARD_ERROR, allowed.stderr)
+
+    def test_remote_rsync_guard_holds_the_publisher_lock_through_rsync(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            spool_root = root / "remote-spool"
+            (spool_root / "hosts" / "mini").mkdir(parents=True)
+            lock_path = spool_root / ".run.lock"
+            lock_path.touch()
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "rsync").symlink_to("/bin/sleep")
+            environment = os.environ.copy()
+            environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    fleet.REMOTE_RSYNC_GUARD,
+                    str(spool_root),
+                    "mini",
+                    "0.3",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+            descriptor = os.open(lock_path, os.O_RDONLY)
+            blocked = False
+            try:
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline and process.poll() is None:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    except BlockingIOError:
+                        blocked = True
+                        break
+                    time.sleep(0.01)
+                stdout, stderr = process.communicate(timeout=2)
+            finally:
+                os.close(descriptor)
+                if process.poll() is None:
+                    process.wait(timeout=2)
+
+            self.assertTrue(blocked, "remote rsync ran without the publisher lock")
+            self.assertEqual(process.returncode, 0, (stdout, stderr))
+
+    def test_remote_pull_reports_sender_guard_rejection_as_integrity_failure(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            rsync_calls = 0
+
+            def reject_guarded_rsync(command, **_kwargs):
+                nonlocal rsync_calls
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                rsync_calls += 1
+                raise subprocess.CalledProcessError(
+                    12,
+                    command,
+                    stderr=f"{fleet.REMOTE_RSYNC_GUARD_ERROR}\n",
+                )
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess,
+                "run",
+                side_effect=reject_guarded_rsync,
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertEqual(rsync_calls, 1)
+            self.assertEqual(
+                result["remotes"]["mini"],
+                {
+                    "status": "blocked_integrity_failure",
+                    "files_copied": 0,
+                    "error": "remote shard contains a symlink or unsafe entry",
+                },
+            )
+
+    def test_remote_pull_rejects_body_bearing_manifest_extensions(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            write_healthy_receipt(remote_shard)
+            manifest_path = remote_shard / "publish-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            secret_body = "must-not-become-an-authorized-manifest-field"
+            manifest["messages"] = [{"content": secret_body}]
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+            requested: list[str] = []
+
+            def emulate_remote(command, **kwargs):
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                requested.extend(
+                    item for item in kwargs["input"].split("\0") if item
+                )
+                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess,
+                "run",
+                side_effect=emulate_remote,
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertEqual(requested, ["publish-manifest.json"])
+            self.assertEqual(
+                result["remotes"]["mini"]["status"],
+                "blocked_integrity_failure",
+            )
+            self.assertNotIn(secret_body, result["remotes"]["mini"]["error"])
+
+    def test_remote_pull_rejects_an_unbounded_timeout_before_network_access(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                        "timeout_seconds": fleet.MAX_REMOTE_TIMEOUT_SECONDS + 1,
+                    }
+                ]
+            }
+            with mock.patch.object(fleet.subprocess, "run") as run:
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            run.assert_not_called()
+            self.assertEqual(
+                result["remotes"]["mini"],
+                {"status": "invalid_remote", "files_copied": 0},
+            )
+
     def test_remote_pull_reuses_only_a_validated_cached_shard(self):
         with safe_temporary_directory() as tmp:
             spool_root = Path(tmp) / "spool"
@@ -1551,6 +1765,12 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 self.assertEqual(rsync_command[0:2], ["rsync", "-rtz"])
                 self.assertIn("--checksum", rsync_command)
                 self.assertIn(f"--link-dest={cached_shard}", rsync_command)
+                self.assertTrue(
+                    any(
+                        item.startswith("--rsync-path=python3 -c ")
+                        for item in rsync_command
+                    )
+                )
 
     def test_cached_remote_pull_checksums_equal_size_equal_mtime_files(self):
         with safe_temporary_directory() as tmp:

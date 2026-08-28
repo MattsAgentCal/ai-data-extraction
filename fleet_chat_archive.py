@@ -12,6 +12,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -146,7 +147,119 @@ EXTRACTOR_FILES = (
 )
 MAX_SOURCE_BYTES = 1280 * 1024 * 1024
 MAX_OBJECT_BYTES = 1280 * 1024 * 1024
+MAX_REMOTE_TIMEOUT_SECONDS = 24 * 60 * 60
 CODEX_PATH_PROVENANCE_FIELDS = frozenset({"session_file"})
+
+# The remote rsync sender runs this guard before entering the rsync protocol.
+# It holds the same spool lock used by run_config, so a publisher cannot swap
+# the manifest or a path component during one transfer phase. No file body is
+# opened here: the guard only verifies directory entries and file types.
+REMOTE_RSYNC_GUARD_ERROR = "fleet-unsafe-source"
+REMOTE_RSYNC_GUARD = r'''
+import fcntl
+import os
+import stat
+import subprocess
+import sys
+
+ERROR = "fleet-unsafe-source"
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+def fail():
+    sys.stderr.write(ERROR + "\n")
+    raise SystemExit(42)
+
+
+def open_absolute_directory(path):
+    if not path.startswith("/"):
+        fail()
+    descriptor = os.open("/", os.O_RDONLY | DIRECTORY)
+    try:
+        for part in path.split("/")[1:]:
+            if not part:
+                continue
+            next_descriptor = os.open(
+                part,
+                os.O_RDONLY | DIRECTORY | NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        fail()
+
+
+def verify_tree(root_descriptor):
+    pending = [os.dup(root_descriptor)]
+    try:
+        while pending:
+            descriptor = pending.pop()
+            try:
+                with os.scandir(descriptor) as entries:
+                    for entry in entries:
+                        if entry.is_symlink():
+                            fail()
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(
+                                os.open(
+                                    entry.name,
+                                    os.O_RDONLY | DIRECTORY | NOFOLLOW,
+                                    dir_fd=descriptor,
+                                )
+                            )
+                        elif not entry.is_file(follow_symlinks=False):
+                            fail()
+            finally:
+                os.close(descriptor)
+    finally:
+        for descriptor in pending:
+            os.close(descriptor)
+
+
+if len(sys.argv) < 4:
+    fail()
+spool_root, host_id = sys.argv[1:3]
+if not host_id or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in host_id):
+    fail()
+
+spool_descriptor = open_absolute_directory(spool_root)
+try:
+    lock_descriptor = os.open(
+        ".run.lock",
+        os.O_RDONLY | NOFOLLOW,
+        dir_fd=spool_descriptor,
+    )
+    if not stat.S_ISREG(os.fstat(lock_descriptor).st_mode):
+        fail()
+    fcntl.flock(lock_descriptor, fcntl.LOCK_SH)
+    hosts_descriptor = os.open(
+        "hosts",
+        os.O_RDONLY | DIRECTORY | NOFOLLOW,
+        dir_fd=spool_descriptor,
+    )
+finally:
+    os.close(spool_descriptor)
+
+try:
+    shard_descriptor = os.open(
+        host_id,
+        os.O_RDONLY | DIRECTORY | NOFOLLOW,
+        dir_fd=hosts_descriptor,
+    )
+finally:
+    os.close(hosts_descriptor)
+
+try:
+    verify_tree(shard_descriptor)
+finally:
+    os.close(shard_descriptor)
+
+raise SystemExit(subprocess.call(["rsync", *sys.argv[3:]]))
+'''.strip()
 
 
 def canonical_json(value: object) -> bytes:
@@ -1419,7 +1532,18 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
         receipt_binding.get("sha256") if isinstance(receipt_binding, dict) else None,
     )
     if (
-        manifest.get("schema_version") != 1
+        set(manifest)
+        != {
+            "schema_version",
+            "host_id",
+            "run_id",
+            "generated_at",
+            "extractor_sha256",
+            "config_sha256",
+            "receipt",
+            "harnesses",
+        }
+        or manifest.get("schema_version") != 1
         or manifest.get("host_id") != host_id
         or not isinstance(manifest.get("run_id"), str)
         or not manifest["run_id"]
@@ -1432,6 +1556,7 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
         or not isinstance(harnesses, dict)
         or not set(harnesses).issubset(APPROVED_HARNESSES)
         or not isinstance(receipt_binding, dict)
+        or set(receipt_binding) != {"path", "sha256"}
     ):
         raise ValueError(f"invalid publish manifest identity: {host_id}")
 
@@ -1451,6 +1576,7 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
         )
         if (
             not isinstance(binding, dict)
+            or set(binding) != {"index_sha256", "object_sha256"}
             or not isinstance(binding.get("index_sha256"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", binding["index_sha256"])
             or not isinstance(object_digests, list)
@@ -2164,6 +2290,8 @@ def rsync_remote_allowlist(
     *,
     timeout_seconds: int,
     link_dest: Path | None,
+    remote_spool_root: str,
+    remote_host_id: str,
 ) -> None:
     """Fetch only NUL-delimited relative paths; none reach a remote shell."""
     command = [
@@ -2178,6 +2306,16 @@ def rsync_remote_allowlist(
     ]
     if link_dest is not None:
         command.append(f"--link-dest={link_dest}")
+    remote_guard = " ".join(
+        (
+            "python3",
+            "-c",
+            shlex.quote(REMOTE_RSYNC_GUARD),
+            shlex.quote(remote_spool_root),
+            shlex.quote(remote_host_id),
+        )
+    )
+    command.append(f"--rsync-path={remote_guard}")
     command.extend(
         [
             "-e",
@@ -2186,14 +2324,19 @@ def rsync_remote_allowlist(
             str(destination) + "/",
         ]
     )
-    subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
-        input="".join(f"{relative}\0" for relative in sorted(relative_paths)),
-        timeout=timeout_seconds,
-    )
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            input="".join(f"{relative}\0" for relative in sorted(relative_paths)),
+            timeout=timeout_seconds,
+        )
+    except subprocess.CalledProcessError as error:
+        if REMOTE_RSYNC_GUARD_ERROR in (error.stderr or ""):
+            raise ValueError("remote shard contains a symlink or unsafe entry") from error
+        raise
 
 
 def assert_remote_transfer_paths_have_no_symlink_components(
@@ -2269,12 +2412,16 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
 
         ssh_host = remote.get("ssh_host")
         remote_spool_root = remote.get("remote_spool_root")
+        timeout_value = remote.get("timeout_seconds", 300)
         if (
             not isinstance(ssh_host, str)
             or not SSH_HOST_RE.fullmatch(ssh_host)
             or not isinstance(remote_spool_root, str)
             or not REMOTE_SPOOL_ROOT_RE.fullmatch(remote_spool_root)
             or any(part in {".", ".."} for part in remote_spool_root.split("/"))
+            or isinstance(timeout_value, bool)
+            or not isinstance(timeout_value, int)
+            or not 1 <= timeout_value <= MAX_REMOTE_TIMEOUT_SECONDS
         ):
             statuses[remote_host_id] = {"status": "invalid_remote", "files_copied": 0}
             continue
@@ -2298,7 +2445,7 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=min(int(remote.get("timeout_seconds", 300)), 30),
+                timeout=min(timeout_value, 30),
             )
         except (OSError, subprocess.TimeoutExpired):
             statuses[remote_host_id] = {"status": "unreachable", "files_copied": 0}
@@ -2340,7 +2487,7 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                 dir=incoming_root, prefix=f"{remote_host_id}-"
             ) as incoming:
                 incoming_path = Path(incoming)
-                timeout_seconds = int(remote.get("timeout_seconds", 300))
+                timeout_seconds = timeout_value
 
                 # Pin the authorization document before asking the remote for
                 # any receipt, index, or conversation body.
@@ -2358,6 +2505,8 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     manifest_only,
                     timeout_seconds=timeout_seconds,
                     link_dest=link_dest,
+                    remote_spool_root=remote_spool_root,
+                    remote_host_id=remote_host_id,
                 )
                 validate_staged_allowlist(incoming_path, manifest_only)
                 manifest_payload = read_bytes_nofollow(
@@ -2383,6 +2532,8 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     metadata_paths,
                     timeout_seconds=timeout_seconds,
                     link_dest=link_dest,
+                    remote_spool_root=remote_spool_root,
+                    remote_host_id=remote_host_id,
                 )
                 validate_staged_allowlist(incoming_path, metadata_paths)
                 if read_bytes_nofollow(
@@ -2412,6 +2563,8 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                     object_paths | manifest_only,
                     timeout_seconds=timeout_seconds,
                     link_dest=link_dest,
+                    remote_spool_root=remote_spool_root,
+                    remote_host_id=remote_host_id,
                 )
                 validate_staged_allowlist(
                     incoming_path, metadata_paths | object_paths
