@@ -1248,7 +1248,11 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             )
             publication_results = [
                 {"status": "published", "files_copied": 3},
-                {"status": "blocked_integrity_failure", "files_copied": 0},
+                {
+                    "status": "blocked_integrity_failure",
+                    "files_copied": 0,
+                    "error": "private publication diagnostic",
+                },
             ]
             with mock.patch.object(
                 fleet, "publish_host_shard", side_effect=publication_results
@@ -1266,8 +1270,192 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 "blocked_integrity_failure",
             )
             self.assertEqual(
+                receipt["receipt_publication"]["error_code"],
+                "IntegrityFailure",
+            )
+            self.assertNotIn("private publication diagnostic", receipt_path.read_text())
+            self.assertEqual(
                 fleet.file_sha256(receipt_path), manifest["receipt"]["sha256"]
             )
+
+    def test_manifest_receipt_projects_hub_and_publication_diagnostics(self):
+        for channel in ("hub", "publication"):
+            with self.subTest(channel=channel), safe_temporary_directory() as tmp:
+                private_body = f"Private{channel.title()}DiagnosticMarker"
+                root = Path(tmp)
+                claude_root = root / "claude"
+                write_jsonl(
+                    claude_root / "projects" / "sample" / "session.jsonl",
+                    [{"type": "user", "message": {"content": "healthy"}}],
+                )
+                drive_root = root / "drive"
+                if channel == "publication":
+                    drive_root.mkdir()
+                config_path = root / "config.json"
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "host_id": "test-mac",
+                            "spool_root": str(root / "spool"),
+                            "drive_root": (
+                                str(drive_root) if channel == "publication" else None
+                            ),
+                            "sources": {"claude_roots": [str(claude_root)]},
+                        }
+                    )
+                )
+                hub_result = {
+                    "remotes": {
+                        "oldmac": {
+                            "status": "blocked_integrity_failure",
+                            "files_copied": 0,
+                            "error": private_body,
+                        }
+                    }
+                }
+                publication_result = {
+                    "status": "blocked_integrity_failure",
+                    "files_copied": 0,
+                    "error": private_body,
+                }
+                with mock.patch.object(
+                    fleet,
+                    "pull_hub_remotes",
+                    return_value=hub_result if channel == "hub" else {"remotes": {}},
+                ), mock.patch.object(
+                    fleet,
+                    "publish_host_shard",
+                    return_value=publication_result,
+                ), mock.patch("builtins.print") as printed:
+                    fleet.run_config(configured_args(config_path))
+
+                shard = root / "spool" / "hosts" / "test-mac"
+                manifest = json.loads((shard / "publish-manifest.json").read_text())
+                receipt_path = shard / manifest["receipt"]["path"]
+                receipt_text = receipt_path.read_text()
+                receipt = json.loads(receipt_text)
+                self.assertNotIn(private_body, receipt_text)
+                self.assertNotIn(private_body, printed.call_args.args[0])
+                if channel == "hub":
+                    self.assertEqual(
+                        receipt["hub"]["remotes"]["oldmac"]["error_code"],
+                        "IntegrityFailure",
+                    )
+                else:
+                    self.assertEqual(
+                        receipt["publication"]["error_code"],
+                        "IntegrityFailure",
+                    )
+                    self.assertEqual(
+                        receipt["errors"],
+                        [
+                            {
+                                "component": "publication",
+                                "error_code": "PublicationBlocked",
+                            }
+                        ],
+                    )
+                fleet.validated_shard_files(shard, "test-mac")
+
+    def test_failed_receipt_and_stdout_project_error_type_markers(self):
+        hub_marker = "PrivateHubErrorTypeMarker"
+        receipt_marker = "PrivateReceiptErrorTypeMarker"
+        receipt_error = type(receipt_marker, (Exception,), {})
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {},
+                    }
+                )
+            )
+            raw_hub = {
+                "remotes": {},
+                "status": "failed",
+                "error_type": hub_marker,
+            }
+            with mock.patch.object(
+                fleet, "pull_hub_remotes", return_value=raw_hub
+            ), mock.patch.object(
+                fleet, "configured_drive_root", side_effect=receipt_error("private")
+            ), mock.patch("builtins.print") as printed:
+                result = fleet.run_config(configured_args(config_path))
+
+            receipt_path = next(
+                (root / "spool" / "hosts" / "test-mac" / "receipts").glob(
+                    "*.json"
+                )
+            )
+            receipt_text = receipt_path.read_text()
+            stdout_text = printed.call_args.args[0]
+            self.assertNotEqual(result, 0)
+            for marker in (hub_marker, receipt_marker):
+                self.assertNotIn(marker, receipt_text)
+                self.assertNotIn(marker, stdout_text)
+            receipt = json.loads(receipt_text)
+            stdout_receipt = json.loads(stdout_text)
+            expected_hub = {
+                "remotes": {},
+                "status": "failed",
+                "error_code": "HubFailure",
+            }
+            expected_errors = [
+                {"component": "run", "error_code": "RunFailure"}
+            ]
+            self.assertEqual(receipt["hub"], expected_hub)
+            self.assertEqual(stdout_receipt["hub"], expected_hub)
+            self.assertEqual(receipt["errors"], expected_errors)
+            self.assertEqual(stdout_receipt["errors"], expected_errors)
+
+    def test_manifest_receipt_projects_hub_exception_codes(self):
+        marker = "PrivateManifestHubExceptionMarker"
+        hub_error = type(marker, (Exception,), {})
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {},
+                    }
+                )
+            )
+            with mock.patch.object(
+                fleet, "pull_hub_remotes", side_effect=hub_error("private")
+            ), mock.patch("builtins.print") as printed:
+                result = fleet.run_config(configured_args(config_path))
+
+            shard = root / "spool" / "hosts" / "test-mac"
+            manifest = json.loads((shard / "publish-manifest.json").read_text())
+            receipt_path = shard / manifest["receipt"]["path"]
+            receipt_text = receipt_path.read_text()
+            stdout_text = printed.call_args.args[0]
+            self.assertNotEqual(result, 0)
+            self.assertNotIn(marker, receipt_text)
+            self.assertNotIn(marker, stdout_text)
+            receipt = json.loads(receipt_text)
+            expected_hub = {
+                "remotes": {},
+                "status": "failed",
+                "error_code": "HubFailure",
+            }
+            expected_errors = [
+                {"component": "hub", "error_code": "HubFailure"}
+            ]
+            self.assertEqual(receipt["hub"], expected_hub)
+            self.assertEqual(receipt["errors"], expected_errors)
+            fleet.validated_shard_files(shard, "test-mac")
 
     def test_second_manifest_interruption_preserves_first_manifest_and_receipt(self):
         with safe_temporary_directory() as tmp:
@@ -1679,7 +1867,11 @@ assert peak < 80 * 1024 * 1024, peak
             receipt = json.loads(receipt_path.read_text())
             self.assertNotEqual(result, 0)
             self.assertEqual(receipt["harnesses"]["claude"]["status"], "failed")
-            self.assertIn("symlink", receipt["harnesses"]["claude"]["error"])
+            self.assertEqual(
+                receipt["harnesses"]["claude"]["error_code"],
+                "CollectionFailure",
+            )
+            self.assertNotIn("error", receipt["harnesses"]["claude"])
             self.assertFalse(
                 (root / "spool" / "hosts" / "test-mac" / "claude" / "objects").exists()
             )
@@ -2878,6 +3070,169 @@ assert peak < 80 * 1024 * 1024, peak
                 )
                 self.assertNotIn(private_body, blocked.stderr)
 
+    def test_client_and_sender_reject_free_form_receipt_error_channels(self):
+        private_body = "private transcript body hidden in operational metadata"
+        for channel in (
+            "publication_error",
+            "remote_error",
+            "receipt_error_type",
+            "hub_error_type",
+        ):
+            with self.subTest(channel=channel), safe_temporary_directory() as tmp:
+                spool_root = Path(tmp) / "remote-spool"
+                shard = spool_root / "hosts" / "mini"
+                write_archive_object(shard, host_id="mini")
+                receipt_path = write_healthy_receipt(shard)
+                manifest_path = shard / "publish-manifest.json"
+                manifest = json.loads(manifest_path.read_text())
+                receipt = json.loads(receipt_path.read_text())
+                if channel == "publication_error":
+                    receipt["publication"] = {
+                        "status": "blocked_integrity_failure",
+                        "files_copied": 0,
+                        "error": private_body,
+                    }
+                elif channel == "remote_error":
+                    receipt["hub"] = {
+                        "remotes": {
+                            "oldmac": {
+                                "status": "blocked_integrity_failure",
+                                "files_copied": 0,
+                                "error": private_body,
+                            }
+                        }
+                    }
+                elif channel == "receipt_error_type":
+                    receipt["status"] = "failed"
+                    receipt["errors"] = [
+                        {
+                            "component": "publication",
+                            "error_type": private_body,
+                        }
+                    ]
+                else:
+                    receipt["hub"] = {
+                        "remotes": {},
+                        "status": "failed",
+                        "error_type": private_body,
+                    }
+                write_canonical_json(receipt_path, receipt)
+                manifest["receipt"]["sha256"] = fleet.file_sha256(receipt_path)
+                write_canonical_json(manifest_path, manifest)
+
+                with self.assertRaises(ValueError) as raised:
+                    fleet.validate_publish_manifest(
+                        shard,
+                        "mini",
+                        {"claude"},
+                        [receipt_path],
+                        require_objects=False,
+                    )
+                self.assertNotIn(private_body, str(raised.exception))
+
+                (spool_root / ".run.lock").touch()
+                blocked = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        fleet.REMOTE_RSYNC_GUARD,
+                        str(spool_root),
+                        "mini",
+                        str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
+                        "--version",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(blocked.returncode, 42)
+                self.assertEqual(blocked.stdout, "")
+                self.assertEqual(
+                    blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR
+                )
+                self.assertNotIn(private_body, blocked.stderr)
+
+    def test_persisted_receipt_projection_uses_only_fixed_error_codes(self):
+        private_body = "private runtime diagnostic that stays in memory only"
+        raw = {
+            "harnesses": {
+                "claude": {
+                    "status": "failed",
+                    "conversations": 0,
+                    "new_objects": 0,
+                    "publishable": False,
+                    "error_type": "PrivateHarnessFailure",
+                    "error": private_body,
+                }
+            },
+            "hub": {
+                "remotes": {
+                    "oldmac": {
+                        "status": "blocked_integrity_failure",
+                        "files_copied": 0,
+                        "error": private_body,
+                    }
+                }
+            },
+            "publication": {
+                "status": "blocked_integrity_failure",
+                "files_copied": 0,
+                "error": private_body,
+            },
+            "receipt_publication": {
+                "status": "blocked_integrity_failure",
+                "files_copied": 0,
+                "error": private_body,
+            },
+            "errors": [
+                {"component": "publication", "error_type": private_body},
+                {"component": "receipt_publication", "error_type": private_body},
+            ],
+        }
+
+        projected = fleet.project_receipt_for_persistence(raw)
+
+        self.assertIn(private_body, json.dumps(raw))
+        self.assertNotIn(private_body, json.dumps(projected))
+        self.assertEqual(
+            projected["publication"]["error_code"], "IntegrityFailure"
+        )
+        self.assertEqual(
+            projected["receipt_publication"]["error_code"], "IntegrityFailure"
+        )
+        self.assertEqual(
+            projected["hub"]["remotes"]["oldmac"]["error_code"],
+            "IntegrityFailure",
+        )
+        self.assertEqual(
+            projected["harnesses"]["claude"]["error_code"],
+            "CollectionFailure",
+        )
+        self.assertEqual(
+            projected["errors"],
+            [
+                {
+                    "component": "publication",
+                    "error_code": "PublicationBlocked",
+                },
+                {
+                    "component": "receipt_publication",
+                    "error_code": "PublicationBlocked",
+                },
+            ],
+        )
+        self.assertEqual(
+            fleet.project_hub_receipt_metadata(
+                {
+                    "remotes": {},
+                    "status": "failed",
+                    "error_type": private_body,
+                }
+            ),
+            {"remotes": {}, "status": "failed", "error_code": "HubFailure"},
+        )
+
     def test_body_free_metadata_accepts_exact_fleet_variants(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -2949,7 +3304,7 @@ assert peak < 80 * 1024 * 1024, peak
             receipt["errors"] = [
                 {
                     "component": "receipt_publication",
-                    "error_type": "PublicationBlocked",
+                    "error_code": "PublicationBlocked",
                 }
             ]
             receipt["harnesses"]["codex"] = {
@@ -2979,7 +3334,7 @@ assert peak < 80 * 1024 * 1024, peak
             receipt["receipt_publication"] = {
                 "status": "blocked_integrity_failure",
                 "files_copied": 0,
-                "error": "archive verification failed",
+                "error_code": "IntegrityFailure",
             }
             write_canonical_json(receipt_path, receipt)
             manifest["receipt"]["sha256"] = fleet.file_sha256(receipt_path)

@@ -160,6 +160,25 @@ MAX_INDEX_METADATA_BYTES = MAX_PUBLISH_MANIFEST_BYTES
 MAX_METADATA_STRING_CHARS = 4096
 MAX_RECEIPT_ERRORS = 1024
 MAX_RECEIPT_REMOTES = 1024
+INTEGRITY_ERROR_CODE = "IntegrityFailure"
+HUB_ERROR_CODE = "HubFailure"
+PUBLICATION_ERROR_CODE = "PublicationBlocked"
+RECEIPT_ERROR_CODE_BY_COMPONENT = {
+    "claude": "CollectionFailure",
+    "codex": "CollectionFailure",
+    "openclaw": "CollectionFailure",
+    "hermes": "CollectionFailure",
+    "hub": HUB_ERROR_CODE,
+    "publication": PUBLICATION_ERROR_CODE,
+    "receipt_publication": PUBLICATION_ERROR_CODE,
+    "run": "RunFailure",
+    "publish_manifest": "ManifestFailure",
+}
+MANIFEST_RECEIPT_ERROR_CODE_BY_COMPONENT = {
+    "hub": HUB_ERROR_CODE,
+    "publication": PUBLICATION_ERROR_CODE,
+    "receipt_publication": PUBLICATION_ERROR_CODE,
+}
 # The inspected 2026-08-28 fleet high-water marks were 1,129 objects in one
 # harness and 1,158 total. These leave substantial growth room without making
 # a manifest-controlled transfer or allocation unbounded.
@@ -325,7 +344,7 @@ def validate_publication(value):
     if status == "published":
         fields.update({"files_verified", "quarantined_unindexed_objects"})
     elif status == "blocked_integrity_failure":
-        fields.add("error")
+        fields.add("error_code")
     if (
         set(value) != fields
         or status not in {
@@ -350,7 +369,10 @@ def validate_publication(value):
             "quarantined_unindexed_objects" in value
             and not nonnegative_int(value["quarantined_unindexed_objects"])
         )
-        or ("error" in value and not bounded_string(value["error"]))
+        or (
+            "error_code" in value
+            and value["error_code"] != "IntegrityFailure"
+        )
     ):
         fail()
 
@@ -427,7 +449,7 @@ def validate_remote_result(value):
     if status == "pulled":
         fields.add("files_verified")
     elif status == "blocked_integrity_failure":
-        fields.add("error")
+        fields.add("error_code")
     if "publication" in value:
         fields.add("publication")
     if (
@@ -445,7 +467,10 @@ def validate_remote_result(value):
             "files_verified" in value
             and not nonnegative_int(value["files_verified"])
         )
-        or ("error" in value and not bounded_string(value["error"]))
+        or (
+            "error_code" in value
+            and value["error_code"] != "IntegrityFailure"
+        )
     ):
         fail()
     if "publication" in value:
@@ -501,10 +526,15 @@ def validate_receipt(receipt, manifest, receipt_name):
     for error in errors:
         if (
             not isinstance(error, dict)
-            or set(error) != {"component", "error_type"}
+            or set(error) != {"component", "error_code"}
             or error.get("component")
             not in {"hub", "publication", "receipt_publication"}
-            or not bounded_string(error.get("error_type"))
+            or error.get("error_code")
+            != {
+                "hub": "HubFailure",
+                "publication": "PublicationBlocked",
+                "receipt_publication": "PublicationBlocked",
+            }[error["component"]]
         ):
             fail()
     if bool(errors) != (receipt.get("status") == "failed"):
@@ -517,9 +547,9 @@ def validate_receipt(receipt, manifest, receipt_name):
     if set(hub) == {"remotes"}:
         pass
     elif not (
-        set(hub) == {"remotes", "status", "error_type"}
+        set(hub) == {"remotes", "status", "error_code"}
         and hub.get("status") == "failed"
-        and bounded_string(hub.get("error_type"))
+        and hub.get("error_code") == "HubFailure"
     ):
         fail()
     if len(hub["remotes"]) > 1024:
@@ -2555,6 +2585,239 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
     return manifest
 
 
+def project_publication_receipt_metadata(value: object) -> dict:
+    """Drop operational detail from a publication result before persistence."""
+    result = value if isinstance(value, dict) else {}
+    status = result.get("status")
+    allowed_statuses = {
+        "not_attempted",
+        "pending_manifest",
+        "blocked_no_drive_root",
+        "blocked_drive_unavailable",
+        "blocked_ambiguous_drive_root",
+        "blocked_not_google_drive",
+        "blocked_source_missing",
+        "blocked_incomplete_collection",
+        "blocked_integrity_failure",
+        "published",
+        "failed",
+    }
+    if status not in allowed_statuses:
+        status = "failed"
+    projected = {
+        "status": status,
+        "files_copied": (
+            result.get("files_copied")
+            if is_nonnegative_int(result.get("files_copied"))
+            else 0
+        ),
+    }
+    if status == "published":
+        projected["files_verified"] = (
+            result.get("files_verified")
+            if is_nonnegative_int(result.get("files_verified"))
+            else 0
+        )
+        projected["quarantined_unindexed_objects"] = (
+            result.get("quarantined_unindexed_objects")
+            if is_nonnegative_int(result.get("quarantined_unindexed_objects"))
+            else 0
+        )
+    elif status == "blocked_integrity_failure":
+        projected["error_code"] = INTEGRITY_ERROR_CODE
+    return projected
+
+
+def project_remote_receipt_metadata(value: object) -> dict:
+    """Project one raw hub result to its fixed-code persisted form."""
+    result = value if isinstance(value, dict) else {}
+    status = result.get("status")
+    allowed_statuses = {
+        "pulled",
+        "cached",
+        "invalid_remote",
+        "unreachable",
+        "pending_manifest",
+        "blocked_integrity_failure",
+    }
+    if status not in allowed_statuses:
+        status = "invalid_remote"
+    projected = {
+        "status": status,
+        "files_copied": (
+            result.get("files_copied")
+            if is_nonnegative_int(result.get("files_copied"))
+            else 0
+        ),
+    }
+    if status == "pulled":
+        projected["files_verified"] = (
+            result.get("files_verified")
+            if is_nonnegative_int(result.get("files_verified"))
+            else 0
+        )
+    elif status == "blocked_integrity_failure":
+        projected["error_code"] = INTEGRITY_ERROR_CODE
+    if "publication" in result:
+        projected["publication"] = project_publication_receipt_metadata(
+            result["publication"]
+        )
+    return projected
+
+
+def project_hub_receipt_metadata(value: object) -> dict:
+    """Project raw hub diagnostics without retaining free-form strings."""
+    hub = value if isinstance(value, dict) else {}
+    raw_remotes = hub.get("remotes")
+    remotes = raw_remotes if isinstance(raw_remotes, dict) else {}
+    projected_remotes = {
+        remote_host_id: project_remote_receipt_metadata(remote)
+        for remote_host_id, remote in remotes.items()
+        if isinstance(remote_host_id, str) and HOST_ID_RE.fullmatch(remote_host_id)
+    }
+    projected = {"remotes": projected_remotes}
+    if hub.get("status") == "failed":
+        projected.update({"status": "failed", "error_code": HUB_ERROR_CODE})
+    return projected
+
+
+def project_receipt_errors(value: object) -> list[dict]:
+    """Replace arbitrary exception class names with fixed receipt codes."""
+    errors = value if isinstance(value, list) else []
+    projected: list[dict] = []
+    for error in errors[:MAX_RECEIPT_ERRORS]:
+        component = error.get("component") if isinstance(error, dict) else None
+        if component not in RECEIPT_ERROR_CODE_BY_COMPONENT:
+            component = "run"
+        entry = {
+            "component": component,
+            "error_code": RECEIPT_ERROR_CODE_BY_COMPONENT[component],
+        }
+        if entry not in projected:
+            projected.append(entry)
+    return projected
+
+
+def project_harness_receipt_metadata(value: object) -> dict:
+    """Project one harness result without exception strings or arbitrary fields."""
+    result = value if isinstance(value, dict) else {}
+    status = result.get("status")
+    if status == "not_present_on_host":
+        return {
+            "status": "not_present_on_host",
+            "conversations": 0,
+            "new_objects": 0,
+            "publishable": False,
+            "inventory_only": True,
+        }
+    if status == "failed":
+        return {
+            "status": "failed",
+            "conversations": 0,
+            "new_objects": 0,
+            "publishable": False,
+            "error_code": "CollectionFailure",
+        }
+    if status not in {"collected", "no_conversations", "partial", "source_missing"}:
+        return {
+            "status": "failed",
+            "conversations": 0,
+            "new_objects": 0,
+            "publishable": False,
+            "error_code": "CollectionFailure",
+        }
+    quality = result.get("quality") if isinstance(result.get("quality"), dict) else {}
+    quality_status = quality.get("status")
+    if quality_status not in {"complete", "partial", "source_missing"}:
+        quality_status = "partial"
+    projected_quality = {
+        field: quality.get(field) if is_nonnegative_int(quality.get(field)) else 0
+        for field in (
+            "discovered_lines",
+            "parsed_lines",
+            "failed_lines",
+            "recognized_lines",
+            "discovered_files",
+            "processed_files",
+            "skipped_unchanged_files",
+        )
+    }
+    projected_quality["status"] = quality_status
+    projected = {
+        "status": status,
+        "conversations": (
+            result.get("conversations")
+            if is_nonnegative_int(result.get("conversations"))
+            else 0
+        ),
+        "new_objects": (
+            result.get("new_objects")
+            if is_nonnegative_int(result.get("new_objects"))
+            else 0
+        ),
+        "redactions": (
+            result.get("redactions")
+            if is_nonnegative_int(result.get("redactions"))
+            else 0
+        ),
+        "index_conversations": (
+            result.get("index_conversations")
+            if is_nonnegative_int(result.get("index_conversations"))
+            else 0
+        ),
+        "publishable": result.get("publishable") is True,
+        "quality": projected_quality,
+    }
+    if "staged_objects_discarded" in result:
+        projected["staged_objects_discarded"] = (
+            result.get("staged_objects_discarded")
+            if is_nonnegative_int(result.get("staged_objects_discarded"))
+            else 0
+        )
+    return projected
+
+
+def project_receipt_for_persistence(receipt: dict) -> dict:
+    """Return the body-free receipt projection written to durable storage."""
+    projected = {
+        field: receipt.get(field)
+        for field in (
+            "schema_version",
+            "extractor_sha256",
+            "config_sha256",
+            "run_id",
+            "collected_at",
+            "host_id",
+            "collection_status",
+            "status",
+            "receipt_path",
+        )
+    }
+    raw_harnesses = receipt.get("harnesses")
+    harnesses = raw_harnesses if isinstance(raw_harnesses, dict) else {}
+    projected["harnesses"] = {
+        harness: project_harness_receipt_metadata(result)
+        for harness, result in harnesses.items()
+        if harness in APPROVED_HARNESSES
+    }
+    projected["hub"] = project_hub_receipt_metadata(receipt.get("hub"))
+    projected["publication"] = project_publication_receipt_metadata(
+        receipt.get("publication")
+    )
+    projected["errors"] = project_receipt_errors(receipt.get("errors"))
+    if "receipt_publication" in receipt:
+        projected["receipt_publication"] = project_publication_receipt_metadata(
+            receipt["receipt_publication"]
+        )
+    return projected
+
+
+def write_persisted_receipt(path: Path, receipt: dict) -> dict:
+    projected = project_receipt_for_persistence(receipt)
+    atomic_write_json(path, projected)
+    return projected
+
+
 def validate_publication_receipt_metadata(value: object) -> None:
     if not isinstance(value, dict):
         raise ValueError("invalid manifest-bound publication metadata")
@@ -2566,7 +2829,7 @@ def validate_publication_receipt_metadata(value: object) -> None:
             "quarantined_unindexed_objects",
         }
     elif status == "blocked_integrity_failure":
-        expected_fields = base_fields | {"error"}
+        expected_fields = base_fields | {"error_code"}
     else:
         expected_fields = base_fields
     if (
@@ -2594,7 +2857,10 @@ def validate_publication_receipt_metadata(value: object) -> None:
             "quarantined_unindexed_objects" in value
             and not is_nonnegative_int(value["quarantined_unindexed_objects"])
         )
-        or ("error" in value and not is_bounded_metadata_string(value["error"]))
+        or (
+            "error_code" in value
+            and value["error_code"] != INTEGRITY_ERROR_CODE
+        )
     ):
         raise ValueError("invalid manifest-bound publication metadata")
 
@@ -2672,7 +2938,7 @@ def validate_remote_receipt_metadata(value: object) -> None:
     if status == "pulled":
         expected_fields.add("files_verified")
     elif status == "blocked_integrity_failure":
-        expected_fields.add("error")
+        expected_fields.add("error_code")
     if "publication" in value:
         expected_fields.add("publication")
     if (
@@ -2691,7 +2957,10 @@ def validate_remote_receipt_metadata(value: object) -> None:
             "files_verified" in value
             and not is_nonnegative_int(value["files_verified"])
         )
-        or ("error" in value and not is_bounded_metadata_string(value["error"]))
+        or (
+            "error_code" in value
+            and value["error_code"] != INTEGRITY_ERROR_CODE
+        )
     ):
         raise ValueError("invalid manifest-bound remote receipt metadata")
     if "publication" in value:
@@ -2704,9 +2973,9 @@ def validate_hub_receipt_metadata(value: object) -> None:
     if set(value) == {"remotes"}:
         pass
     elif (
-        set(value) == {"remotes", "status", "error_type"}
+        set(value) == {"remotes", "status", "error_code"}
         and value.get("status") == "failed"
-        and is_bounded_metadata_string(value.get("error_type"))
+        and value.get("error_code") == HUB_ERROR_CODE
     ):
         pass
     else:
@@ -2778,9 +3047,10 @@ def validate_manifest_bound_receipt_metadata(
     for error in errors:
         if (
             not isinstance(error, dict)
-            or set(error) != {"component", "error_type"}
-            or error.get("component") not in {"hub", "publication", "receipt_publication"}
-            or not is_bounded_metadata_string(error.get("error_type"))
+            or set(error) != {"component", "error_code"}
+            or error.get("component") not in MANIFEST_RECEIPT_ERROR_CODE_BY_COMPONENT
+            or error.get("error_code")
+            != MANIFEST_RECEIPT_ERROR_CODE_BY_COMPONENT[error["component"]]
         ):
             raise ValueError(f"manifest-bound receipt is not healthy: {host_id}")
     if bool(errors) != (receipt.get("status") == "failed"):
@@ -4339,11 +4609,11 @@ def run_config(args: argparse.Namespace) -> int:
             }
             if collection_status in {"completed", "completed_with_absent_harnesses"}:
                 try:
-                    atomic_write_json(receipt_path, receipt)
+                    persisted_receipt = write_persisted_receipt(receipt_path, receipt)
                     write_publish_manifest(
                         source_root,
                         receipt_path,
-                        receipt,
+                        persisted_receipt,
                         config_digest,
                         validation_proofs=validation_proofs,
                     )
@@ -4380,11 +4650,13 @@ def run_config(args: argparse.Namespace) -> int:
                             / f"{run_id}-{publication_suffix}.json"
                         )
                         receipt["receipt_path"] = str(receipt_path)
-                        atomic_write_json(receipt_path, receipt)
+                        persisted_receipt = write_persisted_receipt(
+                            receipt_path, receipt
+                        )
                         write_publish_manifest(
                             source_root,
                             receipt_path,
-                            receipt,
+                            persisted_receipt,
                             config_digest,
                             validation_proofs=validation_proofs,
                         )
@@ -4410,11 +4682,13 @@ def run_config(args: argparse.Namespace) -> int:
                                     / f"{run_id}-publication-failed.json"
                                 )
                                 receipt["receipt_path"] = str(receipt_path)
-                                atomic_write_json(receipt_path, receipt)
+                                persisted_receipt = write_persisted_receipt(
+                                    receipt_path, receipt
+                                )
                                 write_publish_manifest(
                                     source_root,
                                     receipt_path,
-                                    receipt,
+                                    persisted_receipt,
                                     config_digest,
                                     validation_proofs=validation_proofs,
                                 )
@@ -4440,12 +4714,12 @@ def run_config(args: argparse.Namespace) -> int:
                             / f"{run_id}-publish-error.json"
                         )
                         receipt["receipt_path"] = str(receipt_path)
-                    atomic_write_json(receipt_path, receipt)
+                    write_persisted_receipt(receipt_path, receipt)
             else:
                 rollback_uncommitted_collection()
-                atomic_write_json(receipt_path, receipt)
+                write_persisted_receipt(receipt_path, receipt)
 
-    print(json.dumps(receipt, sort_keys=True))
+    print(json.dumps(project_receipt_for_persistence(receipt), sort_keys=True))
     return 1 if run_errors else 0
 
 
