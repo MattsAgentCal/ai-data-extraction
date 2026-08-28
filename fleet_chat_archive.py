@@ -257,11 +257,34 @@ def read_json_nofollow(
 ):
     descriptor = open_regular_fd(path)
     try:
-        if max_bytes is not None and os.fstat(descriptor).st_size > max_bytes:
+        initial_metadata = os.fstat(descriptor)
+        if max_bytes is not None and initial_metadata.st_size > max_bytes:
             raise ValueError(f"{size_label} exceeds maximum of {max_bytes} bytes: {path}")
         with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
             descriptor = -1
-            return json.load(handle)
+            value = json.load(handle)
+            final_metadata = os.fstat(handle.fileno())
+            initial_identity = (
+                initial_metadata.st_dev,
+                initial_metadata.st_ino,
+                initial_metadata.st_size,
+                initial_metadata.st_mtime_ns,
+                initial_metadata.st_ctime_ns,
+            )
+            final_identity = (
+                final_metadata.st_dev,
+                final_metadata.st_ino,
+                final_metadata.st_size,
+                final_metadata.st_mtime_ns,
+                final_metadata.st_ctime_ns,
+            )
+            if (
+                initial_identity != final_identity
+                or (max_bytes is not None and final_metadata.st_size > max_bytes)
+                or os.lseek(handle.fileno(), 0, os.SEEK_CUR) != final_metadata.st_size
+            ):
+                raise ValueError(f"{size_label} changed while parsing: {path}")
+            return value
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -510,14 +533,15 @@ def load_healthy_manifest_snapshot(
     ):
         raise ValueError("invalid prior manifest receipt path")
     receipt_path = source_root / receipt_relative
+    if not receipt_path.is_file() or receipt_path.is_symlink():
+        raise ValueError("prior manifest receipt is missing")
+    receipt_payload = read_bytes_nofollow(receipt_path)
     if (
-        not receipt_path.is_file()
-        or receipt_path.is_symlink()
-        or not re.fullmatch(r"[0-9a-f]{64}", str(receipt_binding.get("sha256", "")))
-        or file_sha256(receipt_path) != receipt_binding["sha256"]
+        not re.fullmatch(r"[0-9a-f]{64}", str(receipt_binding.get("sha256", "")))
+        or hashlib.sha256(receipt_payload).hexdigest() != receipt_binding["sha256"]
     ):
         raise ValueError("prior manifest receipt hash mismatch")
-    receipt = read_json_nofollow(receipt_path)
+    receipt = json.loads(receipt_payload)
     receipt_harnesses = receipt.get("harnesses")
     collection_status = receipt.get("collection_status", receipt.get("status"))
     if (
@@ -950,7 +974,11 @@ def collect_sources(
                     file_counts["processed"] += 1
                     quality = {}
                     conversation = extract_claude_session(
-                        session_file, installation=root, quality_out=quality
+                        session_file,
+                        installation=root,
+                        quality_out=quality,
+                        max_source_bytes=MAX_SOURCE_BYTES,
+                        expected_fingerprint=fingerprint,
                     )
                     qualities.append(quality)
                     if conversation:
@@ -1037,7 +1065,10 @@ def collect_sources(
                     file_counts["processed"] += 1
                     quality = {}
                     conversation = extract_openclaw_session(
-                        session_file, quality_out=quality
+                        session_file,
+                        quality_out=quality,
+                        max_source_bytes=MAX_SOURCE_BYTES,
+                        expected_fingerprint=fingerprint,
                     )
                     qualities.append(quality)
                     if conversation:
@@ -1070,7 +1101,10 @@ def collect_sources(
                     continue
                 file_counts["discovered"] += 1
                 state_key = f"hermes-export:{export_file.name}"
-                fingerprint = source_fingerprint(export_file, include_content_hash=True)
+                parse_fingerprint = source_fingerprint(
+                    export_file, include_content_hash=True
+                )
+                fingerprint = dict(parse_fingerprint)
                 fingerprint.pop("mtime_ns", None)
                 fingerprint.pop("ctime_ns", None)
                 fingerprint.pop("inode", None)
@@ -1079,7 +1113,12 @@ def collect_sources(
                     continue
                 file_counts["processed"] += 1
                 quality = {}
-                yield from iter_hermes_export(export_file, quality_out=quality)
+                yield from iter_hermes_export(
+                    export_file,
+                    quality_out=quality,
+                    max_source_bytes=MAX_SOURCE_BYTES,
+                    expected_fingerprint=parse_fingerprint,
+                )
                 qualities.append(quality)
                 if quality.get("status") == "complete":
                     next_state[state_key] = fingerprint
@@ -1352,9 +1391,12 @@ def validate_publish_manifest(
     ):
         raise ValueError(f"invalid manifest receipt path: {host_id}")
     receipt_path = source_root / receipt_relative
-    if receipt_path not in receipt_paths or file_sha256(receipt_path) != receipt_binding["sha256"]:
+    if receipt_path not in receipt_paths:
+        raise ValueError(f"manifest receipt is missing: {host_id}")
+    receipt_payload = read_bytes_nofollow(receipt_path)
+    if hashlib.sha256(receipt_payload).hexdigest() != receipt_binding["sha256"]:
         raise ValueError(f"manifest receipt hash mismatch: {host_id}")
-    receipt = read_json_nofollow(receipt_path)
+    receipt = json.loads(receipt_payload)
     receipt_harnesses = receipt.get("harnesses")
     collection_status = receipt.get("collection_status", receipt.get("status"))
     if (
@@ -2181,8 +2223,10 @@ def run_config(args: argparse.Namespace) -> int:
         configured_harnesses.add("hermes")
     source_root = spool_root / "hosts" / host_id
     prior_manifest_payload: bytes | None = None
-    prior_index_payloads: dict[Path, bytes] = {}
+    prior_index_payloads: dict[Path, bytes | None] = {}
     prior_state_payloads: dict[Path, bytes | None] = {}
+    prior_object_names: dict[Path, set[str]] = {}
+    prior_object_references: set[Path] = set()
     transaction_snapshots_ready = False
     manifest_committed = False
 
@@ -2204,7 +2248,10 @@ def run_config(args: argparse.Namespace) -> int:
             return
         with defer_sigterm_during_rollback():
             for index_path, payload in prior_index_payloads.items():
-                atomic_write_bytes(index_path, payload)
+                if payload is None:
+                    remove_file_if_present(index_path)
+                else:
+                    atomic_write_bytes(index_path, payload)
             manifest_path = source_root / "publish-manifest.json"
             if prior_manifest_payload is None:
                 remove_file_if_present(manifest_path)
@@ -2215,6 +2262,18 @@ def run_config(args: argparse.Namespace) -> int:
                     remove_file_if_present(state_path)
                 else:
                     atomic_write_bytes(state_path, payload)
+            for object_root, existing_names in prior_object_names.items():
+                if not object_root.is_dir():
+                    continue
+                for candidate in object_root.iterdir():
+                    if (
+                        candidate.name not in existing_names
+                        and candidate not in prior_object_references
+                        and OBJECT_NAME_RE.fullmatch(candidate.name)
+                        and candidate.is_file()
+                        and not candidate.is_symlink()
+                    ):
+                        remove_file_if_present(candidate)
 
     with archive_run_lock(spool_root):
         try:
@@ -2223,13 +2282,32 @@ def run_config(args: argparse.Namespace) -> int:
                 prior_state_payloads[state_path] = (
                     read_bytes_nofollow(state_path) if state_path.is_file() else None
                 )
+                index_path = source_root / harness / "index.json"
+                prior_index_payloads[index_path] = (
+                    read_bytes_nofollow(index_path) if index_path.is_file() else None
+                )
+                object_root = source_root / harness / "objects"
+                prior_object_names[object_root] = (
+                    {candidate.name for candidate in object_root.iterdir()}
+                    if object_root.is_dir()
+                    else set()
+                )
             prior_snapshot = load_healthy_manifest_snapshot(source_root, host_id)
             if prior_snapshot is not None:
                 (
                     prior_manifest_payload,
-                    prior_index_payloads,
+                    manifest_index_payloads,
                     _prior_index_values,
                 ) = prior_snapshot
+                prior_index_payloads.update(manifest_index_payloads)
+                for harness, index in _prior_index_values.items():
+                    for row in index.get("conversations", []):
+                        prior_object_references.add(
+                            source_root
+                            / harness
+                            / "objects"
+                            / f"{row['object_sha256']}.json"
+                        )
             transaction_snapshots_ready = True
             for harness, source_key in configured_collectors:
                 if not sources.get(source_key):
@@ -2390,9 +2468,9 @@ def run_config(args: argparse.Namespace) -> int:
                 "errors": run_errors,
                 "receipt_path": str(receipt_path),
             }
-            atomic_write_json(receipt_path, receipt)
             if collection_status in {"completed", "completed_with_absent_harnesses"}:
                 try:
+                    atomic_write_json(receipt_path, receipt)
                     write_publish_manifest(
                         source_root, receipt_path, receipt, config_digest
                     )
@@ -2418,15 +2496,19 @@ def run_config(args: argparse.Namespace) -> int:
                         # A successful first copy already contains the immutable
                         # collection receipt. Bind the final publication result
                         # with a second immutable receipt and advance the manifest.
-                        if publication.get("status") == "published":
-                            receipt_path = (
-                                spool_root
-                                / "hosts"
-                                / host_id
-                                / "receipts"
-                                / f"{run_id}-published.json"
-                            )
-                            receipt["receipt_path"] = str(receipt_path)
+                        publication_suffix = (
+                            "published"
+                            if publication.get("status") == "published"
+                            else "publication-blocked"
+                        )
+                        receipt_path = (
+                            spool_root
+                            / "hosts"
+                            / host_id
+                            / "receipts"
+                            / f"{run_id}-{publication_suffix}.json"
+                        )
+                        receipt["receipt_path"] = str(receipt_path)
                         atomic_write_json(receipt_path, receipt)
                         write_publish_manifest(
                             source_root, receipt_path, receipt, config_digest
@@ -2473,7 +2555,19 @@ def run_config(args: argparse.Namespace) -> int:
                     )
                     receipt["status"] = "failed"
                     receipt["errors"] = run_errors
+                    if manifest_committed:
+                        receipt_path = (
+                            spool_root
+                            / "hosts"
+                            / host_id
+                            / "receipts"
+                            / f"{run_id}-publish-error.json"
+                        )
+                        receipt["receipt_path"] = str(receipt_path)
                     atomic_write_json(receipt_path, receipt)
+            else:
+                rollback_uncommitted_collection()
+                atomic_write_json(receipt_path, receipt)
 
     print(json.dumps(receipt, sort_keys=True))
     return 1 if run_errors else 0

@@ -15,7 +15,10 @@ CLI = REPO / "fleet_chat_archive.py"
 sys.path.insert(0, str(REPO))
 
 import fleet_chat_archive as fleet  # noqa: E402
+import extract_claude_code as claude_extractor  # noqa: E402
 import extract_codex as codex_extractor  # noqa: E402
+import extract_hermes as hermes_extractor  # noqa: E402
+import extract_openclaw as openclaw_extractor  # noqa: E402
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -90,6 +93,39 @@ def safe_temporary_directory():
 
 
 class FleetSecurityRegressionTests(unittest.TestCase):
+    def test_manifest_receipt_hash_and_json_use_one_byte_snapshot(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            receipt_path = write_healthy_receipt(shard)
+            original_receipt = receipt_path.read_bytes()
+            changed_receipt = json.loads(original_receipt)
+            changed_receipt["unbound_marker"] = "changed after hashing"
+            changed_payload = (
+                json.dumps(changed_receipt, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode()
+            real_file_sha256 = fleet.file_sha256
+
+            def mutate_receipt_after_separate_hash(path):
+                digest = real_file_sha256(path)
+                if Path(path) == receipt_path:
+                    receipt_path.write_bytes(changed_payload)
+                return digest
+
+            with mock.patch.object(
+                fleet,
+                "file_sha256",
+                side_effect=mutate_receipt_after_separate_hash,
+            ):
+                fleet.validated_shard_files(shard, "mini")
+
+            self.assertEqual(
+                receipt_path.read_bytes(),
+                original_receipt,
+                "receipt validation performed a separate path hash before JSON parsing",
+            )
+
     def test_remote_shard_uses_manifest_bound_last_good_receipt_and_approved_harness(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -795,6 +831,121 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(
                 fleet.file_sha256(receipt_path), manifest["receipt"]["sha256"]
             )
+
+    def test_second_manifest_interruption_preserves_first_manifest_and_receipt(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            write_jsonl(
+                claude_root / "projects" / "sample" / "session.jsonl",
+                [{"type": "user", "message": {"content": "healthy"}}],
+            )
+            drive_root = root / "drive"
+            drive_root.mkdir()
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": str(drive_root),
+                        "sources": {"claude_roots": [str(claude_root)]},
+                    }
+                )
+            )
+            real_write_manifest = fleet.write_publish_manifest
+            manifest_writes = 0
+
+            def interrupt_second_manifest(*args, **kwargs):
+                nonlocal manifest_writes
+                manifest_writes += 1
+                if manifest_writes == 2:
+                    raise fleet.TerminationRequested
+                return real_write_manifest(*args, **kwargs)
+
+            with mock.patch.object(
+                fleet,
+                "write_publish_manifest",
+                side_effect=interrupt_second_manifest,
+            ), mock.patch.object(
+                fleet,
+                "publish_host_shard",
+                return_value={
+                    "status": "blocked_integrity_failure",
+                    "files_copied": 0,
+                },
+            ), mock.patch("builtins.print"), self.assertRaises(
+                fleet.TerminationRequested
+            ):
+                fleet.run_config(configured_args(config_path))
+
+            shard = root / "spool" / "hosts" / "test-mac"
+            manifest = json.loads((shard / "publish-manifest.json").read_bytes())
+            receipt_path = shard / manifest["receipt"]["path"]
+            receipt_payload = receipt_path.read_bytes()
+            receipt_paths = sorted((shard / "receipts").glob("*.json"))
+            self.assertEqual(manifest_writes, 2)
+            self.assertEqual(len(receipt_paths), 2)
+            self.assertIn(receipt_path, receipt_paths)
+            self.assertEqual(
+                hashlib.sha256(receipt_payload).hexdigest(),
+                manifest["receipt"]["sha256"],
+            )
+            self.assertNotEqual(
+                receipt_payload,
+                next(path.read_bytes() for path in receipt_paths if path != receipt_path),
+            )
+            fleet.validated_shard_files(shard, "test-mac")
+
+    def test_publication_exception_cannot_overwrite_manifest_bound_receipt(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            write_jsonl(
+                claude_root / "projects" / "sample" / "session.jsonl",
+                [{"type": "user", "message": {"content": "healthy"}}],
+            )
+            drive_root = root / "drive"
+            drive_root.mkdir()
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": str(drive_root),
+                        "sources": {"claude_roots": [str(claude_root)]},
+                    }
+                )
+            )
+            with mock.patch.object(
+                fleet,
+                "publish_host_shard",
+                side_effect=RuntimeError("synthetic publication failure"),
+            ), mock.patch("builtins.print"):
+                self.assertNotEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            shard = root / "spool" / "hosts" / "test-mac"
+            manifest = json.loads((shard / "publish-manifest.json").read_bytes())
+            receipt_path = shard / manifest["receipt"]["path"]
+            receipt_payload = receipt_path.read_bytes()
+            receipt_paths = sorted((shard / "receipts").glob("*.json"))
+            self.assertEqual(len(receipt_paths), 2)
+            self.assertIn(receipt_path, receipt_paths)
+            self.assertEqual(
+                hashlib.sha256(receipt_payload).hexdigest(),
+                manifest["receipt"]["sha256"],
+            )
+            self.assertEqual(
+                json.loads(receipt_payload)["status"],
+                "completed",
+            )
+            self.assertTrue(
+                any(path.name.endswith("-publish-error.json") for path in receipt_paths)
+            )
+            fleet.validated_shard_files(shard, "test-mac")
 
     def test_sensitive_structured_fields_and_headers_are_redacted_recursively(self):
         structured_values = [
@@ -1747,6 +1898,212 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 1,
             )
 
+    def test_termination_during_first_receipt_write_restores_prior_transaction(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            session = claude_root / "projects" / "sample" / "session.jsonl"
+            write_jsonl(
+                session,
+                [{"type": "user", "message": {"content": "first snapshot"}}],
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {"claude_roots": [str(claude_root)]},
+                    }
+                )
+            )
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+            shard = root / "spool" / "hosts" / "test-mac"
+            manifest_path = shard / "publish-manifest.json"
+            index_path = shard / "claude" / "index.json"
+            state_path = root / "spool" / "state" / "test-mac" / "claude.json"
+            before = (
+                manifest_path.read_bytes(),
+                index_path.read_bytes(),
+                state_path.read_bytes(),
+            )
+            before_object_names = sorted(
+                path.name for path in (shard / "claude" / "objects").glob("*.json")
+            )
+            with session.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {"type": "assistant", "message": {"content": "changed"}}
+                    )
+                    + "\n"
+                )
+            real_atomic_write_json = fleet.atomic_write_json
+
+            def terminate_receipt(path, value):
+                if Path(path).parent.name == "receipts":
+                    raise fleet.TerminationRequested
+                return real_atomic_write_json(path, value)
+
+            with mock.patch.object(
+                fleet,
+                "atomic_write_json",
+                side_effect=terminate_receipt,
+            ), mock.patch("builtins.print"), self.assertRaises(
+                fleet.TerminationRequested
+            ):
+                fleet.run_config(configured_args(config_path))
+
+            self.assertEqual(
+                (
+                    manifest_path.read_bytes(),
+                    index_path.read_bytes(),
+                    state_path.read_bytes(),
+                ),
+                before,
+            )
+            self.assertEqual(
+                sorted(
+                    path.name
+                    for path in (shard / "claude" / "objects").glob("*.json")
+                ),
+                before_object_names,
+            )
+            fleet.validated_shard_files(shard, "test-mac")
+
+    def test_failed_collection_rolls_back_successful_harness_changes(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            session = claude_root / "projects" / "sample" / "session.jsonl"
+            write_jsonl(
+                session,
+                [{"type": "user", "message": {"content": "first snapshot"}}],
+            )
+            config_path = root / "config.json"
+            config = {
+                "schema_version": 1,
+                "host_id": "test-mac",
+                "spool_root": str(root / "spool"),
+                "drive_root": None,
+                "sources": {"claude_roots": [str(claude_root)]},
+            }
+            config_path.write_text(json.dumps(config))
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            shard = root / "spool" / "hosts" / "test-mac"
+            manifest_path = shard / "publish-manifest.json"
+            index_path = shard / "claude" / "index.json"
+            state_path = root / "spool" / "state" / "test-mac" / "claude.json"
+            before = (
+                manifest_path.read_bytes(),
+                index_path.read_bytes(),
+                state_path.read_bytes(),
+                sorted(
+                    path.name
+                    for path in (shard / "claude" / "objects").glob("*.json")
+                ),
+            )
+            with session.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {"type": "assistant", "message": {"content": "changed"}}
+                    )
+                    + "\n"
+                )
+            config["sources"]["openclaw_roots"] = [str(root / "missing-openclaw")]
+            config_path.write_text(json.dumps(config))
+            with mock.patch("builtins.print"):
+                self.assertNotEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            self.assertEqual(
+                (
+                    manifest_path.read_bytes(),
+                    index_path.read_bytes(),
+                    state_path.read_bytes(),
+                    sorted(
+                        path.name
+                        for path in (shard / "claude" / "objects").glob("*.json")
+                    ),
+                ),
+                before,
+            )
+            fleet.validated_shard_files(shard, "test-mac")
+
+    def test_first_added_codex_harness_rollback_removes_only_its_live_index(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            write_jsonl(
+                claude_root / "projects" / "sample" / "session.jsonl",
+                [{"type": "user", "message": {"content": "healthy claude"}}],
+            )
+            config_path = root / "config.json"
+            config = {
+                "schema_version": 1,
+                "host_id": "test-mac",
+                "spool_root": str(root / "spool"),
+                "drive_root": None,
+                "sources": {"claude_roots": [str(claude_root)]},
+            }
+            config_path.write_text(json.dumps(config))
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+            shard = root / "spool" / "hosts" / "test-mac"
+            manifest_path = shard / "publish-manifest.json"
+            claude_index = shard / "claude" / "index.json"
+            claude_state = root / "spool" / "state" / "test-mac" / "claude.json"
+            before = (
+                manifest_path.read_bytes(),
+                claude_index.read_bytes(),
+                claude_state.read_bytes(),
+            )
+
+            codex_root = root / "codex"
+            write_jsonl(
+                codex_root
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-new-harness.jsonl",
+                [
+                    {"type": "session_meta", "payload": {"id": "new-harness"}},
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "new body"},
+                    },
+                ],
+            )
+            config["sources"]["codex_roots"] = [str(codex_root)]
+            config_path.write_text(json.dumps(config))
+            with mock.patch.object(
+                fleet,
+                "write_publish_manifest",
+                side_effect=fleet.TerminationRequested,
+            ), mock.patch("builtins.print"), self.assertRaises(
+                fleet.TerminationRequested
+            ):
+                fleet.run_config(configured_args(config_path))
+
+            codex_harness = shard / "codex"
+            codex_state = root / "spool" / "state" / "test-mac" / "codex.json"
+            self.assertEqual(
+                (
+                    manifest_path.read_bytes(),
+                    claude_index.read_bytes(),
+                    claude_state.read_bytes(),
+                ),
+                before,
+            )
+            self.assertFalse((codex_harness / "index.json").exists())
+            self.assertFalse(codex_state.exists())
+            self.assertFalse(any((codex_harness / "objects").glob("*.json")))
+            fleet.validated_shard_files(shard, "test-mac")
+
     def test_manifest_validation_failure_restores_prior_snapshot_and_state(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -1837,6 +2194,7 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             state_path = root / "spool" / "state" / "test-mac" / "claude.json"
             self.assertFalse((shard / "publish-manifest.json").exists())
             self.assertFalse(state_path.exists())
+            self.assertFalse(any((shard / "claude" / "objects").glob("*.json")))
 
             with mock.patch("builtins.print"):
                 self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
@@ -1898,6 +2256,107 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                     expected_source_sha256="0" * 64,
                     max_source_bytes=fleet.MAX_SOURCE_BYTES,
                 )
+
+    def test_all_jsonl_extractors_reject_append_on_the_open_descriptor(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            cases = [
+                (
+                    "claude",
+                    claude_extractor,
+                    claude_extractor.extract_claude_session,
+                    [{"type": "user", "message": {"content": "claude-before"}}],
+                    {"type": "assistant", "message": {"content": "claude-after"}},
+                ),
+                (
+                    "openclaw",
+                    openclaw_extractor,
+                    openclaw_extractor.extract_openclaw_session,
+                    [
+                        {"type": "session", "version": 3, "id": "openclaw-session"},
+                        {
+                            "type": "message",
+                            "message": {"role": "user", "content": "openclaw-before"},
+                        },
+                    ],
+                    {
+                        "type": "message",
+                        "message": {"role": "assistant", "content": "openclaw-after"},
+                    },
+                ),
+                (
+                    "hermes",
+                    hermes_extractor,
+                    hermes_extractor.extract_hermes_export,
+                    [
+                        {
+                            "id": "hermes-before",
+                            "messages": [{"role": "user", "content": "before"}],
+                        }
+                    ],
+                    {
+                        "id": "hermes-after",
+                        "messages": [{"role": "assistant", "content": "after"}],
+                    },
+                ),
+            ]
+            for name, module, extractor, initial_rows, appended_row in cases:
+                with self.subTest(extractor=name):
+                    source = root / f"{name}.jsonl"
+                    write_jsonl(source, initial_rows)
+                    fingerprint = fleet.source_fingerprint(source)
+                    real_open = module._open_regular_jsonl
+
+                    def append_after_open(path, **kwargs):
+                        opened = real_open(path, **kwargs)
+                        with Path(path).open("a") as handle:
+                            handle.write(json.dumps(appended_row) + "\n")
+                        return opened
+
+                    with mock.patch.object(
+                        module,
+                        "_open_regular_jsonl",
+                        side_effect=append_after_open,
+                    ), self.assertRaisesRegex(
+                        ValueError, "source changed during extraction"
+                    ) as raised:
+                        extractor(
+                            source,
+                            max_source_bytes=fleet.MAX_SOURCE_BYTES,
+                            expected_fingerprint=fingerprint,
+                        )
+                    self.assertNotIn("after", str(raised.exception))
+
+    def test_object_growth_after_json_load_is_rejected(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            conversation = {
+                "schema_version": 1,
+                "source": "claude-code",
+                "session_id": "object-race",
+                "messages": [{"role": "user", "content": "safe body"}],
+            }
+            canonical = fleet.canonical_json(conversation)
+            digest = hashlib.sha256(canonical).hexdigest()
+            object_path = root / f"{digest}.json"
+            object_path.write_bytes(canonical + b"\n")
+            real_json_load = fleet.json.load
+
+            def grow_after_load(handle):
+                value = real_json_load(handle)
+                with object_path.open("r+b") as writer:
+                    writer.truncate(fleet.MAX_OBJECT_BYTES + 1)
+                return value
+
+            with mock.patch.object(
+                fleet.json,
+                "load",
+                side_effect=grow_after_load,
+            ), self.assertRaisesRegex(
+                ValueError, "object changed while parsing"
+            ) as raised:
+                fleet.validate_object_file(object_path)
+            self.assertNotIn("safe body", str(raised.exception))
 
     def test_cached_remote_shard_publishes_while_remote_is_unreachable(self):
         with safe_temporary_directory() as tmp:

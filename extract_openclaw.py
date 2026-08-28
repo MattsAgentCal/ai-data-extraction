@@ -31,7 +31,30 @@ def _reject_symlink_components(path):
     return expanded
 
 
-def _open_regular_jsonl(path):
+def _metadata_identity(metadata):
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _matches_expected_fingerprint(metadata, expected_fingerprint):
+    attributes = {
+        "size": "st_size",
+        "mtime_ns": "st_mtime_ns",
+        "ctime_ns": "st_ctime_ns",
+        "inode": "st_ino",
+    }
+    return expected_fingerprint is None or all(
+        getattr(metadata, attribute) == expected_fingerprint[key]
+        for key, attribute in attributes.items()
+    )
+
+
+def _open_regular_jsonl(path, *, max_bytes=None, expected_fingerprint=None):
     path = _reject_symlink_components(path)
     absolute = Path(os.path.abspath(os.fspath(path)))
     for alias, target in _MACOS_COMPATIBILITY_SYMLINKS.items():
@@ -66,10 +89,27 @@ def _open_regular_jsonl(path):
         raise
     finally:
         os.close(directory_fd)
-    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
         os.close(descriptor)
         raise ValueError(f"JSONL input must be a regular file: {path}")
-    return os.fdopen(descriptor, "r", encoding="utf-8")
+    if max_bytes is not None and metadata.st_size > max_bytes:
+        os.close(descriptor)
+        raise ValueError(f"source exceeds maximum of {max_bytes} bytes: {path}")
+    if not _matches_expected_fingerprint(metadata, expected_fingerprint):
+        os.close(descriptor)
+        raise ValueError(f"source changed before extraction: {path}")
+    return os.fdopen(descriptor, "r", encoding="utf-8"), metadata
+
+
+def _verify_parsed_source(handle, path, initial_metadata, max_bytes):
+    final_metadata = os.fstat(handle.fileno())
+    if (
+        _metadata_identity(initial_metadata) != _metadata_identity(final_metadata)
+        or (max_bytes is not None and final_metadata.st_size > max_bytes)
+        or os.lseek(handle.fileno(), 0, os.SEEK_CUR) != final_metadata.st_size
+    ):
+        raise ValueError(f"source changed during extraction: {path}")
 
 
 def _quality(discovered_lines, parsed_lines, failed_lines):
@@ -87,7 +127,13 @@ def _publish_quality(quality_out, value):
         quality_out.update(value)
 
 
-def extract_openclaw_session(session_file, *, quality_out=None):
+def extract_openclaw_session(
+    session_file,
+    *,
+    quality_out=None,
+    max_source_bytes=None,
+    expected_fingerprint=None,
+):
     messages = []
     tool_results = []
     session_meta = {}
@@ -97,7 +143,12 @@ def extract_openclaw_session(session_file, *, quality_out=None):
     recognized_lines = 0
     session_version_valid = False
 
-    with _open_regular_jsonl(session_file) as handle:
+    source_handle, source_metadata = _open_regular_jsonl(
+        session_file,
+        max_bytes=max_source_bytes,
+        expected_fingerprint=expected_fingerprint,
+    )
+    with source_handle as handle:
         for line in handle:
             if not line.strip():
                 continue
@@ -183,6 +234,12 @@ def extract_openclaw_session(session_file, *, quality_out=None):
                     "message_id": row.get("id"),
                     "timestamp": timestamp,
                 })
+        _verify_parsed_source(
+            handle,
+            session_file,
+            source_metadata,
+            max_source_bytes,
+        )
 
     quality = _quality(discovered_lines, parsed_lines, failed_lines)
     if discovered_lines and (not recognized_lines or not session_version_valid):

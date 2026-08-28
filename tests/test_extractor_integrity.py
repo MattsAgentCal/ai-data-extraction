@@ -92,6 +92,99 @@ class ExtractorIntegrityTests(unittest.TestCase):
                 "written",
             )
 
+    def test_claude_accepts_only_exact_relocation_and_worktree_metadata_shapes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session.jsonl"
+            worktree_session = {
+                "originalBranch": "main",
+                "originalCwd": "/repo",
+                "originalHeadCommit": "abc123",
+                "preEnterOriginalCwd": "/repo",
+                "sessionId": "session-1",
+                "worktreeBranch": "feature",
+                "worktreeName": "feature-worktree",
+                "worktreePath": "/repo-worktree",
+            }
+            records = [
+                {
+                    "type": "relocated",
+                    "sessionId": "session-1",
+                    "relocatedCwd": "/repo-moved",
+                },
+                {
+                    "type": "worktree-state",
+                    "sessionId": "session-1",
+                    "worktreeSession": worktree_session,
+                },
+            ]
+            write_lines(session, [json_line(record) for record in records])
+            quality = {}
+
+            conversation = extract_claude_session(session, quality_out=quality)
+
+            self.assertEqual(quality["status"], "complete")
+            self.assertEqual(quality["recognized_lines"], 2)
+            self.assertEqual(quality["failed_lines"], 0)
+            self.assertEqual(conversation["events"], records)
+
+    def test_claude_relocation_metadata_rejects_shape_drift_and_content_smuggling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session.jsonl"
+            valid_worktree = {
+                "originalBranch": "main",
+                "originalCwd": "/repo",
+                "originalHeadCommit": "abc123",
+                "preEnterOriginalCwd": "/repo",
+                "sessionId": "session-1",
+                "worktreeBranch": "feature",
+                "worktreeName": "feature-worktree",
+                "worktreePath": "/repo-worktree",
+            }
+            invalid_records = [
+                {
+                    "type": "relocated",
+                    "sessionId": "session-1",
+                    "relocatedCwd": "/repo-moved",
+                    "content": "smuggled body",
+                },
+                {
+                    "type": "relocated",
+                    "sessionId": "session-1",
+                    "relocatedCwd": {"future": "/repo-moved"},
+                },
+                {
+                    "type": "worktree-state",
+                    "sessionId": "session-1",
+                    "worktreeSession": {**valid_worktree, "text": "smuggled body"},
+                },
+                {
+                    "type": "worktree-state",
+                    "sessionId": "different-session",
+                    "worktreeSession": valid_worktree,
+                },
+                {
+                    "type": "worktree-state",
+                    "sessionId": "session-1",
+                    "worktreeSession": {
+                        key: value
+                        for key, value in valid_worktree.items()
+                        if key != "worktreePath"
+                    },
+                },
+            ]
+            write_lines(
+                session,
+                [json_line(record) for record in invalid_records],
+            )
+            quality = {}
+
+            conversation = extract_claude_session(session, quality_out=quality)
+
+            self.assertIsNone(conversation)
+            self.assertEqual(quality["status"], "partial")
+            self.assertEqual(quality["recognized_lines"], 0)
+            self.assertEqual(quality["failed_lines"], len(invalid_records))
+
     def test_codex_merges_and_deduplicates_legacy_and_modern_messages_in_source_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "rollout-mixed.jsonl"

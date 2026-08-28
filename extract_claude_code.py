@@ -36,7 +36,30 @@ def _reject_symlink_components(path):
     return expanded
 
 
-def _open_regular_jsonl(path):
+def _metadata_identity(metadata):
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _matches_expected_fingerprint(metadata, expected_fingerprint):
+    attributes = {
+        "size": "st_size",
+        "mtime_ns": "st_mtime_ns",
+        "ctime_ns": "st_ctime_ns",
+        "inode": "st_ino",
+    }
+    return expected_fingerprint is None or all(
+        getattr(metadata, attribute) == expected_fingerprint[key]
+        for key, attribute in attributes.items()
+    )
+
+
+def _open_regular_jsonl(path, *, max_bytes=None, expected_fingerprint=None):
     path = _reject_symlink_components(path)
     absolute = Path(os.path.abspath(os.fspath(path)))
     for alias, target in _MACOS_COMPATIBILITY_SYMLINKS.items():
@@ -71,10 +94,27 @@ def _open_regular_jsonl(path):
         raise
     finally:
         os.close(directory_fd)
-    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
         os.close(descriptor)
         raise ValueError(f"JSONL input must be a regular file: {path}")
-    return os.fdopen(descriptor, "r", encoding="utf-8")
+    if max_bytes is not None and metadata.st_size > max_bytes:
+        os.close(descriptor)
+        raise ValueError(f"source exceeds maximum of {max_bytes} bytes: {path}")
+    if not _matches_expected_fingerprint(metadata, expected_fingerprint):
+        os.close(descriptor)
+        raise ValueError(f"source changed before extraction: {path}")
+    return os.fdopen(descriptor, "r", encoding="utf-8"), metadata
+
+
+def _verify_parsed_source(handle, path, initial_metadata, max_bytes):
+    final_metadata = os.fstat(handle.fileno())
+    if (
+        _metadata_identity(initial_metadata) != _metadata_identity(final_metadata)
+        or (max_bytes is not None and final_metadata.st_size > max_bytes)
+        or os.lseek(handle.fileno(), 0, os.SEEK_CUR) != final_metadata.st_size
+    ):
+        raise ValueError(f"source changed during extraction: {path}")
 
 
 def _discover_session_files(project_dir):
@@ -174,11 +214,57 @@ CLAUDE_IGNORED_RECORD_TYPES = {
 }
 
 
+def _is_relocated_record(value):
+    return (
+        set(value) == {"type", "sessionId", "relocatedCwd"}
+        and value.get("type") == "relocated"
+        and isinstance(value.get("sessionId"), str)
+        and isinstance(value.get("relocatedCwd"), str)
+    )
+
+
+def _is_worktree_state_record(value):
+    if (
+        set(value) != {"type", "sessionId", "worktreeSession"}
+        or value.get("type") != "worktree-state"
+        or not isinstance(value.get("sessionId"), str)
+        or not isinstance(value.get("worktreeSession"), dict)
+    ):
+        return False
+    worktree_session = value["worktreeSession"]
+    expected_keys = {
+        "originalBranch",
+        "originalCwd",
+        "originalHeadCommit",
+        "preEnterOriginalCwd",
+        "sessionId",
+        "worktreeBranch",
+        "worktreeName",
+        "worktreePath",
+    }
+    return (
+        set(worktree_session) == expected_keys
+        and all(isinstance(worktree_session[key], str) for key in expected_keys)
+        and worktree_session["sessionId"] == value["sessionId"]
+    )
+
+
+def _is_strict_auxiliary_record(value):
+    return _is_relocated_record(value) or _is_worktree_state_record(value)
+
+
 def find_all_claude_sessions(project_dir):
     return _discover_session_files(project_dir)
 
 
-def extract_claude_session(jsonl_file, *, installation=None, quality_out=None):
+def extract_claude_session(
+    jsonl_file,
+    *,
+    installation=None,
+    quality_out=None,
+    max_source_bytes=None,
+    expected_fingerprint=None,
+):
     messages = []
     auxiliary_events = []
     session_id = jsonl_file.stem
@@ -188,7 +274,12 @@ def extract_claude_session(jsonl_file, *, installation=None, quality_out=None):
     parsed_lines = 0
     failed_lines = 0
     recognized_lines = 0
-    with _open_regular_jsonl(jsonl_file) as handle:
+    source_handle, source_metadata = _open_regular_jsonl(
+        jsonl_file,
+        max_bytes=max_source_bytes,
+        expected_fingerprint=expected_fingerprint,
+    )
+    with source_handle as handle:
         for line in handle:
             if not line.strip():
                 continue
@@ -271,11 +362,20 @@ def extract_claude_session(jsonl_file, *, installation=None, quality_out=None):
                 tool_result = obj.get("toolResult", {})
                 if tool_result and messages:
                     messages[-1].setdefault("tool_results", []).append(tool_result)
+            elif _is_strict_auxiliary_record(obj):
+                recognized_lines += 1
+                auxiliary_events.append(obj)
             elif msg_type in CLAUDE_IGNORED_RECORD_TYPES:
                 recognized_lines += 1
                 auxiliary_events.append(obj)
             else:
                 failed_lines += 1
+        _verify_parsed_source(
+            handle,
+            jsonl_file,
+            source_metadata,
+            max_source_bytes,
+        )
 
     quality = {
         "status": (
