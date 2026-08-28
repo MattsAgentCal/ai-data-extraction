@@ -171,11 +171,13 @@ CODEX_PATH_PROVENANCE_FIELDS = frozenset({"session_file"})
 
 # The remote rsync sender runs this guard before entering the rsync protocol.
 # It holds the same spool lock used by run_config, so a publisher cannot swap
-# the manifest or a path component during one transfer phase. No file body is
-# opened here: the guard only verifies directory entries and file types.
+# the manifest or a path component during one transfer phase. The manifest is
+# read through a bounded descriptor and must be canonical, duplicate-free JSON
+# before rsync can open any authorized file body.
 REMOTE_RSYNC_GUARD_ERROR = "fleet-unsafe-source"
 REMOTE_RSYNC_GUARD = r'''
 import fcntl
+import json
 import os
 import stat
 import subprocess
@@ -189,6 +191,25 @@ DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 def fail():
     sys.stderr.write(ERROR + "\n")
     raise SystemExit(42)
+
+
+def unique_json_object(pairs):
+    value = {}
+    for key, member in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object key")
+        value[key] = member
+    return value
+
+
+def file_identity(metadata):
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def open_absolute_directory(path):
@@ -282,11 +303,46 @@ try:
         dir_fd=shard_descriptor,
     )
     try:
-        manifest_metadata = os.fstat(manifest_descriptor)
+        initial_manifest_metadata = os.fstat(manifest_descriptor)
         if (
-            not stat.S_ISREG(manifest_metadata.st_mode)
-            or manifest_metadata.st_size > manifest_limit
+            not stat.S_ISREG(initial_manifest_metadata.st_mode)
+            or initial_manifest_metadata.st_size > manifest_limit
         ):
+            fail()
+        manifest_payload = bytearray()
+        while len(manifest_payload) <= manifest_limit:
+            chunk = os.read(
+                manifest_descriptor,
+                min(1024 * 1024, manifest_limit + 1 - len(manifest_payload)),
+            )
+            if not chunk:
+                break
+            manifest_payload.extend(chunk)
+        final_manifest_metadata = os.fstat(manifest_descriptor)
+        if (
+            len(manifest_payload) > manifest_limit
+            or file_identity(initial_manifest_metadata)
+            != file_identity(final_manifest_metadata)
+            or len(manifest_payload) != final_manifest_metadata.st_size
+        ):
+            fail()
+        try:
+            manifest = json.loads(
+                manifest_payload,
+                object_pairs_hook=unique_json_object,
+            )
+            canonical_manifest = (
+                json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
+        except (OverflowError, TypeError, UnicodeError, ValueError):
+            fail()
+        if bytes(manifest_payload) != canonical_manifest:
             fail()
     finally:
         os.close(manifest_descriptor)
@@ -480,6 +536,36 @@ def read_json_nofollow(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    value = {}
+    for key, member in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object key")
+        value[key] = member
+    return value
+
+
+def read_canonical_json_nofollow(
+    path: Path,
+    *,
+    max_bytes: int,
+    size_label: str,
+):
+    payload = read_bytes_nofollow(
+        path,
+        max_bytes=max_bytes,
+        size_label=size_label,
+    )
+    try:
+        value = json.loads(payload, object_pairs_hook=unique_json_object)
+        canonical_payload = canonical_json(value) + b"\n"
+    except (OverflowError, TypeError, UnicodeError, ValueError) as error:
+        raise ValueError(f"{size_label} is not canonical JSON") from error
+    if payload != canonical_payload:
+        raise ValueError(f"{size_label} is not canonical JSON")
+    return value
 
 
 def secure_mkdir(path: Path) -> None:
@@ -1647,7 +1733,7 @@ def validate_publish_manifest_metadata(source_root: Path, host_id: str) -> dict:
     manifest_path = source_root / "publish-manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise ValueError(f"host shard has no publish manifest: {host_id}")
-    manifest = read_json_nofollow(
+    manifest = read_canonical_json_nofollow(
         manifest_path,
         max_bytes=MAX_PUBLISH_MANIFEST_BYTES,
         size_label="publish manifest",
@@ -2774,6 +2860,7 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
                 validate_staged_allowlist(
                     incoming_path, metadata_paths | object_paths
                 )
+                validate_publish_manifest_metadata(incoming_path, remote_host_id)
                 if read_bytes_nofollow(
                     incoming_path / "publish-manifest.json",
                     max_bytes=MAX_PUBLISH_MANIFEST_BYTES,

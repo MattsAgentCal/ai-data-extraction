@@ -31,6 +31,10 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
+def write_canonical_json(path: Path, value: object) -> None:
+    path.write_bytes(fleet.canonical_json(value) + b"\n")
+
+
 def write_archive_object(
     shard: Path, harness: str = "claude", host_id: str | None = None
 ) -> tuple[Path, bytes]:
@@ -301,9 +305,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                     }
                 },
             }
-            (shard / "publish-manifest.json").write_text(
-                json.dumps(manifest, sort_keys=True) + "\n"
-            )
+            write_canonical_json(shard / "publish-manifest.json", manifest)
 
             with self.assertRaisesRegex(ValueError, "provenance mismatch"):
                 fleet.validated_shard_files(shard, "mini")
@@ -1413,9 +1415,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 )
                 result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
                 if rsync_calls == 1:
-                    remote_manifest.write_text(
-                        json.dumps(changed_manifest, sort_keys=True) + "\n"
-                    )
+                    write_canonical_json(remote_manifest, changed_manifest)
                 return result
 
             hub = {
@@ -1449,7 +1449,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             manifest_path = remote_shard / "publish-manifest.json"
             manifest = json.loads(manifest_path.read_text())
             manifest["receipt"]["path"] = "receipts/../claude/index.json"
-            manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+            write_canonical_json(manifest_path, manifest)
             requested: list[str] = []
 
             def record_allowlist(command, **kwargs):
@@ -1689,7 +1689,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text())
             secret_body = "must-not-become-an-authorized-manifest-field"
             manifest["messages"] = [{"content": secret_body}]
-            manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+            write_canonical_json(manifest_path, manifest)
             requested: list[str] = []
 
             def emulate_remote(command, **kwargs):
@@ -1741,7 +1741,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             receipt["run_id"] = private_body
             receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
             manifest["receipt"]["sha256"] = fleet.file_sha256(receipt_path)
-            manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+            write_canonical_json(manifest_path, manifest)
             requested: list[str] = []
 
             def emulate_remote(command, **kwargs):
@@ -1773,6 +1773,274 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(remote_result["status"], "blocked_integrity_failure")
             self.assertNotIn(private_body[:40], remote_result["error"])
             self.assertNotIn(secret_token, remote_result["error"])
+            self.assertFalse((spool_root / "hosts" / "mini").exists())
+            self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+
+    def test_remote_pull_rejects_duplicate_run_id_body_smuggling_before_receipts(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            write_healthy_receipt(remote_shard)
+            manifest_path = remote_shard / "publish-manifest.json"
+            canonical_manifest = manifest_path.read_bytes()
+            secret_token = "sk-" + "C" * 32
+            private_prefix = "private transcript body must never be persisted:"
+
+            def duplicate_run_id_payload(value: str) -> bytes:
+                return (
+                    b'{"run_id":'
+                    + fleet.canonical_json(value)
+                    + b","
+                    + canonical_manifest[1:]
+                )
+
+            target_bytes = 4_948
+            initial = duplicate_run_id_payload(private_prefix + secret_token)
+            self.assertLess(len(initial), target_bytes)
+            private_body = (
+                private_prefix
+                + "X" * (target_bytes - len(initial))
+                + secret_token
+            )
+            smuggled_manifest = duplicate_run_id_payload(private_body)
+            self.assertEqual(len(smuggled_manifest), target_bytes)
+            self.assertEqual(json.loads(smuggled_manifest)["run_id"], TEST_RUN_ID)
+            manifest_path.write_bytes(smuggled_manifest)
+            requested: list[str] = []
+
+            def emulate_remote(command, **kwargs):
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                requested.extend(
+                    item for item in kwargs["input"].split("\0") if item
+                )
+                return emulate_allowlisted_rsync(command, kwargs, remote_shard)
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess,
+                "run",
+                side_effect=emulate_remote,
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            remote_result = result["remotes"]["mini"]
+            self.assertEqual(requested, ["publish-manifest.json"])
+            self.assertEqual(remote_result["status"], "blocked_integrity_failure")
+            self.assertEqual(
+                remote_result["error"],
+                "publish manifest is not canonical JSON",
+            )
+            self.assertNotIn(private_prefix, remote_result["error"])
+            self.assertNotIn(secret_token, remote_result["error"])
+            self.assertFalse((spool_root / "hosts" / "mini").exists())
+            self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+
+    def test_manifest_rejects_nested_duplicates_and_noncanonical_raw_bytes(self):
+        with safe_temporary_directory() as tmp:
+            shard = Path(tmp) / "hosts" / "mini"
+            write_archive_object(shard, host_id="mini")
+            write_healthy_receipt(shard)
+            manifest_path = shard / "publish-manifest.json"
+            canonical_manifest = manifest_path.read_bytes()
+            parsed_manifest = json.loads(canonical_manifest)
+            secret_token = "sk-" + "D" * 32
+            nested_duplicate = canonical_manifest.replace(
+                b'"receipt":{',
+                b'"receipt":{"sha256":'
+                + fleet.canonical_json(secret_token)
+                + b",",
+                1,
+            )
+            self.assertEqual(
+                json.loads(nested_duplicate)["receipt"]["sha256"],
+                parsed_manifest["receipt"]["sha256"],
+            )
+            reversed_manifest = {
+                key: parsed_manifest[key]
+                for key in reversed(list(parsed_manifest))
+            }
+            candidates = {
+                "top_level_duplicate": (
+                    b'{"run_id":'
+                    + fleet.canonical_json("private duplicate " + secret_token)
+                    + b","
+                    + canonical_manifest[1:]
+                ),
+                "nested_duplicate": nested_duplicate,
+                "leading_whitespace": b" " + canonical_manifest,
+                "reordered_keys": (
+                    json.dumps(
+                        reversed_manifest,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n"
+                ),
+                "trailing_data": canonical_manifest + b"{}",
+                "extra_newline": canonical_manifest + b"\n",
+                "missing_newline": canonical_manifest[:-1],
+            }
+
+            for name, payload in candidates.items():
+                with self.subTest(name=name):
+                    manifest_path.write_bytes(payload)
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "^publish manifest is not canonical JSON$",
+                    ) as raised:
+                        fleet.validate_publish_manifest_metadata(shard, "mini")
+                    self.assertNotIn(secret_token, str(raised.exception))
+
+            manifest_path.write_bytes(canonical_manifest)
+            self.assertEqual(
+                fleet.validate_publish_manifest_metadata(shard, "mini"),
+                parsed_manifest,
+            )
+
+    def test_remote_sender_guard_rejects_duplicate_manifest_keys_before_rsync(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "remote-spool"
+            shard = spool_root / "hosts" / "mini"
+            shard.mkdir(parents=True)
+            (spool_root / ".run.lock").touch()
+            secret_token = "sk-" + "E" * 32
+            (shard / "publish-manifest.json").write_bytes(
+                b'{"receipt":{"sha256":'
+                + fleet.canonical_json(secret_token)
+                + b',"sha256":"safe"}}\n'
+            )
+
+            blocked = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    fleet.REMOTE_RSYNC_GUARD,
+                    str(spool_root),
+                    "mini",
+                    str(fleet.MAX_PUBLISH_MANIFEST_BYTES),
+                    "--version",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertEqual(blocked.returncode, 42)
+            self.assertEqual(blocked.stdout, "")
+            self.assertEqual(blocked.stderr.strip(), fleet.REMOTE_RSYNC_GUARD_ERROR)
+            self.assertNotIn(secret_token, blocked.stderr)
+
+    def test_remote_pull_revalidates_duplicate_free_final_manifest_sentinel(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            write_healthy_receipt(remote_shard)
+            manifest_path = remote_shard / "publish-manifest.json"
+            canonical_manifest = manifest_path.read_bytes()
+            secret_token = "sk-" + "F" * 32
+            duplicate_manifest = (
+                b'{"run_id":'
+                + fleet.canonical_json("private final body " + secret_token)
+                + b","
+                + canonical_manifest[1:]
+            )
+            rsync_calls = 0
+
+            def mutate_before_final_sentinel(command, **kwargs):
+                nonlocal rsync_calls
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                rsync_calls += 1
+                result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
+                if rsync_calls == 3:
+                    manifest_path.write_bytes(duplicate_manifest)
+                return result
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess,
+                "run",
+                side_effect=mutate_before_final_sentinel,
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            remote_result = result["remotes"]["mini"]
+            self.assertEqual(rsync_calls, 4)
+            self.assertEqual(remote_result["status"], "blocked_integrity_failure")
+            self.assertEqual(
+                remote_result["error"],
+                "publish manifest is not canonical JSON",
+            )
+            self.assertNotIn(secret_token, remote_result["error"])
+            self.assertFalse((spool_root / "hosts" / "mini").exists())
+            self.assertFalse(any((spool_root / ".incoming").rglob("*")))
+
+    def test_remote_pull_rejects_canonical_final_manifest_sentinel_mismatch(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            remote_shard = Path(tmp) / "remote" / "hosts" / "mini"
+            write_archive_object(remote_shard, host_id="mini")
+            write_healthy_receipt(remote_shard)
+            manifest_path = remote_shard / "publish-manifest.json"
+            changed_manifest = json.loads(manifest_path.read_bytes())
+            changed_manifest["generated_at"] = (
+                "2026-08-28T12:00:00.000000+00:00"
+            )
+            rsync_calls = 0
+
+            def mutate_before_final_sentinel(command, **kwargs):
+                nonlocal rsync_calls
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                rsync_calls += 1
+                result = emulate_allowlisted_rsync(command, kwargs, remote_shard)
+                if rsync_calls == 3:
+                    write_canonical_json(manifest_path, changed_manifest)
+                return result
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess,
+                "run",
+                side_effect=mutate_before_final_sentinel,
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            remote_result = result["remotes"]["mini"]
+            self.assertEqual(rsync_calls, 4)
+            self.assertEqual(remote_result["status"], "blocked_integrity_failure")
+            self.assertEqual(
+                remote_result["error"],
+                "remote publish manifest changed during pull",
+            )
             self.assertFalse((spool_root / "hosts" / "mini").exists())
             self.assertFalse(any((spool_root / ".incoming").rglob("*")))
 
@@ -1875,7 +2143,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             per_harness["harnesses"]["claude"]["object_sha256"] = [
                 "0" * 64
             ] * (fleet.MAX_MANIFEST_OBJECTS_PER_HARNESS + 1)
-            manifest_path.write_text(json.dumps(per_harness, sort_keys=True) + "\n")
+            write_canonical_json(manifest_path, per_harness)
             self.assertLess(manifest_path.stat().st_size, fleet.MAX_PUBLISH_MANIFEST_BYTES)
             with self.assertRaisesRegex(ValueError, "invalid publish manifest binding"):
                 fleet.validate_publish_manifest_metadata(shard, "mini")
@@ -1902,7 +2170,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                     "object_sha256": ["f" * 64],
                 },
             }
-            manifest_path.write_text(json.dumps(total, sort_keys=True) + "\n")
+            write_canonical_json(manifest_path, total)
             self.assertLess(manifest_path.stat().st_size, fleet.MAX_PUBLISH_MANIFEST_BYTES)
             with self.assertRaisesRegex(ValueError, "object count exceeds fleet limit"):
                 fleet.validate_publish_manifest_metadata(shard, "mini")
@@ -1941,9 +2209,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 with self.subTest(name=name):
                     candidate = json.loads(json.dumps(baseline))
                     candidate[field] = value
-                    manifest_path.write_text(
-                        json.dumps(candidate, sort_keys=True) + "\n"
-                    )
+                    write_canonical_json(manifest_path, candidate)
                     with self.assertRaisesRegex(
                         ValueError, "invalid publish manifest identity"
                     ):
@@ -1969,9 +2235,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
 
             for name, candidate in candidates.items():
                 with self.subTest(name=name):
-                    manifest_path.write_text(
-                        json.dumps(candidate, sort_keys=True) + "\n"
-                    )
+                    write_canonical_json(manifest_path, candidate)
                     with self.assertRaises(ValueError) as raised:
                         fleet.validate_publish_manifest_metadata(shard, "mini")
                     self.assertNotIn("private", str(raised.exception))
@@ -2010,9 +2274,7 @@ class FleetSecurityRegressionTests(unittest.TestCase):
 
             for name, candidate in candidates.items():
                 with self.subTest(name=name):
-                    manifest_path.write_text(
-                        json.dumps(candidate, sort_keys=True) + "\n"
-                    )
+                    write_canonical_json(manifest_path, candidate)
                     with self.assertRaises(ValueError) as raised:
                         fleet.validate_publish_manifest_metadata(shard, "mini")
                     self.assertNotIn(secret_token, str(raised.exception))
