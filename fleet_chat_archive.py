@@ -1176,6 +1176,8 @@ def archive_conversations(
             )
     current_by_raw_identity: dict[tuple[str, str], tuple[str, str]] = {}
     reusable_stable_sha256: dict[Path, tuple[str, object, object, object]] = {}
+    created_object_names: set[str] = set()
+    newly_written_object_names: set[str] = set()
 
     for conversation in conversations:
         conversation_count += 1
@@ -1246,7 +1248,8 @@ def archive_conversations(
                         digest = row["object_sha256"]
                         object_path = objects_root / f"{digest}.json"
                         if not object_path.exists():
-                            link_verified_local_object(candidate_path, object_path)
+                            if link_verified_local_object(candidate_path, object_path):
+                                created_object_names.add(object_path.name)
                         break
 
         if digest is None:
@@ -1264,6 +1267,8 @@ def archive_conversations(
                 raise ValueError(f"reused Codex object is missing: {digest}")
             atomic_write_bytes(object_path, payload + b"\n")
             new_objects += 1
+            created_object_names.add(object_path.name)
+            newly_written_object_names.add(object_path.name)
         index_row = {
             "object_sha256": digest,
             "session_id": conversation.get("session_id"),
@@ -1280,6 +1285,31 @@ def archive_conversations(
 
     index_rows = list(index_by_identity.values())
     index_rows.sort(key=lambda row: (str(row["session_id"]), row["object_sha256"]))
+    referenced_object_names = {
+        f"{row['object_sha256']}.json" for row in index_rows
+    }
+    # Multiple native files can represent the same logical session (for
+    # example, copied Claude project transcripts or a Codex rollout present in
+    # both live and archived locations).  The last normalized record wins the
+    # index identity, so discard only its superseded object from this private
+    # staging directory before the exact-set validator runs.
+    for candidate_name in sorted(created_object_names - referenced_object_names):
+        candidate = objects_root / candidate_name
+        if (
+            candidate.is_symlink()
+            or not candidate.is_file()
+            or not OBJECT_NAME_RE.fullmatch(candidate.name)
+        ):
+            raise ValueError(f"refusing unsafe staged object: {candidate.name}")
+        try:
+            validate_object_file(candidate)
+        except (OSError, ValueError) as error:
+            raise ValueError(
+                f"refusing unsafe staged object: {candidate.name}"
+            ) from error
+        remove_file_if_present(candidate)
+        if candidate.name in newly_written_object_names:
+            new_objects -= 1
     atomic_write_json(
         harness_root / "index.json",
         {

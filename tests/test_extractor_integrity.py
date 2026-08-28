@@ -613,6 +613,252 @@ class ExtractorIntegrityTests(unittest.TestCase):
                 ],
             )
 
+    def test_hermes_020_export_shape_is_normalized_without_unrelated_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export = Path(tmp) / "hermes.jsonl"
+            row = dict.fromkeys(
+                {
+                    "actual_cost_usd", "api_call_count", "archived",
+                    "billing_base_url", "billing_mode", "billing_provider",
+                    "cache_read_tokens", "cache_write_tokens", "chat_id",
+                    "chat_type", "compression_failure_cooldown_until",
+                    "compression_failure_error", "compression_fallback_streak",
+                    "compression_ineffective_count", "cost_source", "cost_status",
+                    "cwd", "display_name", "end_reason", "ended_at",
+                    "estimated_cost_usd", "expiry_finalized", "git_branch",
+                    "git_repo_root", "handoff_error", "handoff_platform",
+                    "handoff_state", "id", "input_tokens", "last_active",
+                    "last_activity_at", "last_activity_description",
+                    "last_activity_provenance", "last_read_at", "message_count",
+                    "messages", "model", "model_config", "origin_json",
+                    "output_tokens", "parent_session_id", "pinned",
+                    "pricing_version", "profile_name", "reasoning_tokens",
+                    "rewind_count", "session_key", "source", "started_at",
+                    "system_prompt", "system_prompt_hash", "thread_id", "title",
+                    "title_source", "tool_call_count", "user_id",
+                }
+            )
+            message_keys = {
+                "active", "api_content", "codex_message_items",
+                "codex_reasoning_items", "compacted", "content", "display_kind",
+                "display_metadata", "effect_disposition", "finish_reason", "id",
+                "observed", "platform_message_id", "reasoning",
+                "reasoning_content", "reasoning_details", "role", "session_id",
+                "timestamp", "token_count", "tool_call_id", "tool_calls",
+                "tool_name",
+            }
+
+            def message(**values):
+                result = dict.fromkeys(message_keys)
+                result.update(values)
+                return result
+
+            row.update(
+                {
+                    "id": "hermes-020",
+                    "source": "cli",
+                    "cwd": "/workspace",
+                    "started_at": "2026-08-28T00:00:00Z",
+                    "ended_at": "2026-08-28T00:01:00Z",
+                    "title": "session",
+                    "model": "model",
+                    "billing_provider": "provider",
+                    "chat_type": "dm",
+                    "system_prompt": "must not be archived",
+                    "user_id": "must not be archived",
+                    "messages": [
+                        message(
+                            id=1,
+                            role="session_meta",
+                            content=None,
+                            session_id="hermes-020",
+                            timestamp=1.0,
+                            active=1,
+                            compacted=0,
+                            observed=1,
+                        ),
+                        message(
+                            id=2,
+                            role="user",
+                            content="run it",
+                            session_id="hermes-020",
+                            timestamp=2.0,
+                            active=1,
+                            compacted=0,
+                            observed=1,
+                        ),
+                        message(
+                            id=3,
+                            role="assistant",
+                            content="running",
+                            session_id="hermes-020",
+                            timestamp=3.0,
+                            active=1,
+                            compacted=0,
+                            observed=1,
+                            tool_calls=[
+                                {
+                                    "call_id": "call-1",
+                                    "function": {
+                                        "arguments": "{}",
+                                        "name": "shell",
+                                    },
+                                    "id": "tool-1",
+                                    "response_item_id": "response-1",
+                                    "type": "function",
+                                }
+                            ],
+                        ),
+                        message(
+                            id=4,
+                            role="tool",
+                            content="ok",
+                            session_id="hermes-020",
+                            timestamp=4.0,
+                            active=1,
+                            compacted=0,
+                            observed=1,
+                            tool_call_id="call-1",
+                            tool_name="shell",
+                        ),
+                    ],
+                }
+            )
+            write_lines(export, [json_line(row)])
+            quality = {}
+
+            conversations = extract_hermes_export(export, quality_out=quality)
+
+            self.assertEqual(quality["status"], "complete")
+            self.assertEqual(len(conversations), 1)
+            conversation = conversations[0]
+            self.assertEqual(conversation["provider"], "provider")
+            self.assertEqual(conversation["session_type"], "dm")
+            self.assertEqual(
+                [message["role"] for message in conversation["messages"]],
+                ["user", "assistant", "tool"],
+            )
+            self.assertEqual(
+                conversation["messages"][1]["tool_uses"][0],
+                {
+                    "type": "tool_use",
+                    "payload": {
+                        "call_id": "call-1",
+                        "function": {"arguments": "{}", "name": "shell"},
+                        "id": "tool-1",
+                        "response_item_id": "response-1",
+                        "type": "function",
+                    },
+                    "timestamp": 3.0,
+                },
+            )
+            self.assertNotIn("system_prompt", conversation)
+            self.assertNotIn("user_id", conversation)
+            self.assertEqual(
+                conversation["events"][0]["payload"],
+                {
+                    "active": 1,
+                    "compacted": 0,
+                    "content": None,
+                    "id": 1,
+                    "observed": 1,
+                    "session_id": "hermes-020",
+                    "tool_name": None,
+                },
+            )
+
+            hybrid_export = Path(tmp) / "hermes-hybrid.jsonl"
+            current_row_with_legacy_message = dict(row)
+            current_row_with_legacy_message["messages"] = [
+                {"role": "user", "content": "hybrid"}
+            ]
+            write_lines(
+                hybrid_export,
+                [
+                    json_line(
+                        {
+                            "id": "legacy-with-current-column",
+                            "messages": [{"role": "user", "content": "hybrid"}],
+                            "billing_provider": "future-hybrid",
+                        }
+                    ),
+                    json_line(current_row_with_legacy_message),
+                    json_line(
+                        {
+                            **row,
+                            "messages": [
+                                message(
+                                    id=5,
+                                    role="user",
+                                    content="bad metadata",
+                                    session_id="hermes-020",
+                                    timestamp=5.0,
+                                    active={"nested": 1},
+                                    compacted=0,
+                                    observed=1,
+                                )
+                            ],
+                        }
+                    ),
+                    json_line(
+                        {
+                            **row,
+                            "messages": [
+                                message(
+                                    id=6,
+                                    role="user",
+                                    content="bad empty tool list",
+                                    session_id="hermes-020",
+                                    timestamp=6.0,
+                                    active=1,
+                                    compacted=0,
+                                    observed=1,
+                                    tool_calls=[],
+                                )
+                            ],
+                        }
+                    ),
+                    json_line(
+                        {
+                            **row,
+                            "messages": [
+                                message(
+                                    id=7,
+                                    role="assistant",
+                                    content="bad tool name",
+                                    session_id="hermes-020",
+                                    timestamp=7.0,
+                                    active=1,
+                                    compacted=0,
+                                    observed=1,
+                                    tool_calls=[
+                                        {
+                                            "call_id": "call-2",
+                                            "function": {
+                                                "arguments": "{}",
+                                                "name": "",
+                                            },
+                                            "id": "tool-2",
+                                            "response_item_id": "response-2",
+                                            "type": "function",
+                                        }
+                                    ],
+                                )
+                            ],
+                        }
+                    ),
+                ],
+            )
+            hybrid_quality = {}
+            self.assertEqual(
+                extract_hermes_export(
+                    hybrid_export, quality_out=hybrid_quality
+                ),
+                [],
+            )
+            self.assertEqual(hybrid_quality["status"], "partial")
+            self.assertEqual(hybrid_quality["failed_lines"], 5)
+
     def test_all_four_producers_emit_closed_v2_objects(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

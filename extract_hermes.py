@@ -21,6 +21,54 @@ _MACOS_COMPATIBILITY_SYMLINKS = {
 }
 
 
+# Hermes 0.20 exports the complete sessions/messages database rows.  Accept
+# only the observed, versioned column set, normalize the conversation fields we
+# intentionally archive, and discard unrelated profile, billing, and prompt
+# metadata.  A future unknown column still fails closed.
+HERMES_LEGACY_SESSION_KEYS = {
+    "agent_id", "cwd", "ended_at", "events", "id", "messages", "model",
+    "provider", "session_type", "source", "started_at", "title",
+}
+HERMES_V020_SESSION_KEYS = {
+    "actual_cost_usd", "api_call_count", "archived",
+    "billing_base_url", "billing_mode", "billing_provider",
+    "cache_read_tokens", "cache_write_tokens", "chat_id", "chat_type",
+    "compression_failure_cooldown_until", "compression_failure_error",
+    "compression_fallback_streak", "compression_ineffective_count",
+    "cost_source", "cost_status", "cwd", "display_name", "end_reason",
+    "ended_at", "estimated_cost_usd", "expiry_finalized",
+    "git_branch", "git_repo_root", "handoff_error", "handoff_platform",
+    "handoff_state", "id", "input_tokens", "last_active",
+    "last_activity_at", "last_activity_description",
+    "last_activity_provenance", "last_read_at", "message_count", "messages",
+    "model", "model_config", "origin_json", "output_tokens",
+    "parent_session_id", "pinned", "pricing_version", "profile_name",
+    "reasoning_tokens", "rewind_count", "session_key", "source", "started_at",
+    "system_prompt", "system_prompt_hash", "thread_id", "title",
+    "title_source", "tool_call_count", "user_id",
+}
+HERMES_LEGACY_MESSAGE_KEYS = {
+    "content", "created_at", "id", "is_meta", "name", "role", "timestamp",
+    "tool_name",
+}
+HERMES_V020_MESSAGE_KEYS = {
+    "active", "api_content", "codex_message_items", "codex_reasoning_items",
+    "compacted", "content", "display_kind",
+    "display_metadata", "effect_disposition", "finish_reason", "id", "observed",
+    "platform_message_id", "reasoning",
+    "reasoning_content", "reasoning_details", "role", "session_id",
+    "timestamp", "token_count", "tool_call_id", "tool_calls", "tool_name",
+}
+HERMES_SESSION_META_KEYS = {
+    "active", "compacted", "content", "created_at", "id", "is_meta",
+    "name", "observed", "session_id", "tool_name",
+}
+HERMES_TOOL_CALL_KEYS = {
+    "call_id", "function", "id", "response_item_id", "type",
+}
+HERMES_TOOL_FUNCTION_KEYS = {"arguments", "name"}
+
+
 def _is_macos_compatibility_symlink(path):
     expected = _MACOS_COMPATIBILITY_SYMLINKS.get(path)
     return expected is not None and path.resolve(strict=True) == expected
@@ -153,15 +201,21 @@ def iter_hermes_export(
                 except json.JSONDecodeError:
                     failed_lines += 1
                     continue
-                allowed_row_keys = {
-                    "id", "source", "cwd", "started_at", "ended_at", "title",
-                    "model", "provider", "agent_id", "session_type", "messages", "events",
-                }
+                row_keys = set(row) if isinstance(row, dict) else set()
+                if row_keys == HERMES_V020_SESSION_KEYS:
+                    input_schema = "v020"
+                elif (
+                    {"id", "messages"}.issubset(row_keys)
+                    and row_keys.issubset(HERMES_LEGACY_SESSION_KEYS)
+                ):
+                    input_schema = "legacy"
+                else:
+                    input_schema = None
                 if (
                     not isinstance(row, dict)
                     or type(row.get("id")) not in {str, int}
                     or not str(row["id"])
-                    or set(row) - allowed_row_keys
+                    or input_schema is None
                 ):
                     failed_lines += 1
                     continue
@@ -180,18 +234,71 @@ def iter_hermes_export(
                 auxiliary_events = []
                 valid_messages = True
                 for message in row["messages"]:
-                    allowed_message_keys = {
-                        "id", "role", "content", "created_at", "timestamp",
-                        "is_meta", "tool_name", "name",
-                    }
+                    message_keys = set(message) if isinstance(message, dict) else set()
+                    message_schema_valid = (
+                        message_keys == HERMES_V020_MESSAGE_KEYS
+                        if input_schema == "v020"
+                        else {"role", "content"}.issubset(message_keys)
+                        and message_keys.issubset(HERMES_LEGACY_MESSAGE_KEYS)
+                    )
                     if (
                         not isinstance(message, dict)
-                        or set(message) - allowed_message_keys
+                        or not message_schema_valid
                     ):
                         valid_messages = False
                         break
                     role = message.get("role")
                     content = message.get("content")
+                    if input_schema == "v020":
+                        selected_metadata_valid = (
+                            type(message.get("id")) is int
+                            and type(message.get("timestamp")) is float
+                            and all(
+                                type(message.get(key)) is int
+                                and message[key] in {0, 1}
+                                for key in ("active", "compacted", "observed")
+                            )
+                            and isinstance(message.get("session_id"), str)
+                            and bool(message["session_id"])
+                            and "\x00" not in message["session_id"]
+                            and len(message["session_id"].encode("utf-8")) <= 4096
+                            and (
+                                message.get("tool_name") is None
+                                or isinstance(message["tool_name"], str)
+                            )
+                            and (
+                                message.get("tool_call_id") is None
+                                or isinstance(message["tool_call_id"], str)
+                            )
+                        )
+                    else:
+                        selected_metadata_valid = (
+                            (
+                                "id" not in message
+                                or message["id"] is None
+                                or type(message["id"]) in {str, int}
+                            )
+                            and all(
+                                key not in message
+                                or message[key] is None
+                                or type(message[key]) in {str, int, float}
+                                for key in ("created_at", "timestamp")
+                            )
+                            and (
+                                "is_meta" not in message
+                                or message["is_meta"] is None
+                                or type(message["is_meta"]) in {bool, int}
+                            )
+                            and all(
+                                key not in message
+                                or message[key] is None
+                                or isinstance(message[key], str)
+                                for key in ("name", "tool_name")
+                            )
+                        )
+                    if not selected_metadata_valid:
+                        valid_messages = False
+                        break
                     if role == "session_meta" and content is None:
                         auxiliary_events.append(
                             event_envelope(
@@ -199,7 +306,7 @@ def iter_hermes_export(
                                 {
                                     key: value
                                     for key, value in message.items()
-                                    if key not in {"role", "timestamp"}
+                                    if key in HERMES_SESSION_META_KEYS
                                 },
                                 message.get("timestamp", message.get("created_at")),
                             )
@@ -211,8 +318,50 @@ def iter_hermes_export(
                         timestamp = message.get("timestamp", message.get("created_at"))
                         if "timestamp" in message or "created_at" in message:
                             normalized["timestamp"] = timestamp
-                        if "tool_name" in message:
+                        if message.get("tool_name") is not None:
                             normalized["tool_name"] = message["tool_name"]
+                        tool_calls = message.get("tool_calls")
+                        if tool_calls is not None:
+                            if role != "assistant" or not isinstance(tool_calls, list):
+                                valid_messages = False
+                                break
+                            normalized_tool_uses = []
+                            for tool_call in tool_calls:
+                                function = (
+                                    tool_call.get("function")
+                                    if isinstance(tool_call, dict)
+                                    else None
+                                )
+                                if (
+                                    not isinstance(tool_call, dict)
+                                    or set(tool_call) != HERMES_TOOL_CALL_KEYS
+                                    or tool_call.get("type") != "function"
+                                    or any(
+                                        not isinstance(tool_call.get(key), str)
+                                        or not tool_call[key]
+                                        for key in (
+                                            "call_id", "id", "response_item_id"
+                                        )
+                                    )
+                                    or not isinstance(function, dict)
+                                    or set(function) != HERMES_TOOL_FUNCTION_KEYS
+                                    or any(
+                                        not isinstance(function.get(key), str)
+                                        for key in HERMES_TOOL_FUNCTION_KEYS
+                                    )
+                                    or not function["name"]
+                                ):
+                                    valid_messages = False
+                                    break
+                                normalized_tool_uses.append(
+                                    event_envelope(
+                                        "tool_use", tool_call, timestamp
+                                    )
+                                )
+                            if not valid_messages:
+                                break
+                            if normalized_tool_uses:
+                                normalized["tool_uses"] = normalized_tool_uses
                         chat_messages.append(normalized)
                     else:
                         valid_messages = False
@@ -253,6 +402,10 @@ def iter_hermes_export(
                 ):
                     if key in row:
                         conversation[key] = row[key]
+                if "provider" not in row and row.get("billing_provider") is not None:
+                    conversation["provider"] = row["billing_provider"]
+                if "session_type" not in row and row.get("chat_type") is not None:
+                    conversation["session_type"] = row["chat_type"]
                 if auxiliary_events:
                     normalized_events.extend(auxiliary_events)
                 if normalized_events:

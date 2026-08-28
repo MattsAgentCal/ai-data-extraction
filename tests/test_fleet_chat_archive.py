@@ -24,6 +24,122 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 class FleetChatArchiveTests(unittest.TestCase):
+    def test_duplicate_logical_sessions_prune_superseded_staging_objects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cases = {
+                "claude": [
+                    {
+                        "archive_schema_version": 2,
+                        "source": "claude-code",
+                        "session_id": "same-session",
+                        "messages": [{"role": "user", "content": "first"}],
+                        "project_path": "/project-one",
+                        "project_name": "one",
+                        "source_file": "/source/one.jsonl",
+                    },
+                    {
+                        "archive_schema_version": 2,
+                        "source": "claude-code",
+                        "session_id": "same-session",
+                        "messages": [{"role": "user", "content": "second"}],
+                        "project_path": "/project-two",
+                        "project_name": "two",
+                        "source_file": "/source/two.jsonl",
+                    },
+                ],
+                "codex": [
+                    {
+                        "archive_schema_version": 2,
+                        "source": "codex",
+                        "session_id": "same-session",
+                        "messages": [{"role": "user", "content": "first"}],
+                        "cwd": "/project",
+                        "session_file": "/source/one.jsonl",
+                        "timestamp": None,
+                        "installation": "/codex",
+                        "_archive_source_sha256": "1" * 64,
+                    },
+                    {
+                        "archive_schema_version": 2,
+                        "source": "codex",
+                        "session_id": "same-session",
+                        "messages": [{"role": "user", "content": "second"}],
+                        "cwd": "/project",
+                        "session_file": "/source/two.jsonl",
+                        "timestamp": None,
+                        "installation": "/codex",
+                        "_archive_source_sha256": "2" * 64,
+                    },
+                ],
+            }
+
+            for harness, conversations in cases.items():
+                with self.subTest(harness=harness):
+                    archive_root = root / harness
+                    result = fleet.archive_conversations(
+                        archive_root,
+                        "test-mac",
+                        harness,
+                        conversations,
+                    )
+                    host_root = archive_root / "hosts" / "test-mac"
+                    files = fleet.validated_shard_files(
+                        host_root,
+                        "test-mac",
+                        require_healthy_receipt=False,
+                    )
+                    index = json.loads(
+                        (host_root / harness / "index.json").read_text()
+                    )
+                    objects = list((host_root / harness / "objects").glob("*.json"))
+                    self.assertEqual(result["conversations"], 2)
+                    self.assertEqual(result["index_conversations"], 1)
+                    self.assertEqual(result["new_objects"], 1)
+                    self.assertEqual(len(index["conversations"]), 1)
+                    self.assertEqual(len(objects), 1)
+                    self.assertIn(objects[0].resolve(), files)
+
+    def test_duplicate_pruning_preserves_preexisting_unindexed_objects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_root = Path(tmp) / "archive"
+            objects_root = (
+                archive_root / "hosts" / "test-mac" / "claude" / "objects"
+            )
+            objects_root.mkdir(parents=True)
+            preexisting = objects_root / ("f" * 64 + ".json")
+            preexisting.write_text("preexisting\n", encoding="utf-8")
+            conversations = [
+                {
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": "same-session",
+                    "messages": [{"role": "user", "content": "first"}],
+                    "project_path": "/project-one",
+                    "project_name": "one",
+                    "source_file": "/source/one.jsonl",
+                },
+                {
+                    "archive_schema_version": 2,
+                    "source": "claude-code",
+                    "session_id": "same-session",
+                    "messages": [{"role": "user", "content": "second"}],
+                    "project_path": "/project-two",
+                    "project_name": "two",
+                    "source_file": "/source/two.jsonl",
+                },
+            ]
+
+            fleet.archive_conversations(
+                archive_root,
+                "test-mac",
+                "claude",
+                conversations,
+            )
+
+            self.assertEqual(preexisting.read_text(encoding="utf-8"), "preexisting\n")
+            self.assertEqual(len(list(objects_root.glob("*.json"))), 2)
+
     def test_claude_collection_is_content_addressed_and_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
