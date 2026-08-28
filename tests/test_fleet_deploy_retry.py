@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -133,6 +134,62 @@ class FakeTransport:
 class FleetDeployRetryTests(unittest.TestCase):
     def setUp(self):
         self.config = retry.load_deploy_config(CONFIG_PATH)
+
+    def prepare_remote_transaction(
+        self,
+        remote,
+        root: Path,
+        deployment_id: str,
+        old_payloads: dict[str, bytes],
+        new_payloads: dict[str, bytes],
+    ):
+        remote["identity"] = lambda _request: {
+            "user": "test",
+            "home": "test",
+            "platform": "Darwin",
+            "python_major": 3,
+        }
+        home = root / "home"
+        repo = home / "repo"
+        home.mkdir(mode=0o700, exist_ok=True)
+        repo.mkdir(mode=0o700, exist_ok=True)
+        for relative, payload in old_payloads.items():
+            target = repo / relative
+            target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            target.write_bytes(payload)
+        request = {
+            "expected_remote_user": "test",
+            "expected_remote_home": str(home),
+            "remote_repo_root": str(repo),
+            "deployment_id": deployment_id,
+            "relative_paths": list(new_payloads),
+            "host_id": "old-macbook",
+            "script_relative_path": "fleet_chat_archive.py",
+            "config_relative_path": "configs/old-macbook.json",
+            "interval_seconds": 21_600,
+        }
+        prepared = remote["prepare"](request)
+        stage_path = prepared["stage_path"]
+        expected_hashes = {
+            relative: hashlib.sha256(payload).hexdigest()
+            for relative, payload in new_payloads.items()
+        }
+        for relative, payload in new_payloads.items():
+            remote["upload_file"](
+                dict(
+                    request,
+                    stage_path=stage_path,
+                    relative_path=relative,
+                    expected_sha256=expected_hashes[relative],
+                    content_b64=base64.b64encode(payload).decode("ascii"),
+                )
+            )
+        activate_request = dict(
+            request,
+            stage_path=stage_path,
+            expected_sha256=expected_hashes,
+        )
+        return home, repo, activate_request
 
     def test_offline_is_body_free_normal_retryable_status(self):
         transport = FakeTransport(offline=True)
@@ -475,7 +532,7 @@ class FleetDeployRetryTests(unittest.TestCase):
                 )
 
             finished = remote["finish"](
-                dict(request, stage_path=str(expected_stage))
+                dict(request, stage_path=str(expected_stage), abort=True)
             )
             self.assertTrue(finished["finished"])
             self.assertFalse(expected_stage.exists())
@@ -539,21 +596,36 @@ class FleetDeployRetryTests(unittest.TestCase):
                     )
                 )
 
-            remote["quiesce_archive"] = lambda _request: True
+            remote["snapshot_archive_state"] = lambda _request: {
+                "enabled": True,
+                "loaded": True,
+            }
+            remote["quiesce_archive"] = lambda _request: None
             restored_jobs = []
-            remote["install_archive_job"] = lambda _request, _repo: restored_jobs.append(
-                "loaded"
-            ) or {
+            remote["restore_archive_state"] = (
+                lambda _request, state: restored_jobs.append(dict(state))
+            )
+            remote["install_archive_job"] = lambda _request, _repo: {
                 "label": "com.mattrotundo.ai-chat-archive.old-macbook",
                 "loaded": True,
                 "plist_path": str(home / "Library/LaunchAgents/archive.plist"),
             }
             real_replace = os.replace
+            target_replacements = 0
 
             def fail_second_replacement(source, target, *args, **kwargs):
-                if target == "b.py":
-                    raise OSError("injected replacement failure")
-                return real_replace(source, target, *args, **kwargs)
+                nonlocal target_replacements
+                result = real_replace(source, target, *args, **kwargs)
+                destination_descriptor = kwargs.get("dst_dir_fd")
+                if (
+                    target in old_payloads
+                    and destination_descriptor is not None
+                    and os.fstat(destination_descriptor).st_ino == repo.stat().st_ino
+                ):
+                    target_replacements += 1
+                    if target_replacements == 2:
+                        raise OSError("injected replacement failure")
+                return result
 
             activate_request = dict(
                 request,
@@ -574,20 +646,17 @@ class FleetDeployRetryTests(unittest.TestCase):
                 {relative: (repo / relative).read_bytes() for relative in old_payloads},
                 old_payloads,
             )
-            self.assertEqual(restored_jobs, ["loaded"])
-
-            activated = remote["install_files"](activate_request)
-            self.assertEqual(activated["sha256"], expected_hashes)
             self.assertEqual(
-                {relative: (repo / relative).read_bytes() for relative in new_payloads},
-                new_payloads,
+                restored_jobs,
+                [{"enabled": True, "loaded": True}],
             )
-            self.assertEqual(restored_jobs, ["loaded", "loaded"])
+            remote["finish"](dict(activate_request, abort=True))
+            self.assertFalse(Path(stage_path).exists())
 
     def test_archive_activation_boots_out_before_mutation_and_print_verifies_loaded(self):
         remote = remote_helper_namespace()
         calls = []
-        returncodes = iter((0, 0, 0, 113))
+        returncodes = iter((0, 0, 113))
 
         def fake_launchctl(arguments):
             calls.append(arguments)
@@ -595,12 +664,11 @@ class FleetDeployRetryTests(unittest.TestCase):
 
         remote["launchctl"] = fake_launchctl
         with mock.patch.object(remote["os"], "getuid", return_value=501):
-            self.assertTrue(remote["quiesce_archive"]({"host_id": "old-macbook"}))
+            self.assertIsNone(remote["quiesce_archive"]({"host_id": "old-macbook"}))
         target = "gui/501/com.mattrotundo.ai-chat-archive.old-macbook"
         self.assertEqual(
             calls,
             [
-                ["print", target],
                 ["disable", target],
                 ["bootout", target],
                 ["print", target],
@@ -653,13 +721,448 @@ class FleetDeployRetryTests(unittest.TestCase):
             ):
                 remote["install_archive_job"](request, repo)
 
+    def test_hard_exit_after_first_rename_is_recovered_from_persistent_journal(self):
+        remote = remote_helper_namespace()
+        old_payloads = {"a.py": b"old-a", "b.py": b"old-b"}
+        new_payloads = {"a.py": b"new-a", "b.py": b"new-b"}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            home, repo, activate_request = self.prepare_remote_transaction(
+                remote,
+                root,
+                "1" * 32,
+                old_payloads,
+                new_payloads,
+            )
+            child = f"""
+import os
+import sys
+sys.path.insert(0, {str(REPO)!r})
+import fleet_deploy_retry as retry
+remote = {{}}
+exec(compile(retry.REMOTE_HELPER, '<remote-helper>', 'exec'), remote)
+remote['identity'] = lambda _request: {{'user': 'test', 'home': 'test', 'platform': 'Darwin', 'python_major': 3}}
+remote['snapshot_archive_state'] = lambda _request: {{'enabled': True, 'loaded': True}}
+remote['quiesce_archive'] = lambda _request: None
+request = {activate_request!r}
+repo_inode = os.stat(request['remote_repo_root']).st_ino
+real_replace = remote['os'].replace
+def crash_after_runtime_rename(source, target, *args, **kwargs):
+    result = real_replace(source, target, *args, **kwargs)
+    destination_descriptor = kwargs.get('dst_dir_fd')
+    if target == 'a.py' and destination_descriptor is not None and os.fstat(destination_descriptor).st_ino == repo_inode:
+        os._exit(73)
+    return result
+remote['os'].replace = crash_after_runtime_rename
+remote['install_files'](request)
+"""
+            completed = subprocess.run(
+                [sys.executable, "-c", child],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 73, completed.stderr)
+            self.assertEqual((repo / "a.py").read_bytes(), b"new-a")
+            self.assertEqual((repo / "b.py").read_bytes(), b"old-b")
+
+            stage_path = Path(activate_request["stage_path"])
+            journal_path = stage_path / ".transaction" / "journal.json"
+            backups = stage_path / ".transaction" / "backups"
+            self.assertEqual(json.loads(journal_path.read_text())["phase"], "activating")
+            self.assertEqual((backups / "a.py").read_bytes(), b"old-a")
+            self.assertEqual((backups / "b.py").read_bytes(), b"old-b")
+
+            lock_path = home / retry.REMOTE_DEPLOY_ROOT_RELATIVE / "active.json"
+            stale_time = time.time() - remote["STALE_LOCK_SECONDS"] - 60
+            os.utime(lock_path, (stale_time, stale_time))
+            restored_states = []
+            remote["quiesce_archive"] = lambda _request: None
+            remote["restore_archive_state"] = (
+                lambda _request, state: restored_states.append(dict(state))
+            )
+            next_request = dict(
+                activate_request,
+                deployment_id="2" * 32,
+            )
+            next_request.pop("stage_path")
+            next_request.pop("expected_sha256")
+            prepared = remote["prepare"](next_request)
+
+            self.assertEqual(
+                {relative: (repo / relative).read_bytes() for relative in old_payloads},
+                old_payloads,
+            )
+            self.assertEqual(restored_states, [{"enabled": True, "loaded": True}])
+            self.assertFalse(stage_path.exists())
+            remote["finish"](
+                dict(next_request, stage_path=prepared["stage_path"], abort=True)
+            )
+
+    def test_stale_ambiguous_and_rollback_failed_transactions_remain_blocked(self):
+        for state, expected_error in (
+            ("prepared", "recovery_required"),
+            ("rollback_failed", "rollback_failed"),
+        ):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as temporary:
+                remote = remote_helper_namespace()
+                old_payloads = {"a.py": b"old"}
+                new_payloads = {"a.py": b"new"}
+                root = Path(temporary).resolve()
+                home, _repo, activate_request = self.prepare_remote_transaction(
+                    remote,
+                    root,
+                    "3" * 32,
+                    old_payloads,
+                    new_payloads,
+                )
+                stage_path = Path(activate_request["stage_path"])
+                (stage_path / ".transaction" / "backups").mkdir(
+                    parents=True, mode=0o700
+                )
+                lock_path = home / retry.REMOTE_DEPLOY_ROOT_RELATIVE / "active.json"
+                lock = json.loads(lock_path.read_text())
+                lock["state"] = state
+                lock_path.write_text(json.dumps(lock))
+                os.chmod(lock_path, 0o600)
+                stale_time = time.time() - remote["STALE_LOCK_SECONDS"] - 60
+                os.utime(lock_path, (stale_time, stale_time))
+                next_request = dict(
+                    activate_request,
+                    deployment_id="4" * 32,
+                )
+                next_request.pop("stage_path")
+                next_request.pop("expected_sha256")
+                with self.assertRaisesRegex(
+                    remote["ControlledFailure"], expected_error
+                ):
+                    remote["prepare"](next_request)
+                self.assertTrue(stage_path.exists())
+                self.assertTrue(lock_path.exists())
+
+    def test_post_activation_tamper_rolls_back_before_abort_cleanup(self):
+        remote = remote_helper_namespace()
+        old_payloads = {"a.py": b"old-a", "b.py": b"old-b"}
+        new_payloads = {"a.py": b"new-a", "b.py": b"new-b"}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            _home, repo, request = self.prepare_remote_transaction(
+                remote,
+                root,
+                "5" * 32,
+                old_payloads,
+                new_payloads,
+            )
+            prior_state = {"enabled": False, "loaded": True}
+            states = iter((prior_state, {"enabled": True, "loaded": True}))
+            remote["snapshot_archive_state"] = lambda _request: dict(next(states))
+            remote["quiesce_archive"] = lambda _request: None
+            restored = []
+            remote["restore_archive_state"] = (
+                lambda _request, state: restored.append(dict(state))
+            )
+            remote["install_archive_job"] = lambda _request, _repo: {
+                "label": "com.mattrotundo.ai-chat-archive.old-macbook",
+                "loaded": True,
+                "plist_path": str(root / "archive.plist"),
+            }
+            installed = remote["install_files"](request)
+            self.assertEqual(installed["sha256"], request["expected_sha256"])
+            journal_path = Path(request["stage_path"]) / ".transaction" / "journal.json"
+            self.assertEqual(json.loads(journal_path.read_text())["phase"], "launched")
+
+            (repo / "a.py").write_bytes(b"tampered")
+            with self.assertRaisesRegex(remote["ControlledFailure"], "hash_mismatch"):
+                remote["verify_final"](request)
+            self.assertEqual(
+                {relative: (repo / relative).read_bytes() for relative in old_payloads},
+                old_payloads,
+            )
+            self.assertEqual(json.loads(journal_path.read_text())["phase"], "rolled_back")
+            self.assertEqual(restored, [prior_state])
+            remote["finish"](dict(request, abort=True))
+            self.assertFalse(Path(request["stage_path"]).exists())
+
+    def test_verified_backups_survive_until_commit_and_abort_restores_before_cleanup(self):
+        for finish_mode in ("commit", "abort"):
+            with self.subTest(finish_mode=finish_mode), tempfile.TemporaryDirectory() as temporary:
+                remote = remote_helper_namespace()
+                root = Path(temporary).resolve()
+                old_payloads = {"nested/a.py": b"old-a"}
+                new_payloads = {"nested/a.py": b"new-a"}
+                home, repo, request = self.prepare_remote_transaction(
+                    remote,
+                    root,
+                    ("7" if finish_mode == "commit" else "8") * 32,
+                    old_payloads,
+                    new_payloads,
+                )
+                prior_state = {"enabled": True, "loaded": False}
+                observed_states = iter(
+                    (prior_state, {"enabled": True, "loaded": True})
+                )
+                remote["snapshot_archive_state"] = (
+                    lambda _request: dict(next(observed_states))
+                )
+                remote["quiesce_archive"] = lambda _request: None
+                restored = []
+                remote["restore_archive_state"] = (
+                    lambda _request, state: restored.append(dict(state))
+                )
+                remote["install_archive_job"] = lambda _request, _repo: {
+                    "label": "com.mattrotundo.ai-chat-archive.old-macbook",
+                    "loaded": True,
+                    "plist_path": str(root / "archive.plist"),
+                }
+                remote["install_files"](request)
+                if finish_mode == "commit":
+                    remote["verify_final"](request)
+                    transaction = Path(request["stage_path"]) / ".transaction"
+                    self.assertEqual(
+                        json.loads((transaction / "journal.json").read_text())["phase"],
+                        "verified",
+                    )
+                    self.assertEqual(
+                        (transaction / "backups" / "nested" / "a.py").read_bytes(),
+                        b"old-a",
+                    )
+                    remote["finish"](dict(request, commit=True))
+                    self.assertEqual((repo / "nested/a.py").read_bytes(), b"new-a")
+                    self.assertEqual(restored, [])
+                else:
+                    remote["finish"](dict(request, abort=True))
+                    self.assertEqual((repo / "nested/a.py").read_bytes(), b"old-a")
+                    self.assertEqual(restored, [prior_state])
+                self.assertFalse(Path(request["stage_path"]).exists())
+                self.assertFalse(
+                    (home / retry.REMOTE_DEPLOY_ROOT_RELATIVE / "active.json").exists()
+                )
+
+    def test_abort_removes_target_parent_directories_created_by_activation(self):
+        remote = remote_helper_namespace()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            _home, repo, request = self.prepare_remote_transaction(
+                remote,
+                root,
+                "9" * 32,
+                {},
+                {"created/deep/a.py": b"new-a"},
+            )
+            remote["snapshot_archive_state"] = lambda _request: {
+                "enabled": True,
+                "loaded": False,
+            }
+            remote["quiesce_archive"] = lambda _request: None
+            remote["restore_archive_state"] = lambda _request, _state: None
+            remote["install_archive_job"] = lambda _request, _repo: {
+                "label": "com.mattrotundo.ai-chat-archive.old-macbook",
+                "loaded": True,
+                "plist_path": str(root / "archive.plist"),
+            }
+            remote["install_files"](request)
+            self.assertTrue((repo / "created/deep/a.py").exists())
+            remote["finish"](dict(request, abort=True))
+            self.assertFalse((repo / "created").exists())
+
+    def test_keyboard_interrupt_after_archive_bootout_restores_state_and_print_proves_it(self):
+        remote = remote_helper_namespace()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            old_payloads = {"a.py": b"old-a"}
+            new_payloads = {"a.py": b"new-a"}
+            _home, repo, request = self.prepare_remote_transaction(
+                remote,
+                root,
+                "6" * 32,
+                old_payloads,
+                new_payloads,
+            )
+            state = {"enabled": True, "loaded": True}
+            calls = []
+            bootouts = 0
+            label = "com.mattrotundo.ai-chat-archive.old-macbook"
+
+            def launchctl(arguments):
+                nonlocal bootouts
+                calls.append(list(arguments))
+                action = arguments[0]
+                if action == "print":
+                    return subprocess.CompletedProcess(
+                        arguments, 0 if state["loaded"] else 113, "", ""
+                    )
+                if action == "print-disabled":
+                    return subprocess.CompletedProcess(
+                        arguments,
+                        0,
+                        f'"{label}" => {str(not state["enabled"]).lower()}\n',
+                        "",
+                    )
+                if action == "disable":
+                    state["enabled"] = False
+                elif action == "enable":
+                    state["enabled"] = True
+                elif action == "bootout":
+                    state["loaded"] = False
+                    bootouts += 1
+                    if bootouts == 1:
+                        raise KeyboardInterrupt("after bootout")
+                return subprocess.CompletedProcess(arguments, 0, "", "")
+
+            remote["launchctl"] = launchctl
+
+            def install_archive_job(_request, _repo):
+                state.update(enabled=True, loaded=True)
+                return {
+                    "label": label,
+                    "loaded": True,
+                    "plist_path": str(root / "archive.plist"),
+                }
+
+            remote["install_archive_job"] = install_archive_job
+            with self.assertRaises(KeyboardInterrupt):
+                remote["install_files"](request)
+            self.assertEqual((repo / "a.py").read_bytes(), b"old-a")
+            self.assertEqual(state, {"enabled": True, "loaded": True})
+            self.assertEqual(calls[-2][0], "print")
+            self.assertEqual(calls[-1][0], "print-disabled")
+            journal_path = Path(request["stage_path"]) / ".transaction" / "journal.json"
+            self.assertEqual(json.loads(journal_path.read_text())["phase"], "rolled_back")
+
+    def test_retry_launchd_install_failures_restore_prior_plist_and_state(self):
+        for failure in ("bootstrap", "print", "print-disabled"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                agents = root / "LaunchAgents"
+                agents.mkdir(mode=0o700)
+                plist_path = agents / f"{retry.RETRY_LAUNCHD_LABEL}.plist"
+                old_plist = b"old retry plist"
+                plist_path.write_bytes(old_plist)
+                os.chmod(plist_path, 0o600)
+                state = {"enabled": False, "loaded": True}
+                counts = {"bootstrap": 0, "print": 0, "print-disabled": 0}
+
+                def runner(command, **_kwargs):
+                    action = command[1]
+                    if action in counts:
+                        counts[action] += 1
+                    if action == "print":
+                        if failure == "print" and counts[action] == 2:
+                            return subprocess.CompletedProcess(command, 70, "", "proof failed")
+                        return subprocess.CompletedProcess(
+                            command, 0 if state["loaded"] else 113, "", ""
+                        )
+                    if action == "print-disabled":
+                        if failure == "print-disabled" and counts[action] == 2:
+                            return subprocess.CompletedProcess(command, 70, "", "proof failed")
+                        stdout = (
+                            f'"{retry.RETRY_LAUNCHD_LABEL}" => '
+                            f'{str(not state["enabled"]).lower()}\n'
+                        )
+                        return subprocess.CompletedProcess(command, 0, stdout, "")
+                    if action == "bootout":
+                        state["loaded"] = False
+                    elif action == "enable":
+                        state["enabled"] = True
+                    elif action == "disable":
+                        state["enabled"] = False
+                    elif action == "bootstrap":
+                        if failure == "bootstrap" and counts[action] == 1:
+                            return subprocess.CompletedProcess(command, 70, "", "failed")
+                        state["loaded"] = True
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with mock.patch.object(retry.platform, "system", return_value="Darwin"):
+                    with self.assertRaisesRegex(
+                        retry.DeployError, "retry_launchd_failed"
+                    ):
+                        retry.install_retry_launchd(
+                            CONFIG_PATH,
+                            self.config,
+                            launch_agents_dir=agents,
+                            logs_dir=root / "Logs",
+                            load=True,
+                            runner=runner,
+                        )
+                self.assertEqual(plist_path.read_bytes(), old_plist)
+                self.assertEqual(plist_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(state, {"enabled": False, "loaded": True})
+                self.assertGreaterEqual(counts["print"], 3)
+                self.assertGreaterEqual(counts["print-disabled"], 2)
+
+    def test_retry_launchd_self_disable_print_proof_failure_restores_prior_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            agents = root / "LaunchAgents"
+            agents.mkdir(mode=0o700)
+            plist_path = agents / f"{retry.RETRY_LAUNCHD_LABEL}.plist"
+            old_plist = b"old retry plist"
+            plist_path.write_bytes(old_plist)
+            os.chmod(plist_path, 0o600)
+            state = {"enabled": True, "loaded": True}
+            print_disabled_count = 0
+
+            def runner(command, **_kwargs):
+                nonlocal print_disabled_count
+                action = command[1]
+                if action == "print":
+                    return subprocess.CompletedProcess(
+                        command, 0 if state["loaded"] else 113, "", ""
+                    )
+                if action == "print-disabled":
+                    print_disabled_count += 1
+                    if print_disabled_count == 2:
+                        return subprocess.CompletedProcess(command, 70, "", "proof failed")
+                    stdout = (
+                        f'"{retry.RETRY_LAUNCHD_LABEL}" => '
+                        f'{str(not state["enabled"]).lower()}\n'
+                    )
+                    return subprocess.CompletedProcess(command, 0, stdout, "")
+                if action == "disable":
+                    state["enabled"] = False
+                elif action == "enable":
+                    state["enabled"] = True
+                elif action == "bootout":
+                    state["loaded"] = False
+                elif action == "bootstrap":
+                    state["loaded"] = True
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(retry.platform, "system", return_value="Darwin"):
+                with self.assertRaisesRegex(retry.DeployError, "retry_launchd_failed"):
+                    retry.disable_retry_launchd(
+                        launch_agents_dir=agents,
+                        runner=runner,
+                    )
+            self.assertEqual(plist_path.read_bytes(), old_plist)
+            self.assertEqual(state, {"enabled": True, "loaded": True})
+            self.assertEqual(print_disabled_count, 3)
+
     def test_retry_launchd_bootstrap_and_self_disable_are_both_print_verified(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             commands = []
+            state = {"enabled": True, "loaded": False}
 
             def install_runner(command, **_kwargs):
                 commands.append(command)
+                action = command[1]
+                if action == "print":
+                    return subprocess.CompletedProcess(
+                        command, 0 if state["loaded"] else 113, "", ""
+                    )
+                if action == "print-disabled":
+                    stdout = (
+                        f'"{retry.RETRY_LAUNCHD_LABEL}" => '
+                        f'{str(not state["enabled"]).lower()}\n'
+                    )
+                    return subprocess.CompletedProcess(command, 0, stdout, "")
+                if action == "enable":
+                    state["enabled"] = True
+                elif action == "bootout":
+                    state["loaded"] = False
+                elif action == "bootstrap":
+                    state["loaded"] = True
                 return subprocess.CompletedProcess(command, 0, "", "")
 
             with mock.patch.object(retry.platform, "system", return_value="Darwin"):
@@ -674,16 +1177,33 @@ class FleetDeployRetryTests(unittest.TestCase):
             self.assertTrue(result["loaded"])
             self.assertEqual(
                 [command[1] for command in commands],
-                ["bootout", "enable", "bootstrap", "print"],
+                [
+                    "print",
+                    "print-disabled",
+                    "bootout",
+                    "enable",
+                    "bootstrap",
+                    "print",
+                    "print-disabled",
+                ],
             )
 
+            unverified_state = {"enabled": True, "loaded": False}
+
             def unverified_runner(command, **_kwargs):
-                return subprocess.CompletedProcess(
-                    command,
-                    113 if command[1] == "print" else 0,
-                    "",
-                    "",
-                )
+                action = command[1]
+                if action == "print":
+                    return subprocess.CompletedProcess(command, 113, "", "")
+                if action == "print-disabled":
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        f'"{retry.RETRY_LAUNCHD_LABEL}" => false\n',
+                        "",
+                    )
+                if action == "enable":
+                    unverified_state["enabled"] = True
+                return subprocess.CompletedProcess(command, 0, "", "")
 
             with mock.patch.object(retry.platform, "system", return_value="Darwin"):
                 with self.assertRaisesRegex(retry.DeployError, "retry_launchd_failed"):
@@ -696,27 +1216,44 @@ class FleetDeployRetryTests(unittest.TestCase):
                         runner=unverified_runner,
                     )
 
-        disable_commands = []
-        responses = iter(
-            (
-                (0, ""),
-                (0, ""),
-                (0, f'"{retry.RETRY_LAUNCHD_LABEL}" => true\n'),
-                (0, ""),
-                (113, ""),
-            )
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            disable_commands = []
+            disable_state = {"enabled": True, "loaded": True}
 
-        def disable_runner(command, **_kwargs):
-            disable_commands.append(command)
-            returncode, stdout = next(responses)
-            return subprocess.CompletedProcess(command, returncode, stdout, "")
+            def disable_runner(command, **_kwargs):
+                disable_commands.append(command)
+                action = command[1]
+                if action == "print":
+                    return subprocess.CompletedProcess(
+                        command, 0 if disable_state["loaded"] else 113, "", ""
+                    )
+                if action == "print-disabled":
+                    stdout = (
+                        f'"{retry.RETRY_LAUNCHD_LABEL}" => '
+                        f'{str(not disable_state["enabled"]).lower()}\n'
+                    )
+                    return subprocess.CompletedProcess(command, 0, stdout, "")
+                if action == "disable":
+                    disable_state["enabled"] = False
+                elif action == "bootout":
+                    disable_state["loaded"] = False
+                return subprocess.CompletedProcess(command, 0, "", "")
 
-        with mock.patch.object(retry.platform, "system", return_value="Darwin"):
-            disabled = retry.disable_retry_launchd(runner=disable_runner)
+            with mock.patch.object(retry.platform, "system", return_value="Darwin"):
+                disabled = retry.disable_retry_launchd(
+                    launch_agents_dir=Path(temporary).resolve() / "LaunchAgents",
+                    runner=disable_runner,
+                )
         self.assertEqual(
             [command[1] for command in disable_commands],
-            ["print", "disable", "print-disabled", "bootout", "print"],
+            [
+                "print",
+                "print-disabled",
+                "disable",
+                "bootout",
+                "print",
+                "print-disabled",
+            ],
         )
         self.assertEqual(
             disabled,

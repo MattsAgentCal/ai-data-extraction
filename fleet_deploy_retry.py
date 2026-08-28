@@ -106,6 +106,7 @@ class DeployFile:
 
 REMOTE_HELPER = r'''
 import base64
+import errno
 import fcntl
 import hashlib
 import json
@@ -129,6 +130,9 @@ DEPLOY_ROOT_RELATIVE = PurePosixPath(".local/share/ai-chat-archive-deploy")
 STAGES_DIRECTORY = "stages"
 LOCK_FILE = "active.json"
 MUTEX_FILE = "mutex.lock"
+TRANSACTION_DIRECTORY = ".transaction"
+BACKUPS_DIRECTORY = "backups"
+JOURNAL_FILE = "journal.json"
 MAX_STALE_STAGES = 32
 MAX_STAGE_ENTRIES = 128
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
@@ -347,6 +351,7 @@ def open_directory_below(root_descriptor, parts, *, create=False, owner_only=Fal
                 if not create:
                     raise
                 os.mkdir(part, 0o700, dir_fd=descriptor)
+                os.fsync(descriptor)
                 next_descriptor = os.open(part, DIRECTORY_FLAGS, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = next_descriptor
@@ -456,6 +461,7 @@ def write_regular_at(parent_descriptor, name, payload, mode):
             src_dir_fd=parent_descriptor,
             dst_dir_fd=parent_descriptor,
         )
+        os.fsync(parent_descriptor)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -512,31 +518,43 @@ def release_mutex(descriptor):
     os.close(descriptor)
 
 
+def write_lock_unlocked(deploy_descriptor, checked_id, relative_paths, state):
+    write_regular_at(
+        deploy_descriptor,
+        LOCK_FILE,
+        json.dumps(
+            {
+                "deployment_id": checked_id,
+                "relative_paths": list(relative_paths),
+                "state": state,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        0o600,
+    )
+
+
 def set_lock(deploy_descriptor, checked_id, relative_paths, state):
     mutex = acquire_mutex(deploy_descriptor)
     try:
         current, _ = read_lock(deploy_descriptor)
         if current is None or current["deployment_id"] != checked_id:
             fail("deployment_lock_mismatch")
-        write_regular_at(
-            deploy_descriptor,
-            LOCK_FILE,
-            json.dumps(
-                {
-                    "deployment_id": checked_id,
-                    "relative_paths": list(relative_paths),
-                    "state": state,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8"),
-            0o600,
+        write_lock_unlocked(
+            deploy_descriptor, checked_id, relative_paths, state
         )
     finally:
         release_mutex(mutex)
 
 
-def acquire_lock(deploy_descriptor, checked_id, relative_paths):
+def acquire_lock(
+    request,
+    deploy_descriptor,
+    stages_descriptor,
+    checked_id,
+    relative_paths,
+):
     payload = json.dumps(
         {
             "deployment_id": checked_id,
@@ -552,7 +570,14 @@ def acquire_lock(deploy_descriptor, checked_id, relative_paths):
         if existing is not None:
             if metadata is None or time.time() - metadata.st_mtime <= STALE_LOCK_SECONDS:
                 fail("deployment_locked")
-            os.unlink(LOCK_FILE, dir_fd=deploy_descriptor)
+            if existing["state"] == "rollback_failed":
+                fail("rollback_failed")
+            recover_stale_transaction(
+                request,
+                deploy_descriptor,
+                stages_descriptor,
+                existing,
+            )
         descriptor = os.open(
             LOCK_FILE,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
@@ -565,6 +590,7 @@ def acquire_lock(deploy_descriptor, checked_id, relative_paths):
             os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
+        os.fsync(deploy_descriptor)
     finally:
         release_mutex(mutex)
 
@@ -586,6 +612,7 @@ def release_lock(deploy_descriptor, checked_id):
         if lock is None or lock["deployment_id"] != checked_id:
             fail("deployment_lock_mismatch")
         os.unlink(LOCK_FILE, dir_fd=deploy_descriptor)
+        os.fsync(deploy_descriptor)
     finally:
         release_mutex(mutex)
 
@@ -604,6 +631,7 @@ def remove_tree_at(parent_descriptor, name, budget, *, depth=0):
         fail("stale_stage_limit")
     if stat.S_ISREG(metadata.st_mode):
         os.unlink(name, dir_fd=parent_descriptor)
+        os.fsync(parent_descriptor)
         return
     if not stat.S_ISDIR(metadata.st_mode):
         fail("unsafe_path")
@@ -615,6 +643,7 @@ def remove_tree_at(parent_descriptor, name, budget, *, depth=0):
     finally:
         os.close(descriptor)
     os.rmdir(name, dir_fd=parent_descriptor)
+    os.fsync(parent_descriptor)
 
 
 def cleanup_stages(stages_descriptor):
@@ -624,6 +653,12 @@ def cleanup_stages(stages_descriptor):
     for entry in entries:
         if not STAGE_RE.fullmatch(entry):
             fail("unsafe_path")
+        stage_descriptor = os.open(entry, DIRECTORY_FLAGS, dir_fd=stages_descriptor)
+        try:
+            if TRANSACTION_DIRECTORY in os.listdir(stage_descriptor):
+                fail("recovery_required")
+        finally:
+            os.close(stage_descriptor)
         remove_tree_at(stages_descriptor, entry, [0])
 
 
@@ -669,10 +704,17 @@ def prepare(request):
     stage_created = False
     lock_acquired = False
     try:
-        acquire_lock(deploy_descriptor, checked_id, checked_paths)
+        acquire_lock(
+            request,
+            deploy_descriptor,
+            stages_descriptor,
+            checked_id,
+            checked_paths,
+        )
         lock_acquired = True
         cleanup_stages(stages_descriptor)
         os.mkdir(stage_name, 0o700, dir_fd=stages_descriptor)
+        os.fsync(stages_descriptor)
         stage_created = True
         stage_descriptor = os.open(stage_name, DIRECTORY_FLAGS, dir_fd=stages_descriptor)
         try:
@@ -770,6 +812,447 @@ def verify_paths_descriptor(base_descriptor, expected):
     return actual
 
 
+def open_repo_descriptor(request, *, create):
+    home = lexical_absolute(request["expected_remote_home"])
+    repo = lexical_absolute(request["remote_repo_root"])
+    ensure_below(repo, home)
+    home_descriptor = open_absolute_directory(home)
+    try:
+        return open_directory_below(
+            home_descriptor,
+            repo.relative_to(home).parts,
+            create=create,
+        )
+    finally:
+        os.close(home_descriptor)
+
+
+def open_target_parent(repo_descriptor, relative, *, create):
+    path = PurePosixPath(safe_relative(relative))
+    descriptor = open_directory_below(
+        repo_descriptor,
+        path.parent.parts,
+        create=create,
+        owner_only=create,
+    )
+    return descriptor, path.name
+
+
+def valid_archive_state(value):
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"enabled", "loaded"}
+        or not isinstance(value.get("enabled"), bool)
+        or not isinstance(value.get("loaded"), bool)
+    ):
+        fail("recovery_required")
+    return dict(value)
+
+
+def validate_journal(value, lock):
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schema_version",
+            "deployment_id",
+            "phase",
+            "expected_sha256",
+            "backups",
+            "archive_state",
+        }
+        or value.get("schema_version") != 1
+        or value.get("deployment_id") != lock["deployment_id"]
+        or value.get("phase")
+        not in {
+            "prepared",
+            "activating",
+            "activated",
+            "launched",
+            "verified",
+            "rolled_back",
+            "rollback_failed",
+        }
+    ):
+        fail("recovery_required")
+    expected = value.get("expected_sha256")
+    backups = value.get("backups")
+    if (
+        not isinstance(expected, dict)
+        or not isinstance(backups, dict)
+        or set(expected) != set(lock["relative_paths"])
+        or set(backups) != set(expected)
+    ):
+        fail("recovery_required")
+    for relative, digest in expected.items():
+        safe_relative(relative)
+        if not isinstance(digest, str) or not SHA_RE.fullmatch(digest):
+            fail("recovery_required")
+        backup = backups[relative]
+        if (
+            not isinstance(backup, dict)
+            or set(backup) != {"present", "sha256", "mode", "parent_present"}
+            or not isinstance(backup.get("present"), bool)
+            or not isinstance(backup.get("parent_present"), bool)
+        ):
+            fail("recovery_required")
+        if backup["present"]:
+            if (
+                not backup["parent_present"]
+                or not isinstance(backup.get("sha256"), str)
+                or not SHA_RE.fullmatch(backup["sha256"])
+                or not isinstance(backup.get("mode"), int)
+                or backup["mode"] < 0
+                or backup["mode"] > 0o777
+            ):
+                fail("recovery_required")
+        elif backup.get("sha256") is not None or backup.get("mode") is not None:
+            fail("recovery_required")
+    value = dict(value)
+    value["expected_sha256"] = dict(expected)
+    value["backups"] = {key: dict(item) for key, item in backups.items()}
+    value["archive_state"] = valid_archive_state(value.get("archive_state"))
+    return value
+
+
+def open_transaction(stage_descriptor, *, create):
+    transaction_descriptor = -1
+    try:
+        transaction_descriptor = open_directory_below(
+            stage_descriptor,
+            (TRANSACTION_DIRECTORY,),
+            create=create,
+            owner_only=True,
+        )
+        backups_descriptor = open_directory_below(
+            transaction_descriptor,
+            (BACKUPS_DIRECTORY,),
+            create=create,
+            owner_only=True,
+        )
+        return transaction_descriptor, backups_descriptor
+    except BaseException:
+        close_descriptors(transaction_descriptor)
+        raise
+
+
+def write_journal(transaction_descriptor, journal):
+    write_regular_at(
+        transaction_descriptor,
+        JOURNAL_FILE,
+        json.dumps(journal, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        0o600,
+    )
+    os.fsync(transaction_descriptor)
+
+
+def read_journal(stage_descriptor, lock):
+    try:
+        metadata = os.stat(
+            TRANSACTION_DIRECTORY,
+            dir_fd=stage_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+    ):
+        fail("recovery_required")
+    transaction_descriptor = -1
+    backups_descriptor = -1
+    try:
+        try:
+            transaction_descriptor, backups_descriptor = open_transaction(
+                stage_descriptor, create=False
+            )
+            payload, _ = read_regular_at(
+                transaction_descriptor, JOURNAL_FILE, limit=128 * 1024
+            )
+        except FileNotFoundError:
+            fail("recovery_required")
+        try:
+            value = json.loads(payload)
+        except Exception:
+            fail("recovery_required")
+        return validate_journal(value, lock)
+    finally:
+        close_descriptors(backups_descriptor, transaction_descriptor)
+
+
+def set_journal_phase(stage_descriptor, lock, journal, phase):
+    transitions = {
+        "prepared": {"activating", "rolled_back", "rollback_failed"},
+        "activating": {"activated", "rolled_back", "rollback_failed"},
+        "activated": {"launched", "rolled_back", "rollback_failed"},
+        "launched": {"verified", "rolled_back", "rollback_failed"},
+        "verified": {"rolled_back", "rollback_failed"},
+        "rolled_back": {"rolled_back", "rollback_failed"},
+        "rollback_failed": {"rollback_failed"},
+    }
+    if phase not in transitions.get(journal.get("phase"), set()):
+        fail("recovery_required")
+    journal = dict(journal)
+    journal["phase"] = phase
+    journal = validate_journal(journal, lock)
+    transaction_descriptor, backups_descriptor = open_transaction(
+        stage_descriptor, create=False
+    )
+    try:
+        write_journal(transaction_descriptor, journal)
+    finally:
+        close_descriptors(backups_descriptor, transaction_descriptor)
+    return journal
+
+
+def create_transaction(stage_descriptor, repo_descriptor, request, lock, expected):
+    if read_journal(stage_descriptor, lock) is not None:
+        fail("recovery_required")
+    transaction_descriptor, backups_descriptor = open_transaction(
+        stage_descriptor, create=True
+    )
+    backups = {}
+    try:
+        for relative in sorted(expected):
+            parent_descriptor = -1
+            parent_present = True
+            try:
+                try:
+                    parent_descriptor, name = open_target_parent(
+                        repo_descriptor, relative, create=False
+                    )
+                except FileNotFoundError:
+                    parent_present = False
+                    name = PurePosixPath(relative).name
+                backup = None
+                if parent_present:
+                    backup = read_target(parent_descriptor, name)
+                if backup is None:
+                    backups[relative] = {
+                        "present": False,
+                        "sha256": None,
+                        "mode": None,
+                        "parent_present": parent_present,
+                    }
+                else:
+                    payload, mode = backup
+                    backup_path = PurePosixPath(relative)
+                    backup_parent = open_directory_below(
+                        backups_descriptor,
+                        backup_path.parent.parts,
+                        create=True,
+                        owner_only=True,
+                    )
+                    try:
+                        write_regular_at(
+                            backup_parent, backup_path.name, payload, 0o600
+                        )
+                    finally:
+                        os.close(backup_parent)
+                    backups[relative] = {
+                        "present": True,
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                        "mode": mode,
+                        "parent_present": True,
+                    }
+            finally:
+                close_descriptors(parent_descriptor)
+        journal = {
+            "schema_version": 1,
+            "deployment_id": lock["deployment_id"],
+            "phase": "prepared",
+            "expected_sha256": dict(expected),
+            "backups": backups,
+            "archive_state": snapshot_archive_state(request),
+        }
+        journal = validate_journal(journal, lock)
+        write_journal(transaction_descriptor, journal)
+        os.fsync(backups_descriptor)
+        os.fsync(stage_descriptor)
+        return journal
+    finally:
+        close_descriptors(backups_descriptor, transaction_descriptor)
+
+
+def read_backup(backups_descriptor, relative, metadata):
+    descriptor = open_relative_file(backups_descriptor, relative)
+    try:
+        payload = b""
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        payload = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    if hashlib.sha256(payload).hexdigest() != metadata["sha256"]:
+        fail("rollback_failed")
+    return payload
+
+
+def transaction_temporary_name(relative, lock):
+    return (
+        "."
+        + PurePosixPath(relative).name
+        + ".fleet-tmp-"
+        + lock["deployment_id"]
+    )
+
+
+def remove_transaction_temporaries(repo_descriptor, lock, journal):
+    for relative in sorted(journal["expected_sha256"]):
+        try:
+            parent_descriptor, _ = open_target_parent(
+                repo_descriptor, relative, create=False
+            )
+        except FileNotFoundError:
+            continue
+        try:
+            temporary = transaction_temporary_name(relative, lock)
+            try:
+                metadata = os.stat(
+                    temporary,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                fail("rollback_failed")
+            os.unlink(temporary, dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+
+
+def remove_created_parent_directories(repo_descriptor, relative):
+    parts = list(PurePosixPath(relative).parent.parts)
+    while parts:
+        ancestor_descriptor = -1
+        try:
+            try:
+                ancestor_descriptor = open_directory_below(
+                    repo_descriptor, tuple(parts[:-1]), create=False
+                )
+            except FileNotFoundError:
+                parts.pop()
+                continue
+            name = parts[-1]
+            try:
+                metadata = os.stat(
+                    name,
+                    dir_fd=ancestor_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                parts.pop()
+                continue
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+            ):
+                fail("rollback_failed")
+            try:
+                os.rmdir(name, dir_fd=ancestor_descriptor)
+            except OSError as error:
+                if error.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+                    return
+                fail("rollback_failed")
+            os.fsync(ancestor_descriptor)
+        finally:
+            close_descriptors(ancestor_descriptor)
+        parts.pop()
+
+
+def restore_runtime(
+    stage_descriptor,
+    repo_descriptor,
+    request,
+    lock,
+    journal,
+):
+    transaction_descriptor, backups_descriptor = open_transaction(
+        stage_descriptor, create=False
+    )
+    try:
+        for relative in sorted(journal["backups"]):
+            metadata = journal["backups"][relative]
+            parent_descriptor = -1
+            try:
+                try:
+                    parent_descriptor, name = open_target_parent(
+                        repo_descriptor,
+                        relative,
+                        create=metadata["present"],
+                    )
+                except FileNotFoundError:
+                    if metadata["present"]:
+                        fail("rollback_failed")
+                    continue
+                if metadata["present"]:
+                    payload = read_backup(backups_descriptor, relative, metadata)
+                    write_regular_at(
+                        parent_descriptor, name, payload, metadata["mode"]
+                    )
+                else:
+                    try:
+                        target = os.stat(
+                            name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISLNK(target.st_mode) or not stat.S_ISREG(target.st_mode):
+                        fail("rollback_failed")
+                    os.unlink(name, dir_fd=parent_descriptor)
+                    os.fsync(parent_descriptor)
+            finally:
+                close_descriptors(parent_descriptor)
+
+        remove_transaction_temporaries(repo_descriptor, lock, journal)
+        for relative, metadata in sorted(
+            journal["backups"].items(),
+            key=lambda item: len(PurePosixPath(item[0]).parts),
+            reverse=True,
+        ):
+            if not metadata["parent_present"]:
+                remove_created_parent_directories(repo_descriptor, relative)
+
+        for relative, metadata in journal["backups"].items():
+            try:
+                parent_descriptor, name = open_target_parent(
+                    repo_descriptor, relative, create=False
+                )
+            except FileNotFoundError:
+                if metadata["present"]:
+                    fail("rollback_failed")
+                continue
+            try:
+                if metadata["present"]:
+                    payload, _ = read_regular_at(
+                        parent_descriptor, name, limit=MAX_UPLOAD_BYTES
+                    )
+                    if hashlib.sha256(payload).hexdigest() != metadata["sha256"]:
+                        fail("rollback_failed")
+                else:
+                    try:
+                        os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    fail("rollback_failed")
+            finally:
+                os.close(parent_descriptor)
+        restore_archive_state(request, journal["archive_state"])
+    finally:
+        close_descriptors(backups_descriptor, transaction_descriptor)
+
+
 def upload_file(request):
     (
         stage_path,
@@ -843,32 +1326,62 @@ def archive_label(request):
     return "com.mattrotundo.ai-chat-archive." + host_id
 
 
+def launchd_disabled(response, label, error_code):
+    if response.returncode != 0:
+        fail(error_code)
+    match = re.search(
+        r'"?' + re.escape(label) + r'"?\s*=>\s*(true|false)(?:\s|$)',
+        response.stdout or "",
+    )
+    if match:
+        return match.group(1) == "true"
+    if re.search(
+        r'"?' + re.escape(label) + r'"?\s*=>', response.stdout or ""
+    ):
+        fail(error_code)
+    return False
+
+
+def snapshot_archive_state(request):
+    label = archive_label(request)
+    domain = "gui/{}".format(os.getuid())
+    target = domain + "/" + label
+    loaded = launchctl(["print", target]).returncode == 0
+    disabled = launchd_disabled(
+        launchctl(["print-disabled", domain]),
+        label,
+        "archive_launchd_failed",
+    )
+    return {"enabled": not disabled, "loaded": loaded}
+
+
 def quiesce_archive(request):
     label = archive_label(request)
     target = "gui/{}/{}".format(os.getuid(), label)
-    was_loaded = launchctl(["print", target]).returncode == 0
-    disabled = False
-    try:
-        if launchctl(["disable", target]).returncode != 0:
-            fail("archive_quiesce_failed")
-        disabled = True
-        bootout = launchctl(["bootout", target])
-        if was_loaded and bootout.returncode != 0:
-            fail("archive_quiesce_failed")
-        if launchctl(["print", target]).returncode == 0:
-            fail("archive_still_loaded")
-        return was_loaded
-    except BaseException:
-        if disabled:
-            launchctl(["enable", target])
-        raise
+    if launchctl(["disable", target]).returncode != 0:
+        fail("archive_quiesce_failed")
+    launchctl(["bootout", target])
+    if launchctl(["print", target]).returncode == 0:
+        fail("archive_still_loaded")
 
 
-def enable_archive(request):
+def restore_archive_state(request, state):
+    state = valid_archive_state(state)
     label = archive_label(request)
     target = "gui/{}/{}".format(os.getuid(), label)
-    if launchctl(["enable", target]).returncode != 0:
-        fail("archive_launchd_failed")
+    if launchctl(["disable", target]).returncode != 0:
+        fail("rollback_failed")
+    launchctl(["bootout", target])
+    if launchctl(["print", target]).returncode == 0:
+        fail("rollback_failed")
+    if state["loaded"]:
+        install_archive_job(request, lexical_absolute(request["remote_repo_root"]))
+    command = "enable" if state["enabled"] else "disable"
+    if launchctl([command, target]).returncode != 0:
+        fail("rollback_failed")
+    observed = snapshot_archive_state(request)
+    if observed != state:
+        fail("rollback_failed")
 
 
 def install_archive_job(request, repo):
@@ -932,29 +1445,120 @@ def read_target(parent_descriptor, name):
     return payload, stat.S_IMODE(metadata.st_mode)
 
 
-def restore_targets(targets, backups, replaced):
-    for relative in reversed(replaced):
-        parent_descriptor, name, _ = targets[relative]
-        backup = backups[relative]
-        if backup is None:
-            try:
-                metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-                fail("rollback_failed")
-            os.unlink(name, dir_fd=parent_descriptor)
-        else:
-            payload, mode = backup
-            write_regular_at(parent_descriptor, name, payload, mode)
-
-
 def block_termination_signals():
     if hasattr(signal, "pthread_sigmask"):
         signals = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
         previous = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
         return lambda: signal.pthread_sigmask(signal.SIG_SETMASK, previous)
     return lambda: None
+
+
+def rollback_transaction(
+    request,
+    stage_descriptor,
+    repo_descriptor,
+    lock,
+    journal,
+):
+    if journal["phase"] == "rollback_failed":
+        fail("rollback_failed")
+    quiesce_archive(request)
+    restore_runtime(
+        stage_descriptor,
+        repo_descriptor,
+        request,
+        lock,
+        journal,
+    )
+    journal = set_journal_phase(
+        stage_descriptor, lock, journal, "rolled_back"
+    )
+    return journal
+
+
+def mark_rollback_failed(
+    deploy_descriptor,
+    stage_descriptor,
+    lock,
+    journal,
+    *,
+    mutex_held=False,
+):
+    try:
+        set_journal_phase(stage_descriptor, lock, journal, "rollback_failed")
+    except BaseException:
+        pass
+    try:
+        if mutex_held:
+            write_lock_unlocked(
+                deploy_descriptor,
+                lock["deployment_id"],
+                lock["relative_paths"],
+                "rollback_failed",
+            )
+        else:
+            set_lock(
+                deploy_descriptor,
+                lock["deployment_id"],
+                lock["relative_paths"],
+                "rollback_failed",
+            )
+    except BaseException:
+        pass
+
+
+def recover_stale_transaction(
+    request,
+    deploy_descriptor,
+    stages_descriptor,
+    lock,
+):
+    stage_name = ".fleet-deploy-" + lock["deployment_id"]
+    try:
+        stage_descriptor = os.open(
+            stage_name, DIRECTORY_FLAGS, dir_fd=stages_descriptor
+        )
+    except FileNotFoundError:
+        fail("recovery_required")
+    repo_descriptor = -1
+    signals_restore = lambda: None
+    try:
+        journal = read_journal(stage_descriptor, lock)
+        if journal is None:
+            remove_tree_at(stages_descriptor, stage_name, [0])
+            os.unlink(LOCK_FILE, dir_fd=deploy_descriptor)
+            os.fsync(deploy_descriptor)
+            return
+        if journal["phase"] == "rollback_failed":
+            fail("rollback_failed")
+        repo_descriptor = open_repo_descriptor(request, create=False)
+        signals_restore = block_termination_signals()
+        try:
+            journal = rollback_transaction(
+                request,
+                stage_descriptor,
+                repo_descriptor,
+                lock,
+                journal,
+            )
+        except BaseException:
+            mark_rollback_failed(
+                deploy_descriptor,
+                stage_descriptor,
+                lock,
+                journal,
+                mutex_held=True,
+            )
+            fail("rollback_failed")
+        finally:
+            signals_restore()
+        os.close(stage_descriptor)
+        stage_descriptor = -1
+        remove_tree_at(stages_descriptor, stage_name, [0])
+        os.unlink(LOCK_FILE, dir_fd=deploy_descriptor)
+        os.fsync(deploy_descriptor)
+    finally:
+        close_descriptors(repo_descriptor, stage_descriptor)
 
 
 def install_files(request):
@@ -969,37 +1573,33 @@ def install_files(request):
     repo_descriptor = -1
     targets = {}
     temporary_names = {}
-    backups = {}
-    replaced = []
-    was_loaded = False
     signals_restore = lambda: None
+    journal = None
     try:
         expected = expected_hashes(request)
         if set(expected) != set(lock["relative_paths"]):
             fail("schema_drift")
         verify_paths_descriptor(stage_descriptor, expected)
-        home_descriptor = open_absolute_directory(lexical_absolute(request["expected_remote_home"]))
-        try:
-            repo_relative = repo.relative_to(lexical_absolute(request["expected_remote_home"]))
-            repo_descriptor = open_directory_below(
-                home_descriptor, repo_relative.parts, create=False
-            )
-        finally:
-            os.close(home_descriptor)
+        repo_descriptor = open_repo_descriptor(request, create=False)
+        journal = create_transaction(
+            stage_descriptor,
+            repo_descriptor,
+            request,
+            lock,
+            expected,
+        )
 
         for relative in sorted(expected):
-            path = PurePosixPath(relative)
-            parent_descriptor = open_directory_below(
-                repo_descriptor, path.parent.parts, create=True, owner_only=True
+            parent_descriptor, target_name = open_target_parent(
+                repo_descriptor, relative, create=True
             )
             targets[relative] = (
                 parent_descriptor,
-                path.name,
+                target_name,
                 0o700 if relative.endswith(".py") else 0o600,
             )
-            backups[relative] = read_target(parent_descriptor, path.name)
             source_descriptor = open_relative_file(stage_descriptor, relative)
-            temporary = "." + path.name + ".fleet-tmp-" + uuid.uuid4().hex
+            temporary = transaction_temporary_name(relative, lock)
             temporary_names[relative] = temporary
             try:
                 payload = b""
@@ -1014,9 +1614,12 @@ def install_files(request):
             finally:
                 os.close(source_descriptor)
 
-        was_loaded = quiesce_archive(request)
         signals_restore = block_termination_signals()
         try:
+            quiesce_archive(request)
+            journal = set_journal_phase(
+                stage_descriptor, lock, journal, "activating"
+            )
             install_order = sorted(
                 expected,
                 key=lambda relative: (not relative.endswith(".py"), relative),
@@ -1030,44 +1633,35 @@ def install_files(request):
                     src_dir_fd=parent_descriptor,
                     dst_dir_fd=parent_descriptor,
                 )
-                replaced.append(relative)
+                os.fsync(parent_descriptor)
             actual = verify_paths_descriptor(repo_descriptor, expected)
+            journal = set_journal_phase(
+                stage_descriptor, lock, journal, "activated"
+            )
             launchd = install_archive_job(request, repo)
+            journal = set_journal_phase(
+                stage_descriptor, lock, journal, "launched"
+            )
         except BaseException as original:
-            recovery_failed = False
             try:
-                try:
-                    quiesce_archive(request)
-                except BaseException:
-                    pass
-                restore_targets(targets, backups, replaced)
-                for relative, backup in backups.items():
-                    parent_descriptor, name, _ = targets[relative]
-                    if backup is None:
-                        try:
-                            os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-                        except FileNotFoundError:
-                            continue
-                        fail("rollback_failed")
-                    payload, _ = backup
-                    current, _ = read_regular_at(parent_descriptor, name, limit=MAX_UPLOAD_BYTES)
-                    if current != payload:
-                        fail("rollback_failed")
-                if was_loaded:
-                    install_archive_job(request, repo)
-                else:
-                    enable_archive(request)
+                journal = rollback_transaction(
+                    request,
+                    stage_descriptor,
+                    repo_descriptor,
+                    lock,
+                    journal,
+                )
             except BaseException:
-                recovery_failed = True
-            if recovery_failed:
-                set_lock(
+                mark_rollback_failed(
                     deploy_descriptor,
-                    deployment_id(request),
-                    lock["relative_paths"],
-                    "rollback_failed",
+                    stage_descriptor,
+                    lock,
+                    journal,
                 )
                 fail("rollback_failed")
             if isinstance(original, ControlledFailure):
+                raise original
+            if not isinstance(original, Exception):
                 raise original
             fail("install_failed")
         finally:
@@ -1091,25 +1685,62 @@ def install_files(request):
 
 
 def verify_final(request):
-    repo = checked_repo(request)
-    deploy_root, deploy_descriptor, stages_descriptor = open_deploy_directories(
-        request, create=False
-    )
+    checked_repo(request)
+    (
+        stage_path,
+        deploy_descriptor,
+        stages_descriptor,
+        stage_descriptor,
+        lock,
+    ) = stage_details(request)
     repo_descriptor = -1
+    signals_restore = lambda: None
+    journal = None
     try:
-        require_lock(deploy_descriptor, request)
-        home = lexical_absolute(request["expected_remote_home"])
-        home_descriptor = open_absolute_directory(home)
+        repo_descriptor = open_repo_descriptor(request, create=False)
+        journal = read_journal(stage_descriptor, lock)
+        if journal is None or journal["phase"] != "launched":
+            fail("recovery_required")
+        expected = expected_hashes(request)
+        if expected != journal["expected_sha256"]:
+            fail("schema_drift")
+        signals_restore = block_termination_signals()
         try:
-            repo_descriptor = open_directory_below(
-                home_descriptor, repo.relative_to(home).parts, create=False
+            actual = verify_paths_descriptor(repo_descriptor, expected)
+            observed = snapshot_archive_state(request)
+            if observed != {"enabled": True, "loaded": True}:
+                fail("archive_launchd_failed")
+            journal = set_journal_phase(
+                stage_descriptor, lock, journal, "verified"
             )
+        except BaseException as original:
+            try:
+                journal = rollback_transaction(
+                    request,
+                    stage_descriptor,
+                    repo_descriptor,
+                    lock,
+                    journal,
+                )
+            except BaseException:
+                mark_rollback_failed(
+                    deploy_descriptor,
+                    stage_descriptor,
+                    lock,
+                    journal,
+                )
+                fail("rollback_failed")
+            raise original
         finally:
-            os.close(home_descriptor)
-        actual = verify_paths_descriptor(repo_descriptor, expected_hashes(request))
+            signals_restore()
         return {"schema_version": 1, "ok": True, "sha256": actual}
     finally:
-        close_descriptors(repo_descriptor, stages_descriptor, deploy_descriptor)
+        close_descriptors(
+            repo_descriptor,
+            stage_descriptor,
+            stages_descriptor,
+            deploy_descriptor,
+        )
 
 
 def finish(request):
@@ -1120,19 +1751,57 @@ def finish(request):
         stage_descriptor,
         lock,
     ) = stage_details(request)
+    repo_descriptor = -1
+    signals_restore = lambda: None
     try:
+        commit = request.get("commit") is True and request.get("abort") is not True
+        abort = request.get("abort") is True and request.get("commit") is not True
+        if not (commit or abort):
+            fail("schema_drift")
         mutex = acquire_mutex(deploy_descriptor)
         try:
             require_lock(deploy_descriptor, request)
+            journal = read_journal(stage_descriptor, lock)
+            if commit:
+                if journal is None or journal["phase"] != "verified":
+                    fail("recovery_required")
+            elif journal is not None:
+                repo_descriptor = open_repo_descriptor(request, create=False)
+                signals_restore = block_termination_signals()
+                try:
+                    journal = rollback_transaction(
+                        request,
+                        stage_descriptor,
+                        repo_descriptor,
+                        lock,
+                        journal,
+                    )
+                except BaseException:
+                    mark_rollback_failed(
+                        deploy_descriptor,
+                        stage_descriptor,
+                        lock,
+                        journal,
+                        mutex_held=True,
+                    )
+                    fail("rollback_failed")
+                finally:
+                    signals_restore()
             os.close(stage_descriptor)
             stage_descriptor = -1
             remove_tree_at(stages_descriptor, stage_path.name, [0])
             os.unlink(LOCK_FILE, dir_fd=deploy_descriptor)
+            os.fsync(deploy_descriptor)
         finally:
             release_mutex(mutex)
         return {"schema_version": 1, "ok": True, "finished": True}
     finally:
-        close_descriptors(stage_descriptor, stages_descriptor, deploy_descriptor)
+        close_descriptors(
+            repo_descriptor,
+            stage_descriptor,
+            stages_descriptor,
+            deploy_descriptor,
+        )
 
 
 def main():
@@ -1550,6 +2219,7 @@ class SshTransport:
                 "deployment_lock_mismatch",
                 "install_failed",
                 "rollback_failed",
+                "recovery_required",
                 "stale_stage_limit",
                 "remote_helper_failure",
             }
@@ -1695,6 +2365,10 @@ def deploy_once(config: DeployConfig, transport, *, repo_root: Path | None = Non
                 {
                     "deployment_id": deployment_id,
                     "relative_paths": list(expected_hashes),
+                    "host_id": config.host_id,
+                    "script_relative_path": "fleet_chat_archive.py",
+                    "config_relative_path": config.remote_config_relative_path,
+                    "interval_seconds": config.archive_interval_seconds,
                 },
             )
             if (
@@ -1751,6 +2425,7 @@ def deploy_once(config: DeployConfig, transport, *, repo_root: Path | None = Non
                 "verify_final",
                 {
                     "deployment_id": deployment_id,
+                    "stage_path": stage_path,
                     "expected_sha256": expected_hashes,
                 },
             )
@@ -1762,6 +2437,7 @@ def deploy_once(config: DeployConfig, transport, *, repo_root: Path | None = Non
                 {
                     "deployment_id": deployment_id,
                     "stage_path": stage_path,
+                    "commit": True,
                 },
             )
             if finished != {
@@ -1837,10 +2513,22 @@ def atomic_owner_write(path: Path, payload: bytes) -> None:
             os.fsync(handle.fileno())
         os.close(descriptor)
         descriptor = -1
-        if path.is_symlink() or (path.exists() and not path.is_file()):
+        try:
+            existing = path.lstat()
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            path.is_symlink()
+            or not stat.S_ISREG(existing.st_mode)
+            or existing.st_uid != os.getuid()
+        ):
             raise DeployError("unsafe_path")
         os.replace(temporary, path)
-        os.chmod(path, 0o600)
+        parent_descriptor = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -1855,11 +2543,169 @@ def ensure_owner_log(path: Path) -> None:
     flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(parent / path.name, flags, 0o600)
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
             raise DeployError("unsafe_path")
         os.fchmod(descriptor, 0o600)
     finally:
         os.close(descriptor)
+
+
+def launchctl_result(
+    runner: Callable[..., subprocess.CompletedProcess],
+    command: list[str],
+) -> subprocess.CompletedProcess:
+    return runner(
+        ["launchctl", *command],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def local_launchd_disabled(
+    response: subprocess.CompletedProcess,
+    label: str,
+) -> bool:
+    if response.returncode != 0:
+        raise DeployError("retry_launchd_failed")
+    match = re.search(
+        rf'"?{re.escape(label)}"?\s*=>\s*(true|false)(?:\s|$)',
+        response.stdout or "",
+    )
+    if match:
+        return match.group(1) == "true"
+    if re.search(
+        rf'"?{re.escape(label)}"?\s*=>', response.stdout or ""
+    ):
+        raise DeployError("retry_launchd_failed")
+    return False
+
+
+def retry_launchd_state(
+    runner: Callable[..., subprocess.CompletedProcess],
+    domain: str,
+    label: str,
+) -> dict:
+    target = f"{domain}/{label}"
+    printed = launchctl_result(runner, ["print", target])
+    disabled = local_launchd_disabled(
+        launchctl_result(runner, ["print-disabled", domain]),
+        label,
+    )
+    return {"enabled": not disabled, "loaded": printed.returncode == 0}
+
+
+def snapshot_owner_file(path: Path) -> dict:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {"present": False, "payload": None, "mode": None}
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+    ):
+        raise DeployError("unsafe_path")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        checked = os.fstat(descriptor)
+        if not stat.S_ISREG(checked.st_mode) or checked.st_size > 128 * 1024:
+            raise DeployError("unsafe_path")
+        chunks = []
+        remaining = checked.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                raise DeployError("unsafe_path")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise DeployError("unsafe_path")
+    finally:
+        os.close(descriptor)
+    return {
+        "present": True,
+        "payload": b"".join(chunks),
+        "mode": stat.S_IMODE(checked.st_mode),
+    }
+
+
+def restore_owner_file(path: Path, snapshot: dict) -> None:
+    if snapshot["present"]:
+        atomic_owner_write(path, snapshot["payload"])
+        os.chmod(path, snapshot["mode"])
+        parent_descriptor = os.open(
+            path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+        return
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+    ):
+        raise DeployError("unsafe_path")
+    path.unlink()
+    parent_descriptor = os.open(
+        path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    )
+    try:
+        os.fsync(parent_descriptor)
+    finally:
+        os.close(parent_descriptor)
+
+
+def block_local_termination_signals() -> Callable[[], None]:
+    if hasattr(signal, "pthread_sigmask"):
+        signals = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+        return lambda: signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+    return lambda: None
+
+
+def restore_retry_launchd(
+    runner: Callable[..., subprocess.CompletedProcess],
+    domain: str,
+    label: str,
+    plist_path: Path,
+    file_snapshot: dict,
+    launchd_snapshot: dict,
+) -> None:
+    target = f"{domain}/{label}"
+    launchctl_result(runner, ["bootout", target])
+    if launchctl_result(runner, ["print", target]).returncode == 0:
+        raise DeployError("retry_launchd_restore_failed")
+    restore_owner_file(plist_path, file_snapshot)
+    if launchd_snapshot["loaded"]:
+        if not file_snapshot["present"]:
+            raise DeployError("retry_launchd_restore_failed")
+        if launchctl_result(runner, ["enable", target]).returncode != 0:
+            raise DeployError("retry_launchd_restore_failed")
+        if (
+            launchctl_result(
+                runner, ["bootstrap", domain, str(plist_path)]
+            ).returncode
+            != 0
+        ):
+            raise DeployError("retry_launchd_restore_failed")
+    command = "enable" if launchd_snapshot["enabled"] else "disable"
+    if launchctl_result(runner, [command, target]).returncode != 0:
+        raise DeployError("retry_launchd_restore_failed")
+    try:
+        observed = retry_launchd_state(runner, domain, label)
+    except DeployError as error:
+        raise DeployError("retry_launchd_restore_failed") from error
+    if observed != launchd_snapshot:
+        raise DeployError("retry_launchd_restore_failed")
 
 
 def install_retry_launchd(
@@ -1906,41 +2752,51 @@ def install_retry_launchd(
         "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
     }
     plist_path = agents_dir / f"{label}.plist"
-    atomic_owner_write(plist_path, plistlib.dumps(job, fmt=plistlib.FMT_XML))
     loaded = False
-    if load:
+    payload = plistlib.dumps(job, fmt=plistlib.FMT_XML)
+    if not load:
+        atomic_owner_write(plist_path, payload)
+    else:
         domain = f"gui/{os.getuid()}"
-        runner(
-            ["launchctl", "bootout", f"{domain}/{label}"],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        enabled = runner(
-            ["launchctl", "enable", f"{domain}/{label}"],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if enabled.returncode != 0:
-            raise DeployError("retry_launchd_failed")
-        completed = runner(
-            ["launchctl", "bootstrap", domain, str(plist_path)],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise DeployError("retry_launchd_failed")
-        printed = runner(
-            ["launchctl", "print", f"{domain}/{label}"],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if printed.returncode != 0:
-            raise DeployError("retry_launchd_failed")
-        loaded = True
+        target = f"{domain}/{label}"
+        file_snapshot = snapshot_owner_file(plist_path)
+        launchd_snapshot = retry_launchd_state(runner, domain, label)
+        signals_restore = block_local_termination_signals()
+        try:
+            atomic_owner_write(plist_path, payload)
+            launchctl_result(runner, ["bootout", target])
+            if launchctl_result(runner, ["enable", target]).returncode != 0:
+                raise DeployError("retry_launchd_failed")
+            if (
+                launchctl_result(
+                    runner, ["bootstrap", domain, str(plist_path)]
+                ).returncode
+                != 0
+            ):
+                raise DeployError("retry_launchd_failed")
+            observed = retry_launchd_state(runner, domain, label)
+            if observed != {"enabled": True, "loaded": True}:
+                raise DeployError("retry_launchd_failed")
+            loaded = True
+        except BaseException as original:
+            try:
+                restore_retry_launchd(
+                    runner,
+                    domain,
+                    label,
+                    plist_path,
+                    file_snapshot,
+                    launchd_snapshot,
+                )
+            except BaseException as restore_error:
+                raise DeployError("retry_launchd_restore_failed") from restore_error
+            if isinstance(original, DeployError):
+                raise original
+            if not isinstance(original, Exception):
+                raise original
+            raise DeployError("retry_launchd_failed") from original
+        finally:
+            signals_restore()
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "installed",
@@ -1953,62 +2809,49 @@ def install_retry_launchd(
 
 def disable_retry_launchd(
     *,
+    launch_agents_dir: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> dict:
     if platform.system() != "Darwin":
         raise DeployError("non_darwin")
     domain = f"gui/{os.getuid()}"
-    target = f"{domain}/{RETRY_LAUNCHD_LABEL}"
-    initially_loaded = runner(
-        ["launchctl", "print", target],
-        text=True,
-        capture_output=True,
-        check=False,
-    ).returncode == 0
-    disabled = runner(
-        ["launchctl", "disable", target],
-        text=True,
-        capture_output=True,
-        check=False,
+    label = RETRY_LAUNCHD_LABEL
+    target = f"{domain}/{label}"
+    agents_dir = secure_directory(
+        launch_agents_dir or Path.home() / "Library" / "LaunchAgents"
     )
-    if disabled.returncode != 0:
-        raise DeployError("retry_launchd_failed")
-    disabled_state = runner(
-        ["launchctl", "print-disabled", domain],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    disabled_pattern = re.compile(
-        rf'"?{re.escape(RETRY_LAUNCHD_LABEL)}"?\s*=>\s*true(?:\s|$)'
-    )
-    if disabled_state.returncode != 0 or not disabled_pattern.search(
-        disabled_state.stdout or ""
-    ):
-        raise DeployError("retry_launchd_failed")
-
-    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    plist_path = agents_dir / f"{label}.plist"
+    file_snapshot = snapshot_owner_file(plist_path)
+    launchd_snapshot = retry_launchd_state(runner, domain, label)
+    signals_restore = block_local_termination_signals()
     try:
-        signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
-        if initially_loaded:
-            bootout = runner(
-                ["launchctl", "bootout", target],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if bootout.returncode != 0:
-                raise DeployError("retry_launchd_failed")
-        printed = runner(
-            ["launchctl", "print", target],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if printed.returncode == 0:
+        if launchctl_result(runner, ["disable", target]).returncode != 0:
             raise DeployError("retry_launchd_failed")
+        if launchd_snapshot["loaded"]:
+            if launchctl_result(runner, ["bootout", target]).returncode != 0:
+                raise DeployError("retry_launchd_failed")
+        observed = retry_launchd_state(runner, domain, label)
+        if observed != {"enabled": False, "loaded": False}:
+            raise DeployError("retry_launchd_failed")
+    except BaseException as original:
+        try:
+            restore_retry_launchd(
+                runner,
+                domain,
+                label,
+                plist_path,
+                file_snapshot,
+                launchd_snapshot,
+            )
+        except BaseException as restore_error:
+            raise DeployError("retry_launchd_restore_failed") from restore_error
+        if isinstance(original, DeployError):
+            raise original
+        if not isinstance(original, Exception):
+            raise original
+        raise DeployError("retry_launchd_failed") from original
     finally:
-        signal.signal(signal.SIGTERM, previous_sigterm)
+        signals_restore()
     return {
         "label": RETRY_LAUNCHD_LABEL,
         "disabled": True,
