@@ -11,6 +11,7 @@ from archive_object_contract import (
     ARCHIVE_OBJECT_SCHEMA_VERSION,
     event_envelope,
     validate_archive_object,
+    validate_json_bounds,
 )
 
 
@@ -20,9 +21,11 @@ _MACOS_COMPATIBILITY_SYMLINKS = {
     Path("/var"): Path("/private/var"),
 }
 
-# Hermes 0.20 has two observed complete session-row dialects. The newer
-# dialect adds both metadata columns together; accepting either one alone
-# would turn a partially migrated or future schema into trusted chat data.
+# Hermes 0.20 has two observed stored-column dialects. The newer dialect adds
+# both metadata columns together; accepting either one alone would turn a
+# partially migrated or future schema into trusted chat data. Unfiltered
+# exports add the computed `last_active` search column, while filtered and
+# single-session exports return the same exact stored columns without it.
 HERMES_LEGACY_SESSION_KEYS = {
     "agent_id", "cwd", "ended_at", "events", "id", "messages", "model",
     "provider", "session_type", "source", "started_at", "title",
@@ -48,8 +51,14 @@ HERMES_V020_SESSION_KEYS = {
 HERMES_V020_BASE_SESSION_KEYS = HERMES_V020_SESSION_KEYS - {
     "git_metadata_generation", "hidden",
 }
+HERMES_V020_FILTERED_SESSION_KEYS = HERMES_V020_SESSION_KEYS - {"last_active"}
+HERMES_V020_BASE_FILTERED_SESSION_KEYS = HERMES_V020_BASE_SESSION_KEYS - {
+    "last_active",
+}
 HERMES_V020_SESSION_KEYSETS = {
     frozenset(HERMES_V020_BASE_SESSION_KEYS),
+    frozenset(HERMES_V020_BASE_FILTERED_SESSION_KEYS),
+    frozenset(HERMES_V020_FILTERED_SESSION_KEYS),
     frozenset(HERMES_V020_SESSION_KEYS),
 }
 _IGNORED_ROW_STRING_KEYS = {
@@ -95,6 +104,10 @@ HERMES_SESSION_META_KEYS = {
 }
 HERMES_TOOL_CALL_KEYS = {
     "call_id", "function", "id", "response_item_id", "type",
+}
+HERMES_TOOL_CALL_KEYSETS = {
+    frozenset(HERMES_TOOL_CALL_KEYS),
+    frozenset(HERMES_TOOL_CALL_KEYS | {"extra_content"}),
 }
 HERMES_TOOL_FUNCTION_KEYS = {"arguments", "name"}
 
@@ -405,7 +418,8 @@ def iter_hermes_export(
                                 )
                                 if (
                                     not isinstance(tool_call, dict)
-                                    or set(tool_call) != HERMES_TOOL_CALL_KEYS
+                                    or frozenset(tool_call)
+                                    not in HERMES_TOOL_CALL_KEYSETS
                                     or tool_call.get("type") != "function"
                                     or any(
                                         not isinstance(tool_call.get(key), str)
@@ -421,11 +435,36 @@ def iter_hermes_export(
                                         for key in HERMES_TOOL_FUNCTION_KEYS
                                     )
                                     or not function["name"]
+                                    or (
+                                        "extra_content" in tool_call
+                                        and not isinstance(
+                                            tool_call["extra_content"], dict
+                                        )
+                                    )
                                 ):
                                     valid_messages = False
                                     break
+                                if "extra_content" in tool_call:
+                                    try:
+                                        validate_json_bounds(
+                                            tool_call["extra_content"],
+                                            max_depth=16,
+                                            max_nodes=4096,
+                                        )
+                                    except ValueError:
+                                        valid_messages = False
+                                        break
+                                # Gemini thought signatures are provider replay
+                                # metadata, not chat/training content. Validate
+                                # their shape above, then deliberately omit them.
+                                normalized_tool_call = {
+                                    key: tool_call[key]
+                                    for key in sorted(HERMES_TOOL_CALL_KEYS)
+                                }
                                 normalized_tool_uses.append(
-                                    event_envelope("tool_use", tool_call, timestamp)
+                                    event_envelope(
+                                        "tool_use", normalized_tool_call, timestamp
+                                    )
                                 )
                             if not valid_messages:
                                 break

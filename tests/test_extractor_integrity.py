@@ -713,6 +713,11 @@ class ExtractorIntegrityTests(unittest.TestCase):
                                 "id": "tool-1",
                                 "response_item_id": "response-1",
                                 "type": "function",
+                                "extra_content": {
+                                    "google": {
+                                        "thought_signature": private_ignored,
+                                    }
+                                },
                             }
                         ],
                     ),
@@ -728,14 +733,38 @@ class ExtractorIntegrityTests(unittest.TestCase):
                 {**message, "session_id": "hermes-current-base"}
                 for message in row["messages"]
             ]
-            write_lines(export, [json_line(row), json_line(base_row)])
+            filtered_row = {
+                key: value for key, value in row.items() if key != "last_active"
+            }
+            filtered_row["id"] = "hermes-current-filtered"
+            filtered_row["messages"] = [
+                {**message, "session_id": "hermes-current-filtered"}
+                for message in row["messages"]
+            ]
+            filtered_base_row = {
+                key: value for key, value in base_row.items() if key != "last_active"
+            }
+            filtered_base_row["id"] = "hermes-current-base-filtered"
+            filtered_base_row["messages"] = [
+                {**message, "session_id": "hermes-current-base-filtered"}
+                for message in row["messages"]
+            ]
+            write_lines(
+                export,
+                [
+                    json_line(row),
+                    json_line(base_row),
+                    json_line(filtered_row),
+                    json_line(filtered_base_row),
+                ],
+            )
             quality = {}
 
             conversations = extract_hermes_export(export, quality_out=quality)
 
             self.assertEqual(quality["status"], "complete")
             self.assertEqual(quality["failed_lines"], 0)
-            self.assertEqual(len(conversations), 2)
+            self.assertEqual(len(conversations), 4)
             conversation = conversations[0]
             self.assertEqual(conversation["provider"], "provider")
             self.assertEqual(conversation["session_type"], "dm")
@@ -757,6 +786,7 @@ class ExtractorIntegrityTests(unittest.TestCase):
             self.assertNotIn(private_ignored, serialized)
             self.assertNotIn("git_metadata_generation", serialized)
             self.assertNotIn("hidden", serialized)
+            self.assertNotIn("extra_content", serialized)
 
             without_hidden = dict(row)
             without_hidden.pop("hidden")
@@ -765,6 +795,11 @@ class ExtractorIntegrityTests(unittest.TestCase):
             invalid_rows = [
                 without_hidden,
                 without_generation,
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"api_call_count", "last_active"}
+                },
                 {**row, "future_session_field": "blocked"},
                 {**row, "api_call_count": "not-an-integer"},
                 {**row, "events": [{"type": "smuggled", "system_prompt": private_ignored}]},
@@ -828,6 +863,31 @@ class ExtractorIntegrityTests(unittest.TestCase):
                             session_id="hermes-current",
                             timestamp=1.0,
                             tool_calls=[{"type": "function"}],
+                        )
+                    ],
+                },
+                {
+                    **row,
+                    "messages": [
+                        current_message(
+                            id=1,
+                            role="assistant",
+                            content="body",
+                            session_id="hermes-current",
+                            timestamp=1.0,
+                            tool_calls=[
+                                {
+                                    "call_id": "call-1",
+                                    "function": {
+                                        "arguments": "{}",
+                                        "name": "shell",
+                                    },
+                                    "id": "tool-1",
+                                    "response_item_id": "response-1",
+                                    "type": "function",
+                                    "extra_content": [],
+                                }
+                            ],
                         )
                     ],
                 },
