@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1296,6 +1297,79 @@ class FleetSecurityRegressionTests(unittest.TestCase):
             )
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][0], "ssh")
+
+    def test_remote_pull_reuses_only_a_validated_cached_shard(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            cached_shard = spool_root / "hosts" / "mini"
+            write_archive_object(cached_shard, host_id="mini")
+            write_healthy_receipt(cached_shard)
+            commands = []
+
+            def completed_pull(command, **_kwargs):
+                commands.append(command)
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 0)
+                destination = Path(command[-1].rstrip("/"))
+                shutil.copytree(
+                    cached_shard,
+                    destination,
+                    dirs_exist_ok=True,
+                    copy_function=os.link,
+                )
+                return subprocess.CompletedProcess(command, 0)
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                fleet.subprocess, "run", side_effect=completed_pull
+            ):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertEqual(result["remotes"]["mini"]["status"], "pulled")
+            rsync_command = commands[1]
+            self.assertEqual(rsync_command[0:2], ["rsync", "-rtz"])
+            self.assertIn(f"--link-dest={cached_shard}", rsync_command)
+
+    def test_remote_pull_rejects_corrupt_cache_before_rsync(self):
+        with safe_temporary_directory() as tmp:
+            spool_root = Path(tmp) / "spool"
+            cached_shard = spool_root / "hosts" / "mini"
+            object_path, _payload = write_archive_object(
+                cached_shard, host_id="mini"
+            )
+            write_healthy_receipt(cached_shard)
+            object_path.write_bytes(b"{}\n")
+            commands = []
+
+            def record(command, **_kwargs):
+                commands.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            hub = {
+                "remotes": [
+                    {
+                        "host_id": "mini",
+                        "ssh_host": "mini.test",
+                        "remote_spool_root": "/remote/spool",
+                    }
+                ]
+            }
+            with mock.patch.object(fleet.subprocess, "run", side_effect=record):
+                result = fleet.pull_hub_remotes(hub, spool_root)
+
+            self.assertEqual(
+                result["remotes"]["mini"]["status"],
+                "blocked_integrity_failure",
+            )
+            self.assertEqual([command[0] for command in commands], ["ssh"])
 
     def test_remote_pull_cannot_overwrite_an_existing_immutable_object(self):
         with safe_temporary_directory() as tmp:

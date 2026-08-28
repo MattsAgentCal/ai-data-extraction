@@ -2096,26 +2096,54 @@ def pull_hub_remotes(hub: dict, spool_root: Path) -> dict:
         source = (
             f"{ssh_host}:{remote_spool_root.rstrip('/')}/hosts/{remote_host_id}/"
         )
+        cached_shard = spool_root / "hosts" / remote_host_id
+        link_dest: Path | None = None
+        if cached_shard.exists():
+            try:
+                validated_shard_files(
+                    cached_shard,
+                    remote_host_id,
+                    require_healthy_receipt=True,
+                )
+            except (FileNotFoundError, ValueError) as error:
+                statuses[remote_host_id] = {
+                    "status": "blocked_integrity_failure",
+                    "files_copied": 0,
+                    "error": str(error),
+                }
+                continue
+            link_dest = assert_no_symlink_components(cached_shard)
         incoming_root = spool_root / ".incoming"
         secure_mkdir(incoming_root)
         try:
             with tempfile.TemporaryDirectory(
                 dir=incoming_root, prefix=f"{remote_host_id}-"
             ) as incoming:
-                subprocess.run(
+                rsync_command = [
+                    "rsync",
+                    "-rtz",
+                    "--no-links",
+                    "--safe-links",
+                    "--exclude=.*",
+                    "--exclude=*.tmp",
+                    "--exclude=*.partial",
+                ]
+                if link_dest is not None:
+                    # Build every incoming shard as a complete snapshot while
+                    # hard-linking unchanged files from the last validated
+                    # local snapshot. This keeps validation fail-closed and
+                    # avoids retransferring a multi-gigabyte archive each run.
+                    rsync_command.append(f"--link-dest={link_dest}")
+                rsync_command.extend(
                     [
-                        "rsync",
-                        "-rt",
-                        "--no-links",
-                        "--safe-links",
-                        "--exclude=.*",
-                        "--exclude=*.tmp",
-                        "--exclude=*.partial",
                         "-e",
                         "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ControlMaster=no -o ControlPath=none",
                         source,
                         str(Path(incoming)) + "/",
-                    ],
+                    ]
+                )
+                subprocess.run(
+                    rsync_command,
                     check=True,
                     capture_output=True,
                     text=True,
