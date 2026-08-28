@@ -1027,6 +1027,37 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
                 "failure receipt retained command output or body text",
             )
 
+    def test_interrupted_run_cannot_write_a_healthy_manifest_or_cache_state(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {"claude_roots": [str(root / "claude")]},
+                    }
+                )
+            )
+            with mock.patch.object(
+                fleet, "collect_sources", side_effect=KeyboardInterrupt
+            ), self.assertRaises(KeyboardInterrupt):
+                fleet.run_config(configured_args(config_path))
+
+            shard = root / "spool" / "hosts" / "test-mac"
+            receipt_path = next((shard / "receipts").glob("*.json"))
+            receipt = json.loads(receipt_path.read_text())
+            self.assertEqual(receipt["collection_status"], "failed")
+            self.assertEqual(receipt["status"], "failed")
+            self.assertFalse((shard / "publish-manifest.json").exists())
+            state = json.loads(
+                (root / "spool" / "state" / "test-mac" / "claude.json").read_text()
+            )
+            self.assertEqual(state["sources"], {})
+
     def test_cached_remote_shard_publishes_while_remote_is_unreachable(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)

@@ -49,6 +49,28 @@ class ExtractorIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symlink"):
                 extract_claude_project_conversations(root)
 
+    def test_claude_preserves_current_auxiliary_record_types(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session.jsonl"
+            current_types = (
+                "frame-link",
+                "permission-mode",
+                "bridge-session",
+                "ai-title",
+                "file-history-delta",
+            )
+            write_lines(
+                session,
+                [json_line({"type": record_type}) for record_type in current_types],
+            )
+            quality = {}
+            conversation = extract_claude_session(session, quality_out=quality)
+            self.assertEqual(quality["status"], "complete")
+            self.assertEqual(
+                [event["type"] for event in conversation["events"]],
+                list(current_types),
+            )
+
     def test_codex_merges_and_deduplicates_legacy_and_modern_messages_in_source_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "rollout-mixed.jsonl"

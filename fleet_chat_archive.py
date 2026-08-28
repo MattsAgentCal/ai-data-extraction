@@ -48,14 +48,6 @@ SENSITIVE_NAME_PATTERN = (
 SENSITIVE_ASSIGNMENT_MARKER_RE = re.compile(
     rf"(?i)(?<![A-Za-z0-9_.-])[\"']?{SENSITIVE_NAME_PATTERN}[\"']?\s*[:=]"
 )
-QUOTED_CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    rf"(?i)([\"']?{SENSITIVE_NAME_PATTERN}[\"']?\s*[:=]\s*)"
-    r"([\"'])(?!\[REDACTED\])([^\r\n]*?)\2"
-)
-UNQUOTED_CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    rf"(?i)([\"']?{SENSITIVE_NAME_PATTERN}[\"']?\s*[:=]\s*)"
-    r"(?![\"']?\[REDACTED\][\"']?)([^\s,;}}\]]+)"
-)
 PROVIDER_TOKEN_RE = re.compile(
     r"\b(?:sk-[A-Za-z0-9_-]{20,}|gh[opusr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b"
 )
@@ -67,10 +59,6 @@ AUTH_HEADER_RE = re.compile(
 )
 COOKIE_HEADER_RE = re.compile(r"(?i)\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+")
 GENERIC_BEARER_RE = re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9+/=_-]{8,}")
-RESIDUAL_ASSIGNMENT_RE = re.compile(
-    rf"(?i)[\"']?{SENSITIVE_NAME_PATTERN}[\"']?\s*[:=]\s*"
-    r"(?P<value>\[REDACTED\]|[\"'][^\r\n]*?[\"']|[^\s,;}}\]]+)"
-)
 SENSITIVE_KEY_PARTS = {
     "apikey",
     "accesstoken",
@@ -258,14 +246,6 @@ def redact_text(value: str) -> tuple[str, int]:
     # than risk preserving a suffix the parser cannot safely delimit.
     if SENSITIVE_ASSIGNMENT_MARKER_RE.search(value):
         return "[REDACTED]", redactions + 1
-    value, count = QUOTED_CREDENTIAL_ASSIGNMENT_RE.subn(
-        r"\1\2[REDACTED]\2", value
-    )
-    redactions += count
-    value, count = UNQUOTED_CREDENTIAL_ASSIGNMENT_RE.subn(
-        r"\1[REDACTED]", value
-    )
-    redactions += count
     for pattern in (
         AUTH_HEADER_RE,
         COOKIE_HEADER_RE,
@@ -1560,6 +1540,7 @@ def run_config(args: argparse.Namespace) -> int:
     publication = {"status": "not_attempted", "files_copied": 0}
     run_errors: list[dict] = []
     collection_errors: list[dict] = []
+    collection_finished = False
 
     def record_failure(harness: str, error: Exception) -> None:
         harnesses[harness] = {
@@ -1698,12 +1679,41 @@ def run_config(args: argparse.Namespace) -> int:
                     )
             else:
                 publication = {"status": "blocked_no_drive_root", "files_copied": 0}
+            collection_finished = True
         except Exception as error:
             body_free_error = {"component": "run", "error_type": type(error).__name__}
             run_errors.append(body_free_error)
             collection_errors.append(body_free_error)
             publication = {"status": "failed", "files_copied": 0}
         finally:
+            if not collection_finished:
+                interrupted_error = {
+                    "component": "run",
+                    "error_type": "InterruptedOrIncompleteRun",
+                }
+                if interrupted_error not in run_errors:
+                    run_errors.append(interrupted_error)
+                if interrupted_error not in collection_errors:
+                    collection_errors.append(interrupted_error)
+                source_root = spool_root / "hosts" / host_id
+                if (source_root / "publish-manifest.json").is_file():
+                    restore_indexes_to_manifest(source_root, host_id)
+                configured_harnesses = {
+                    harness
+                    for harness, source_key in (
+                        ("claude", "claude_roots"),
+                        ("codex", "codex_roots"),
+                        ("openclaw", "openclaw_roots"),
+                    )
+                    if sources.get(source_key)
+                }
+                if sources.get("hermes_exports") or sources.get("hermes_instances"):
+                    configured_harnesses.add("hermes")
+                for harness in configured_harnesses:
+                    save_incremental_state(
+                        spool_root / "state" / host_id / f"{harness}.json",
+                        {},
+                    )
             collection_status = (
                 "failed"
                 if collection_errors
