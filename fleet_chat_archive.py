@@ -143,6 +143,9 @@ EXTRACTOR_FILES = (
     "extract_openclaw.py",
     "extract_hermes.py",
 )
+MAX_SOURCE_BYTES = 1280 * 1024 * 1024
+MAX_OBJECT_BYTES = 1280 * 1024 * 1024
+CODEX_PATH_PROVENANCE_FIELDS = frozenset({"session_file"})
 
 
 def canonical_json(value: object) -> bytes:
@@ -246,10 +249,22 @@ def open_regular_fd(path: Path) -> int:
     return descriptor
 
 
-def read_json_nofollow(path: Path):
+def read_json_nofollow(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+    size_label: str = "JSON file",
+):
     descriptor = open_regular_fd(path)
-    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        if max_bytes is not None and os.fstat(descriptor).st_size > max_bytes:
+            raise ValueError(f"{size_label} exceeds maximum of {max_bytes} bytes: {path}")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            return json.load(handle)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def read_bytes_nofollow(path: Path) -> bytes:
@@ -437,6 +452,148 @@ def atomic_write_bytes(path: Path, payload: bytes) -> None:
         os.close(directory_fd)
 
 
+def remove_file_if_present(path: Path) -> None:
+    absolute = lexical_absolute(path)
+    try:
+        _, directory_fd = open_directory_fd(absolute.parent)
+    except FileNotFoundError:
+        return
+    try:
+        try:
+            os.unlink(absolute.name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+@contextlib.contextmanager
+def defer_sigterm_during_rollback():
+    previous_mask = None
+    if hasattr(signal, "pthread_sigmask"):
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    try:
+        yield
+    finally:
+        if previous_mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def load_healthy_manifest_snapshot(
+    source_root: Path,
+    host_id: str,
+) -> tuple[bytes, dict[Path, bytes], dict[str, dict]] | None:
+    """Load exact manifest-bound indexes without trusting unbound live rows."""
+    manifest_path = source_root / "publish-manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        return None
+    manifest_payload = read_bytes_nofollow(manifest_path)
+    manifest = json.loads(manifest_payload)
+    harnesses = manifest.get("harnesses")
+    receipt_binding = manifest.get("receipt")
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("host_id") != host_id
+        or not isinstance(manifest.get("run_id"), str)
+        or not isinstance(harnesses, dict)
+        or not set(harnesses).issubset(APPROVED_HARNESSES)
+        or not isinstance(receipt_binding, dict)
+    ):
+        raise ValueError("invalid prior publish manifest identity")
+
+    receipt_relative = Path(str(receipt_binding.get("path", "")))
+    if (
+        len(receipt_relative.parts) != 2
+        or receipt_relative.parts[0] != "receipts"
+        or not receipt_relative.name.endswith(".json")
+    ):
+        raise ValueError("invalid prior manifest receipt path")
+    receipt_path = source_root / receipt_relative
+    if (
+        not receipt_path.is_file()
+        or receipt_path.is_symlink()
+        or not re.fullmatch(r"[0-9a-f]{64}", str(receipt_binding.get("sha256", "")))
+        or file_sha256(receipt_path) != receipt_binding["sha256"]
+    ):
+        raise ValueError("prior manifest receipt hash mismatch")
+    receipt = read_json_nofollow(receipt_path)
+    receipt_harnesses = receipt.get("harnesses")
+    collection_status = receipt.get("collection_status", receipt.get("status"))
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("host_id") != host_id
+        or receipt.get("run_id") != manifest.get("run_id")
+        or receipt.get("extractor_sha256") != manifest.get("extractor_sha256")
+        or receipt.get("config_sha256") != manifest.get("config_sha256")
+        or collection_status not in {"completed", "completed_with_absent_harnesses"}
+        or not isinstance(receipt_harnesses, dict)
+    ):
+        raise ValueError("prior manifest receipt is not healthy")
+
+    index_payloads: dict[Path, bytes] = {}
+    index_values: dict[str, dict] = {}
+    for harness, binding in harnesses.items():
+        result = receipt_harnesses.get(harness)
+        object_digests = binding.get("object_sha256") if isinstance(binding, dict) else None
+        expected_index_hash = binding.get("index_sha256") if isinstance(binding, dict) else None
+        if (
+            not isinstance(result, dict)
+            or result.get("status")
+            in {"failed", "partial", "source_missing", "not_present_on_host"}
+            or not isinstance(object_digests, list)
+            or len(object_digests) != len(set(object_digests))
+            or any(not re.fullmatch(r"[0-9a-f]{64}", str(item)) for item in object_digests)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(expected_index_hash or ""))
+        ):
+            raise ValueError(f"invalid prior manifest binding for {harness}")
+        index_path = source_root / harness / "index.json"
+        if not index_path.is_file() or index_path.is_symlink():
+            raise ValueError(f"prior manifest index is missing for {harness}")
+        index_payload = read_bytes_nofollow(index_path)
+        if hashlib.sha256(index_payload).hexdigest() != expected_index_hash:
+            raise ValueError(f"prior manifest index hash mismatch for {harness}")
+        index = json.loads(index_payload)
+        rows = index.get("conversations")
+        if (
+            index.get("schema_version") != 1
+            or index.get("host_id") != host_id
+            or index.get("harness") != harness
+            or not isinstance(rows, list)
+        ):
+            raise ValueError(f"invalid prior manifest index for {harness}")
+        indexed_digests = []
+        for row in rows:
+            digest = row.get("object_sha256") if isinstance(row, dict) else None
+            if (
+                not OBJECT_NAME_RE.fullmatch(f"{digest}.json")
+                or row.get("source") not in HARNESS_SOURCES[harness]
+                or (
+                    row.get("source_sha256") is not None
+                    and not re.fullmatch(r"[0-9a-f]{64}", str(row["source_sha256"]))
+                )
+            ):
+                raise ValueError(f"invalid prior manifest index row for {harness}")
+            object_path = source_root / harness / "objects" / f"{digest}.json"
+            if not object_path.is_file() or object_path.is_symlink():
+                raise ValueError(f"prior manifest object is missing for {harness}: {digest}")
+            indexed_digests.append(digest)
+        if sorted(indexed_digests) != sorted(object_digests):
+            raise ValueError(f"prior manifest object binding mismatch for {harness}")
+        index_payloads[index_path] = index_payload
+        index_values[harness] = index
+    return manifest_payload, index_payloads, index_values
+
+
+def stable_codex_conversation_sha256(conversation: dict) -> str:
+    stable = {
+        key: value
+        for key, value in conversation.items()
+        if key not in CODEX_PATH_PROVENANCE_FIELDS
+    }
+    return hashlib.sha256(canonical_json(stable)).hexdigest()
+
+
 def archive_conversations(
     archive_root: Path,
     host_id: str,
@@ -444,6 +601,8 @@ def archive_conversations(
     conversations,
     *,
     collection_complete: bool = True,
+    reuse_harness_root: Path | None = None,
+    reuse_index: dict | None = None,
 ) -> dict:
     harness_root = archive_root / "hosts" / host_id / harness
     objects_root = harness_root / "objects"
@@ -466,8 +625,28 @@ def archive_conversations(
         for row in prior_rows
         if isinstance(row, dict) and OBJECT_NAME_RE.fullmatch(f"{row.get('object_sha256', '')}.json")
     }
+    reusable_by_session: dict[object, list[tuple[dict, Path]]] = {}
+    if harness == "codex" and reuse_harness_root is not None and reuse_index is not None:
+        for row in reuse_index.get("conversations", []):
+            if not isinstance(row, dict):
+                continue
+            digest = row.get("object_sha256")
+            session_id = row.get("session_id")
+            if (
+                not OBJECT_NAME_RE.fullmatch(f"{digest}.json")
+                or not isinstance(session_id, str)
+                or not session_id
+            ):
+                continue
+            reusable_by_session.setdefault(session_id, []).append(
+                (row, reuse_harness_root / "objects" / f"{digest}.json")
+            )
+    current_by_raw_identity: dict[tuple[str, str], tuple[str, str]] = {}
+    reusable_stable_sha256: dict[Path, tuple[str, object, object, object]] = {}
+
     for conversation in conversations:
         conversation_count += 1
+        source_sha256 = conversation.pop("_archive_source_sha256", None)
         conversation, conversation_redactions = redact_value(conversation)
         redaction_count += conversation_redactions
         if conversation_redactions:
@@ -478,17 +657,86 @@ def archive_conversations(
                 "recognized credential remained after redaction at "
                 + ", ".join(residuals[:5])
             )
-        payload = canonical_json(conversation)
-        digest = hashlib.sha256(payload).hexdigest()
+        digest = None
+        stable_sha256 = None
+        if harness == "codex":
+            installation = conversation.get("installation")
+            if (
+                not isinstance(installation, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", str(source_sha256 or ""))
+            ):
+                raise ValueError("Codex conversation is missing stable source identity")
+            stable_sha256 = stable_codex_conversation_sha256(conversation)
+            raw_identity = (installation, source_sha256)
+            current = current_by_raw_identity.get(raw_identity)
+            if current is not None and current[1] == stable_sha256:
+                digest = current[0]
+            if digest is None:
+                for row, candidate_path in reusable_by_session.get(
+                    conversation.get("session_id"), []
+                ):
+                    prior_source_sha256 = row.get("source_sha256")
+                    if (
+                        prior_source_sha256 is not None
+                        and prior_source_sha256 != source_sha256
+                    ):
+                        continue
+                    cached = reusable_stable_sha256.get(candidate_path)
+                    if cached is None:
+                        archived = validate_object_file(candidate_path)
+                        cached = (
+                            stable_codex_conversation_sha256(archived),
+                            archived.get("source"),
+                            archived.get("session_id"),
+                            archived.get("installation"),
+                        )
+                        reusable_stable_sha256[candidate_path] = cached
+                    (
+                        candidate_stable_sha256,
+                        archived_source,
+                        archived_session_id,
+                        archived_installation,
+                    ) = cached
+                    if (
+                        archived_source == "codex"
+                        and archived_session_id == conversation.get("session_id")
+                        and archived_installation == installation
+                        and candidate_stable_sha256 == stable_sha256
+                    ):
+                        digest = row["object_sha256"]
+                        object_path = objects_root / f"{digest}.json"
+                        if not object_path.exists():
+                            link_verified_local_object(candidate_path, object_path)
+                        break
+
+        if digest is None:
+            payload = canonical_json(conversation)
+            if len(payload) + 1 > MAX_OBJECT_BYTES:
+                raise ValueError(
+                    f"object exceeds maximum of {MAX_OBJECT_BYTES} bytes before write"
+                )
+            digest = hashlib.sha256(payload).hexdigest()
+        else:
+            payload = None
         object_path = objects_root / f"{digest}.json"
         if not object_path.exists():
-            atomic_write_json(object_path, conversation)
+            if payload is None:
+                raise ValueError(f"reused Codex object is missing: {digest}")
+            atomic_write_bytes(object_path, payload + b"\n")
             new_objects += 1
-        index_by_digest[digest] = {
+        index_row = {
             "object_sha256": digest,
             "session_id": conversation.get("session_id"),
             "source": conversation.get("source"),
         }
+        if harness == "codex":
+            index_row["source_sha256"] = source_sha256
+            index_row["installation"] = conversation["installation"]
+            current_by_raw_identity[(conversation["installation"], source_sha256)] = (
+                digest,
+                stable_sha256,
+            )
+        index_by_digest[digest] = index_row
 
     index_rows = list(index_by_digest.values())
     index_rows.sort(key=lambda row: (str(row["session_id"]), row["object_sha256"]))
@@ -519,6 +767,26 @@ def source_fingerprint(path: Path, *, include_content_hash: bool = False) -> dic
     descriptor = open_regular_fd(path)
     try:
         metadata = os.fstat(descriptor)
+        if metadata.st_size > MAX_SOURCE_BYTES:
+            raise ValueError(
+                f"source exceeds maximum of {MAX_SOURCE_BYTES} bytes: {path}"
+            )
+        content_sha256 = descriptor_sha256(descriptor) if include_content_hash else None
+        final_metadata = os.fstat(descriptor)
+        if (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        ) != (
+            final_metadata.st_dev,
+            final_metadata.st_ino,
+            final_metadata.st_size,
+            final_metadata.st_mtime_ns,
+            final_metadata.st_ctime_ns,
+        ):
+            raise ValueError(f"source changed while hashing: {path}")
     finally:
         os.close(descriptor)
     fingerprint = {
@@ -528,7 +796,7 @@ def source_fingerprint(path: Path, *, include_content_hash: bool = False) -> dic
         "inode": metadata.st_ino,
     }
     if include_content_hash:
-        fingerprint["sha256"] = file_sha256(path)
+        fingerprint["sha256"] = content_sha256
     return fingerprint
 
 
@@ -568,6 +836,16 @@ def collect_sources(
     archive_root = validate_output_root(archive_root)
     secure_mkdir(archive_root)
     harnesses = {}
+    codex_reuse_harness_root = None
+    codex_reuse_index = None
+    if codex_roots:
+        live_host_root = archive_root / "hosts" / host_id
+        snapshot = load_healthy_manifest_snapshot(live_host_root, host_id)
+        if snapshot is not None:
+            _, _, manifest_indexes = snapshot
+            codex_reuse_index = manifest_indexes.get("codex")
+            if codex_reuse_index is not None:
+                codex_reuse_harness_root = live_host_root / "codex"
 
     def aggregate_quality(items: list[dict], *, source_missing: bool = False) -> dict:
         keys = ("discovered_lines", "parsed_lines", "failed_lines", "recognized_lines")
@@ -605,6 +883,10 @@ def collect_sources(
                 harness,
                 conversations,
                 collection_complete=True,
+                reuse_harness_root=(
+                    codex_reuse_harness_root if harness == "codex" else None
+                ),
+                reuse_index=codex_reuse_index if harness == "codex" else None,
             )
             missing = source_missing() if callable(source_missing) else source_missing
             quality = aggregate_quality(qualities, source_missing=missing)
@@ -701,18 +983,24 @@ def collect_sources(
                 for session_file in find_all_codex_sessions(codex_root):
                     file_counts["discovered"] += 1
                     state_key = str(lexical_absolute(session_file))
-                    fingerprint = source_fingerprint(session_file)
+                    fingerprint = source_fingerprint(
+                        session_file, include_content_hash=True
+                    )
                     if prior_state.get(state_key) == fingerprint:
                         file_counts["skipped"] += 1
                         continue
                     file_counts["processed"] += 1
                     quality = {}
                     conversation = extract_codex_session(
-                        session_file, quality_out=quality
+                        session_file,
+                        quality_out=quality,
+                        expected_source_sha256=fingerprint["sha256"],
+                        max_source_bytes=MAX_SOURCE_BYTES,
                     )
                     qualities.append(quality)
                     if conversation:
                         conversation["installation"] = str(codex_root)
+                        conversation["_archive_source_sha256"] = fingerprint["sha256"]
                         yield conversation
                     if quality.get("status") == "complete":
                         next_state[state_key] = fingerprint
@@ -905,7 +1193,11 @@ def validate_object_file(path: Path) -> dict:
     assert_no_symlink_components(path)
     if not OBJECT_NAME_RE.fullmatch(path.name):
         raise ValueError(f"invalid archive object filename: {path.name}")
-    value = read_json_nofollow(path)
+    value = read_json_nofollow(
+        path,
+        max_bytes=MAX_OBJECT_BYTES,
+        size_label="object",
+    )
     expected = path.stem
     actual = hashlib.sha256(canonical_json(value)).hexdigest()
     if actual != expected:
@@ -942,6 +1234,16 @@ def validate_index_file(
             f"{row.get('object_sha256', '')}.json"
         ):
             raise ValueError(f"invalid archive index row: {index_path.name}")
+        if row.get("source_sha256") is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", str(row["source_sha256"])
+        ):
+            raise ValueError(f"invalid archive source identity: {index_path.name}")
+        if (
+            harness == "codex"
+            and row.get("source_sha256") is not None
+            and not isinstance(row.get("installation"), str)
+        ):
+            raise ValueError(f"invalid Codex installation identity: {index_path.name}")
         digest = row["object_sha256"]
         if digest in referenced:
             raise ValueError(f"duplicate archive index row: {digest}")
@@ -1340,14 +1642,14 @@ def merge_index_file(source: Path, destination: Path) -> bool:
         row["object_sha256"]: row
         for row in destination_index.get("conversations", [])
     }
-    before = len(merged)
+    before = canonical_json(destination_index)
     for row in source_index.get("conversations", []):
-        merged.setdefault(row["object_sha256"], row)
+        merged[row["object_sha256"]] = row
     destination_index["conversations"] = sorted(
         merged.values(),
         key=lambda row: (str(row.get("session_id")), row["object_sha256"]),
     )
-    if len(merged) == before:
+    if canonical_json(destination_index) == before:
         return False
     atomic_write_json(destination, destination_index)
     return True
@@ -1865,6 +2167,24 @@ def run_config(args: argparse.Namespace) -> int:
     run_errors: list[dict] = []
     collection_errors: list[dict] = []
     collection_finished = False
+    configured_collectors = (
+        ("claude", "claude_roots"),
+        ("codex", "codex_roots"),
+        ("openclaw", "openclaw_roots"),
+    )
+    configured_harnesses = {
+        harness
+        for harness, source_key in configured_collectors
+        if sources.get(source_key)
+    }
+    if sources.get("hermes_exports") or sources.get("hermes_instances"):
+        configured_harnesses.add("hermes")
+    source_root = spool_root / "hosts" / host_id
+    prior_manifest_payload: bytes | None = None
+    prior_index_payloads: dict[Path, bytes] = {}
+    prior_state_payloads: dict[Path, bytes | None] = {}
+    transaction_snapshots_ready = False
+    manifest_committed = False
 
     def record_failure(harness: str, error: Exception) -> None:
         harnesses[harness] = {
@@ -1879,13 +2199,38 @@ def run_config(args: argparse.Namespace) -> int:
         run_errors.append(body_free_error)
         collection_errors.append(body_free_error)
 
+    def rollback_uncommitted_collection() -> None:
+        if not transaction_snapshots_ready:
+            return
+        with defer_sigterm_during_rollback():
+            for index_path, payload in prior_index_payloads.items():
+                atomic_write_bytes(index_path, payload)
+            manifest_path = source_root / "publish-manifest.json"
+            if prior_manifest_payload is None:
+                remove_file_if_present(manifest_path)
+            else:
+                atomic_write_bytes(manifest_path, prior_manifest_payload)
+            for state_path, payload in prior_state_payloads.items():
+                if payload is None:
+                    remove_file_if_present(state_path)
+                else:
+                    atomic_write_bytes(state_path, payload)
+
     with archive_run_lock(spool_root):
         try:
-            configured_collectors = (
-                ("claude", "claude_roots"),
-                ("codex", "codex_roots"),
-                ("openclaw", "openclaw_roots"),
-            )
+            for harness in configured_harnesses:
+                state_path = spool_root / "state" / host_id / f"{harness}.json"
+                prior_state_payloads[state_path] = (
+                    read_bytes_nofollow(state_path) if state_path.is_file() else None
+                )
+            prior_snapshot = load_healthy_manifest_snapshot(source_root, host_id)
+            if prior_snapshot is not None:
+                (
+                    prior_manifest_payload,
+                    prior_index_payloads,
+                    _prior_index_values,
+                ) = prior_snapshot
+            transaction_snapshots_ready = True
             for harness, source_key in configured_collectors:
                 if not sources.get(source_key):
                     continue
@@ -2019,25 +2364,7 @@ def run_config(args: argparse.Namespace) -> int:
                     run_errors.append(interrupted_error)
                 if interrupted_error not in collection_errors:
                     collection_errors.append(interrupted_error)
-                source_root = spool_root / "hosts" / host_id
-                if (source_root / "publish-manifest.json").is_file():
-                    restore_indexes_to_manifest(source_root, host_id)
-                configured_harnesses = {
-                    harness
-                    for harness, source_key in (
-                        ("claude", "claude_roots"),
-                        ("codex", "codex_roots"),
-                        ("openclaw", "openclaw_roots"),
-                    )
-                    if sources.get(source_key)
-                }
-                if sources.get("hermes_exports") or sources.get("hermes_instances"):
-                    configured_harnesses.add("hermes")
-                for harness in configured_harnesses:
-                    save_incremental_state(
-                        spool_root / "state" / host_id / f"{harness}.json",
-                        {},
-                    )
+                rollback_uncommitted_collection()
             collection_status = (
                 "failed"
                 if collection_errors
@@ -2065,11 +2392,11 @@ def run_config(args: argparse.Namespace) -> int:
             }
             atomic_write_json(receipt_path, receipt)
             if collection_status in {"completed", "completed_with_absent_harnesses"}:
-                source_root = spool_root / "hosts" / host_id
                 try:
                     write_publish_manifest(
                         source_root, receipt_path, receipt, config_digest
                     )
+                    manifest_committed = True
                     if config.get("drive_root"):
                         drive_root = assert_no_symlink_components(
                             Path(config["drive_root"])
@@ -2133,7 +2460,11 @@ def run_config(args: argparse.Namespace) -> int:
                                     receipt,
                                     config_digest,
                                 )
-                except Exception as error:
+                except BaseException as error:
+                    if not manifest_committed:
+                        rollback_uncommitted_collection()
+                    if not isinstance(error, Exception):
+                        raise
                     run_errors.append(
                         {
                             "component": "publish_manifest",

@@ -5,6 +5,7 @@ Includes: messages, code context, diffs, file references
 Auto-discovers Codex installations on the device
 """
 
+import hashlib
 import json
 from pathlib import Path
 from datetime import datetime
@@ -37,7 +38,12 @@ def _reject_symlink_components(path):
     return expanded
 
 
-def _open_regular_jsonl(path):
+def _open_regular_jsonl(
+    path,
+    *,
+    expected_sha256=None,
+    max_bytes=None,
+):
     """Open one regular JSONL file without following a leaf symlink."""
     path = _reject_symlink_components(path)
     absolute = Path(os.path.abspath(os.fspath(path)))
@@ -73,9 +79,37 @@ def _open_regular_jsonl(path):
         raise
     finally:
         os.close(directory_fd)
-    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
         os.close(descriptor)
         raise ValueError(f"JSONL input must be a regular file: {path}")
+    if max_bytes is not None and metadata.st_size > max_bytes:
+        os.close(descriptor)
+        raise ValueError(f"source exceeds maximum of {max_bytes} bytes: {path}")
+    if expected_sha256 is not None:
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+            digest.update(chunk)
+        final_metadata = os.fstat(descriptor)
+        if (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        ) != (
+            final_metadata.st_dev,
+            final_metadata.st_ino,
+            final_metadata.st_size,
+            final_metadata.st_mtime_ns,
+            final_metadata.st_ctime_ns,
+        ):
+            os.close(descriptor)
+            raise ValueError(f"source changed while hashing: {path}")
+        if digest.hexdigest() != expected_sha256:
+            os.close(descriptor)
+            raise ValueError(f"source changed before extraction: {path}")
+        os.lseek(descriptor, 0, os.SEEK_SET)
     return os.fdopen(descriptor, "r", encoding="utf-8")
 
 
@@ -178,7 +212,13 @@ def find_codex_installations():
 
     return list(set(locations))
 
-def extract_codex_session(session_file, *, quality_out=None):
+def extract_codex_session(
+    session_file,
+    *,
+    quality_out=None,
+    expected_source_sha256=None,
+    max_source_bytes=None,
+):
     """Extract conversation from a Codex rollout file with full context"""
     messages = []
     message_origins = []
@@ -224,7 +264,11 @@ def extract_codex_session(session_file, *, quality_out=None):
         "web_search_call",
     }
 
-    with _open_regular_jsonl(session_file) as f:
+    with _open_regular_jsonl(
+        session_file,
+        expected_sha256=expected_source_sha256,
+        max_bytes=max_source_bytes,
+    ) as f:
         for line in f:
             if not line.strip():
                 continue

@@ -459,6 +459,106 @@ class FleetSecurityRegressionTests(unittest.TestCase):
                 second["codex"]["quality"]["skipped_unchanged_files"], 1
             )
 
+    def test_codex_move_between_live_and_archive_paths_has_one_content_object(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            codex = root / "codex"
+            live = (
+                codex
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-shared.jsonl"
+            )
+            archived = codex / "archived_sessions" / "rollout-shared.jsonl"
+            write_jsonl(
+                live,
+                [
+                    {"type": "session_meta", "payload": {"id": "shared-session"}},
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "same body"},
+                    },
+                ],
+            )
+            archived.parent.mkdir(parents=True)
+            archived.write_bytes(live.read_bytes())
+
+            result = fleet.collect_sources(
+                root / "spool", "test-mac", codex_roots=[codex]
+            )
+            harness_root = root / "spool" / "hosts" / "test-mac" / "codex"
+            index = json.loads((harness_root / "index.json").read_text())
+            objects = list((harness_root / "objects").glob("*.json"))
+
+            self.assertEqual(result["codex"]["quality"]["processed_files"], 2)
+            self.assertEqual(len(index["conversations"]), 1)
+            self.assertEqual(len(objects), 1)
+            archived_value = json.loads(objects[0].read_text())
+            self.assertIn("session_file", archived_value)
+            self.assertIn(
+                archived_value["session_file"], {str(live), str(archived)}
+            )
+
+    def test_codex_move_reuses_a_legacy_index_object_without_duplication(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            codex = root / "codex"
+            live = (
+                codex
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-legacy.jsonl"
+            )
+            archived = codex / "archived_sessions" / "rollout-legacy.jsonl"
+            write_jsonl(
+                live,
+                [
+                    {"type": "session_meta", "payload": {"id": "legacy-session"}},
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "legacy body"},
+                    },
+                ],
+            )
+            conversation = fleet.extract_codex_session(live)
+            conversation["installation"] = str(codex)
+            conversation["_archive_source_sha256"] = fleet.file_sha256(live)
+            spool = root / "spool"
+            fleet.archive_conversations(
+                spool, "test-mac", "codex", [conversation]
+            )
+            harness_root = spool / "hosts" / "test-mac" / "codex"
+            legacy_index = json.loads((harness_root / "index.json").read_text())
+            legacy_index["conversations"][0].pop("source_sha256")
+            legacy_index["conversations"][0].pop("installation")
+            (harness_root / "index.json").write_text(
+                json.dumps(legacy_index, sort_keys=True) + "\n"
+            )
+            write_healthy_receipt(harness_root.parent, harness="codex")
+            legacy_digest = legacy_index["conversations"][0]["object_sha256"]
+            legacy_object = harness_root / "objects" / f"{legacy_digest}.json"
+            legacy_inode = legacy_object.stat().st_ino
+            archived.parent.mkdir(parents=True)
+            live.replace(archived)
+
+            result = fleet.collect_sources(
+                spool, "test-mac", codex_roots=[codex]
+            )
+            current_index = json.loads((harness_root / "index.json").read_text())
+            objects = list((harness_root / "objects").glob("*.json"))
+
+            self.assertEqual(result["codex"]["new_objects"], 0)
+            self.assertEqual(len(current_index["conversations"]), 1)
+            self.assertEqual(
+                current_index["conversations"][0]["object_sha256"], legacy_digest
+            )
+            self.assertEqual(objects, [legacy_object])
+            self.assertEqual(legacy_object.stat().st_ino, legacy_inode)
+
     def test_incremental_state_detects_same_size_rewrite_with_restored_mtime(self):
         with safe_temporary_directory() as tmp:
             root = Path(tmp)
@@ -1451,10 +1551,9 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             self.assertEqual(receipt["collection_status"], "failed")
             self.assertEqual(receipt["status"], "failed")
             self.assertFalse((shard / "publish-manifest.json").exists())
-            state = json.loads(
-                (root / "spool" / "state" / "test-mac" / "claude.json").read_text()
+            self.assertFalse(
+                (root / "spool" / "state" / "test-mac" / "claude.json").exists()
             )
-            self.assertEqual(state["sources"], {})
 
     def test_termination_during_later_harness_restores_prior_manifest_and_state(self):
         with safe_temporary_directory() as tmp:
@@ -1480,6 +1579,10 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             shard = root / "spool" / "hosts" / "test-mac"
             old_manifest = (shard / "publish-manifest.json").read_bytes()
             old_index = (shard / "claude" / "index.json").read_bytes()
+            claude_state_path = (
+                root / "spool" / "state" / "test-mac" / "claude.json"
+            )
+            old_claude_state = claude_state_path.read_bytes()
             with session.open("a") as handle:
                 handle.write(
                     json.dumps(
@@ -1504,17 +1607,226 @@ with fleet.archive_run_lock(Path({str(spool_root)!r})):
             )
             self.assertEqual((shard / "claude" / "index.json").read_bytes(), old_index)
             fleet.validated_shard_files(shard, "test-mac")
-            for harness in ("claude", "hermes"):
-                state = json.loads(
-                    (
-                        root
-                        / "spool"
-                        / "state"
-                        / "test-mac"
-                        / f"{harness}.json"
-                    ).read_text()
+            self.assertEqual(claude_state_path.read_bytes(), old_claude_state)
+            self.assertFalse(
+                (root / "spool" / "state" / "test-mac" / "hermes.json").exists()
+            )
+
+    def test_termination_during_first_manifest_write_restores_snapshot_and_retries(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            session = claude_root / "projects" / "sample" / "session.jsonl"
+            write_jsonl(
+                session,
+                [{"type": "user", "message": {"content": "first snapshot"}}],
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {"claude_roots": [str(claude_root)]},
+                    }
                 )
-                self.assertEqual(state["sources"], {})
+            )
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            shard = root / "spool" / "hosts" / "test-mac"
+            manifest_path = shard / "publish-manifest.json"
+            index_path = shard / "claude" / "index.json"
+            state_path = root / "spool" / "state" / "test-mac" / "claude.json"
+            old_manifest = manifest_path.read_bytes()
+            old_index = index_path.read_bytes()
+            old_state = state_path.read_bytes()
+            with session.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {"type": "assistant", "message": {"content": "second snapshot"}}
+                    )
+                    + "\n"
+                )
+
+            with mock.patch.object(
+                fleet,
+                "write_publish_manifest",
+                side_effect=fleet.TerminationRequested,
+            ), mock.patch("builtins.print"), self.assertRaises(
+                fleet.TerminationRequested
+            ):
+                fleet.run_config(configured_args(config_path))
+
+            self.assertEqual(manifest_path.read_bytes(), old_manifest)
+            self.assertEqual(index_path.read_bytes(), old_index)
+            self.assertEqual(state_path.read_bytes(), old_state)
+            fleet.validated_shard_files(shard, "test-mac")
+
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+            current_manifest = json.loads(manifest_path.read_text())
+            current_receipt = json.loads(
+                (shard / current_manifest["receipt"]["path"]).read_text()
+            )
+            self.assertEqual(
+                current_receipt["harnesses"]["claude"]["quality"]["processed_files"],
+                1,
+            )
+
+    def test_manifest_validation_failure_restores_prior_snapshot_and_state(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            session = claude_root / "projects" / "sample" / "session.jsonl"
+            write_jsonl(
+                session,
+                [{"type": "user", "message": {"content": "first snapshot"}}],
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {"claude_roots": [str(claude_root)]},
+                    }
+                )
+            )
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+            shard = root / "spool" / "hosts" / "test-mac"
+            manifest_path = shard / "publish-manifest.json"
+            index_path = shard / "claude" / "index.json"
+            state_path = root / "spool" / "state" / "test-mac" / "claude.json"
+            before = (
+                manifest_path.read_bytes(),
+                index_path.read_bytes(),
+                state_path.read_bytes(),
+            )
+            with session.open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {"type": "assistant", "message": {"content": "changed"}}
+                    )
+                    + "\n"
+                )
+
+            with mock.patch.object(
+                fleet,
+                "write_publish_manifest",
+                side_effect=ValueError("synthetic manifest validation failure"),
+            ), mock.patch("builtins.print"):
+                self.assertNotEqual(fleet.run_config(configured_args(config_path)), 0)
+
+            self.assertEqual(
+                (
+                    manifest_path.read_bytes(),
+                    index_path.read_bytes(),
+                    state_path.read_bytes(),
+                ),
+                before,
+            )
+            fleet.validated_shard_files(shard, "test-mac")
+
+    def test_first_run_manifest_cancellation_leaves_no_committed_state(self):
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            claude_root = root / "claude"
+            write_jsonl(
+                claude_root / "projects" / "sample" / "session.jsonl",
+                [{"type": "user", "message": {"content": "first snapshot"}}],
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "host_id": "test-mac",
+                        "spool_root": str(root / "spool"),
+                        "drive_root": None,
+                        "sources": {"claude_roots": [str(claude_root)]},
+                    }
+                )
+            )
+            with mock.patch.object(
+                fleet,
+                "write_publish_manifest",
+                side_effect=fleet.TerminationRequested,
+            ), mock.patch("builtins.print"), self.assertRaises(
+                fleet.TerminationRequested
+            ):
+                fleet.run_config(configured_args(config_path))
+
+            shard = root / "spool" / "hosts" / "test-mac"
+            state_path = root / "spool" / "state" / "test-mac" / "claude.json"
+            self.assertFalse((shard / "publish-manifest.json").exists())
+            self.assertFalse(state_path.exists())
+
+            with mock.patch("builtins.print"):
+                self.assertEqual(fleet.run_config(configured_args(config_path)), 0)
+            manifest = json.loads((shard / "publish-manifest.json").read_text())
+            receipt = json.loads((shard / manifest["receipt"]["path"]).read_text())
+            self.assertEqual(
+                receipt["harnesses"]["claude"]["quality"]["processed_files"], 1
+            )
+
+    def test_source_and_object_byte_guards_fail_before_parsing(self):
+        self.assertGreaterEqual(fleet.MAX_SOURCE_BYTES, 566_191_187)
+        self.assertGreaterEqual(fleet.MAX_SOURCE_BYTES, 1_249_061_185)
+        self.assertGreaterEqual(fleet.MAX_OBJECT_BYTES, 552_957_718)
+        with safe_temporary_directory() as tmp:
+            root = Path(tmp)
+            codex = root / "codex"
+            oversized_source = (
+                codex
+                / "sessions"
+                / "2026"
+                / "08"
+                / "28"
+                / "rollout-oversized.jsonl"
+            )
+            oversized_source.parent.mkdir(parents=True)
+            with oversized_source.open("wb") as handle:
+                handle.truncate(fleet.MAX_SOURCE_BYTES + 1)
+
+            with mock.patch.object(
+                fleet, "extract_codex_session"
+            ) as extract_session, self.assertRaisesRegex(
+                ValueError, "source exceeds maximum"
+            ):
+                fleet.collect_sources(
+                    root / "spool", "test-mac", codex_roots=[codex]
+                )
+            extract_session.assert_not_called()
+
+            oversized_object = (
+                root / "objects" / ("a" * 64 + ".json")
+            )
+            oversized_object.parent.mkdir()
+            with oversized_object.open("wb") as handle:
+                handle.truncate(fleet.MAX_OBJECT_BYTES + 1)
+            with mock.patch.object(fleet.json, "load") as parse_json, self.assertRaisesRegex(
+                ValueError, "object exceeds maximum"
+            ):
+                fleet.validate_object_file(oversized_object)
+            parse_json.assert_not_called()
+
+            changed_source = codex / "archived_sessions" / "rollout-changed.jsonl"
+            write_jsonl(
+                changed_source,
+                [{"type": "session_meta", "payload": {"id": "changed"}}],
+            )
+            with self.assertRaisesRegex(ValueError, "source changed before extraction"):
+                fleet.extract_codex_session(
+                    changed_source,
+                    expected_source_sha256="0" * 64,
+                    max_source_bytes=fleet.MAX_SOURCE_BYTES,
+                )
 
     def test_cached_remote_shard_publishes_while_remote_is_unreachable(self):
         with safe_temporary_directory() as tmp:
