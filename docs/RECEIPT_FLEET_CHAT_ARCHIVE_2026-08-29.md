@@ -6,7 +6,7 @@ owned GitHub fork, New and Studio six-hour launchd jobs are loaded, and the Driv
 connector folder/receipt doc are verified. Mini cleanup and Old MacBook remain
 gated/offline.
 
-**Observed:** 2026-08-29T18:45:00Z, from the local MacBook plus SSH probes to
+**Observed:** 2026-08-29T19:00:00Z, from the local MacBook plus SSH probes to
 Studio and Mini, launchd readback, GitHub connector readback, and Drive connector
 readback. The two first launchd scans were still running at the observation.
 
@@ -19,7 +19,7 @@ readback. The two first launchd scans were still running at the observation.
 | Docs/addendum commit | Local `6625a608fce312c0124d7bd92cca90b938373447` (tree `df6d14c6a477428a81e318f3fbf13b79bc892e07`) |
 | Test command | `python3.14 -m unittest discover -s tests -p 'test*.py'` |
 | Test result | 263 tests ran, `OK` |
-| GitHub connector | Fork branch read back at connector commit `fab57fa8c71cdcfa769cb1bbad1f145d18061d56`; tree `df6d14c6a477428a81e318f3fbf13b79bc892e07` matches local docs commit content |
+| GitHub connector | Fork branch read back at connector commit `249082dba1cd3d7909eacb98f583c99717e12c91`; tree `80dcb504ef1b3131547c0db6414a3bd570e4ce68` matches local docs commit `7dbc965` content |
 | Drive connector | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; metadata and bodies read back |
 | Bundle | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle` |
 | Bundle SHA-256 | `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
