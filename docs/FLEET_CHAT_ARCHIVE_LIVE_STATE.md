@@ -1,7 +1,7 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-08-29T14:54:14Z
-**State:** documentation-only checkpoint; the deployment goal is paused at the manager's request.
+**Last reconciled:** 2026-08-29T18:45:00Z
+**State:** active deployment; the MacBook lease owner is running the reachable-host canaries and Drive connector publication. Mini disk approval and Old MacBook reachability remain external gates.
 
 This file is the repository's canonical rollout state. It records body-free
 counts, hashes, paths, and lifecycle observations only. Raw conversation
@@ -13,8 +13,10 @@ bodies, indexes, and other private archive data remain outside Git.
 |---|---|
 | Reviewed release | `3c732d7b1031949bd18db90ae4ac40f667f6cfa7` (`Rollback cleanly on terminal hangup`) |
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
-| Repository checkout | Clean at the reviewed release on this MacBook, Mac Studio, and Mac mini |
+| Repository checkout | MacBook and Studio clean at docs commit `5cd62dab6e4b5898cddfc8404b398525636fde00`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
+| GitHub connector publication | Fork branch `MattsAgentCal/ai-data-extraction:matt/fleet-chat-archive-deployed` read back at `5cd62da`; tree `16cd1967c3fe1b19607e6933d1b9b4f44b499a96` |
+| Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt doc ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`; both read back successfully |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
 The deployed runtime pins are:
@@ -28,14 +30,14 @@ The deployed runtime pins are:
 | `extract_openclaw.py` | `6049a3832abcddb380b9a9845e4cd1ef264467358be8ad8ce000a11da3e1b84b` |
 | `extract_hermes.py` | `c45fb372457d02e1d0df510e96dc9b0592da41b7cea9828ea7636f9000e173cb` |
 
-## Host matrix at the pause
+## Host matrix during active deployment
 
 | Host | Observed truth | Classification |
 |---|---|---|
-| New MacBook | Checkout is clean at `3c732d7`. The temporary `com.mattrotundo.ai-chat-archive.canary-final-3c-new` KeepAlive label is active (`runs=138`). Its receipt has 137 valid JSONL records, zero invalid lines, zero stderr bytes, and the latest completed run at 2026-08-29T14:41:25Z exited 0 with `completed_with_absent_harnesses`, `errors=0`, and `blocked_no_drive_root`. Claude and Hermes were absent in that incremental run; Codex collected 3 conversations/3 new objects; OpenClaw is not present. The production six-hour label and Old Mac retry label are disabled. | **DONE:** release deployed and canary evidence recorded. **IN-FLIGHT:** temporary canary remains loaded. **NOT STARTED:** production schedule enablement and OpenClaw host collection. |
-| Mac Studio | SSH read-only check found a clean checkout at `3c732d7`. The temporary `com.mattrotundo.ai-chat-archive.canary-final-3c-studio` KeepAlive label is active (`runs=29`). Its receipt has 28 valid JSONL records, zero invalid lines, and the latest completed run at 2026-08-29T14:29:11Z exited 0 with `completed_with_absent_harnesses`, `errors=0`, and `blocked_drive_unavailable`; Claude 1, Codex 6, Hermes 0, OpenClaw absent. The last hub statuses were Mini `pending_manifest`, New `unreachable`, and Old `unreachable`. The production six-hour label is disabled. | **DONE:** release deployed and canary evidence recorded. **IN-FLIGHT:** temporary canary remains loaded. **NOT STARTED:** production schedule enablement, Drive publication, and OpenClaw host collection. |
-| Mac mini | SSH read-only check found a clean checkout at `3c732d7`. No production archive label is enabled. At the check, free capacity was 7,687,332 KiB (about 7.33 GiB); `CoreSimulator.log` was 5,109,616,254 bytes with one open handle and `CoreSimulator.prev.log` was 15,403,577,516 bytes with zero open handles. No cleanup or real canary was started. | **DONE:** release deployed. **NOT STARTED:** storage action, real canary, and production schedule. |
-| Old MacBook | SSH to `oldmac` timed out at the reconciliation check. No live source inventory, deployment, or canary proof exists. The earlier retry proof recorded run count 1 -> 2, exit 0, zero stderr delta, and `offline_retryable`/`ssh_unreachable`; the current retry label is disabled/unloaded on New. | **DONE:** retry behavior was previously proven. **NOT STARTED:** online deployment, live canary, and an active retry schedule. |
+| New MacBook | Clean at `5cd62da` (runtime `3c732d7`). `com.mattrotundo.ai-chat-archive.new-macbook` is loaded under launchd, `runs=1`, `state=running`, and `StartInterval=21600`; its first live scan is in-flight. Last completed receipt: `2026-08-29T16:31:24.467081Z`, zero errors, `blocked_no_drive_root`, OpenClaw absent. | **DONE:** checkout, preflight, persistent schedule. **IN-FLIGHT:** first supervised scan and six-hour elapsed proof. |
+| Mac Studio | Clean at `5cd62da` (runtime `3c732d7`). `com.mattrotundo.ai-chat-archive.mac-studio` is loaded under launchd, `runs=1`, `state=running`, and `StartInterval=21600`; its first live scan is in-flight. Last completed receipt: `2026-08-29T16:40:20.517359Z`, zero errors, `blocked_drive_unavailable`; New pulled 1131/1131, Mini `pending_manifest`, Old unreachable. | **DONE:** checkout, preflight, persistent schedule, connector folder/receipt doc. **IN-FLIGHT:** File Provider mount, raw shard publication, first supervised scan, and six-hour elapsed proof. |
+| Mac mini | Clean at runtime `3c732d7`; no archive label is loaded. Free capacity `7,569,896 KiB`; active `CoreSimulator.log` `5,309,541,094` bytes, closed `CoreSimulator.prev.log` `15,403,577,516` bytes. | **DONE:** read-only disk census. **NOT STARTED:** approved cleanup, canary, schedule. |
+| Old MacBook | `ssh oldmac` timed out. No live source inventory, deployment, or canary proof exists. Earlier retry proof recorded run count 1 -> 2, exit 0, zero stderr delta, `offline_retryable`/`ssh_unreachable`; retry label remains unloaded on New. | **DONE:** retry behavior proof. **IN-FLIGHT:** queued retry. **NOT STARTED:** online deployment/canary. |
 
 ## DONE
 
@@ -45,9 +47,9 @@ The deployed runtime pins are:
   were integrated at `3c732d7`.
 - The release passed 263/263 tests, compile/diff checks, focused SIGHUP and
   rollback checks, and a fresh bundle-clone verification before deployment.
-- The exact release was fast-forward deployed to the reachable New MacBook,
-  Mac Studio, and Mac mini; each live checkout is currently clean at the same
-  commit.
+- The runtime release is deployed to the reachable New MacBook, Mac Studio, and
+  Mac mini. The docs/addendum commit is published to the owned GitHub fork and
+  pulled to Studio; the Studio and New worktrees are clean at that docs commit.
 - Body-free canary receipts were produced on New and Studio with zero parsed
   errors. They correctly report absent harnesses and blocked Drive publication
   rather than treating those conditions as success.
@@ -60,26 +62,32 @@ The deployed runtime pins are:
 - The owner-only Studio Google Drive DMG was staged and verified. Its observed
   size is 141,267,496 bytes and its SHA-256 is
   `fb6927060f8f20efb8ac2027d00a9c0787c111fa57c01fe6a29675afaf5c1178`.
+- The GitHub connector idempotently updated and read back the owned fork ref at
+  `5cd62da`. The Drive connector created and verified the private `AI Chat
+  Archive` folder and a body-free receipt doc inside it; no raw local-path upload
+  was attempted.
 
 ## IN-FLIGHT
 
-- The temporary final-release canary labels on New and Studio are still
-  loaded with KeepAlive. Their successful receipts are evidence of repeated
-  collection, not evidence of a stable terminal state or production schedule.
-  This documentation turn did not start another run or change their lifecycle.
-- The manager pause is in effect. No Drive login, schedule enablement, Mini
-  cleanup, Old Mac retry activation, or new product work is being performed.
+- The first production six-hour launchd labels on New and Studio are loaded with
+  durable owner-only logs and currently executing their first live scans. Their
+  launchd configuration proves persistent supervision and a 21,600-second
+  interval; it does not yet prove an elapsed six-hour cycle.
+- The connector receipt is published, but the runtime still reports
+  `blocked_no_drive_root`/`blocked_drive_unavailable` because Studio has no local
+  File Provider mount. Raw shard publication and the new-chat-in-Drive proof are
+  in-flight.
 
 ## NOT STARTED
 
-- Google Drive has not been installed or signed into on Studio; no File Provider
-  mount, `AI Chat Archive` folder, published receipt, or new-chat-in-Drive proof
-  exists.
+- Studio File Provider installation/login/mount has not been proven. The Drive
+  connector folder and body-free receipt doc exist, but no raw conversation
+  shard has been published and no new-chat-in-Drive proof exists.
 - The Mini storage gate has not been approved or acted on, so its real canary
   and production schedule remain unstarted.
 - Old MacBook has not returned online for live deployment or canary proof.
-- The production six-hour archive schedules remain disabled/unloaded on the
-  reachable hosts; the temporary canary labels are separate test jobs.
+- The six-hour labels are loaded on New and Studio, but their first runs have not
+  completed and no approximately 21,600-second elapsed-cycle receipt exists yet.
 - OpenClaw host collection has not been proven on New or Studio because the
   source is absent there; Mini and Old have no canary proof.
 - This checkout contains no separate tracked ranking, graph, or wiki entry for
@@ -95,6 +103,8 @@ The deployed runtime pins are:
 - Release bundle: `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`.
 - Structured evidence and read-only observation details:
   [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md).
+- Connector Drive receipt: folder ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`, doc ID
+  `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`.
 
 All paths above point to owner-only or temporary artifacts. They are references,
 not instructions to copy raw conversation data into Git.
