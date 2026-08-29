@@ -62,9 +62,9 @@ The deployed runtime pins are:
 - The owner-only Studio Google Drive DMG was staged and verified. Its observed
   size is 141,267,496 bytes and its SHA-256 is
   `fb6927060f8f20efb8ac2027d00a9c0787c111fa57c01fe6a29675afaf5c1178`.
-- The GitHub connector created/published the docs tree and read back connector
-  commit `fab57fa` (the tree matches local commit `6625a60`); the owned fork ref
-  is verified. The Drive connector created and verified the private `AI Chat
+- The GitHub connector created/published the docs tree and read back branch-tip
+  commit `249082d` (the tree matches local commit `7dbc965` content); the owned
+  fork ref is verified. The Drive connector created and verified the private `AI Chat
   Archive` folder and two body-free receipt docs inside it; no raw local-path
   upload was attempted.
 
