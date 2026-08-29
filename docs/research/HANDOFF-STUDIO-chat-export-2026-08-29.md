@@ -35,14 +35,42 @@ The following are repository/runtime invariants, not advice or a chat promise:
 
 At this amendment's readback, the lease still names
 `codex:macbook`/`01a046f9-9427-7343-9221-4135b50bc30f` as the sole release owner.
-At 2026-08-29T19:31:10Z, New and the Old retry queue were loaded locally under
-launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and exit 0. At
-2026-08-29T19:33:27Z, Studio's
+At 2026-08-29T19:50:54Z, New and the Old retry queue were loaded locally under
+launchd with `RunAtLoad=true`, `StartInterval=21600`; New was idle at `runs=1`,
+exit 0. At the same readback, Studio's
 `com.mattrotundo.ai-chat-archive.mac-studio` remained launchd-owned and
 running (pid `14336`, `runs=1`, `RunAtLoad=true`, `StartInterval=21600`); its
 latest persisted receipt was still `RunFailure`, so the canary is not a pass.
+Mini had 7,489,840 KiB free with the active CoreSimulator log at
+5,378,451,586 bytes and the closed `.prev` log at 15,403,577,516 bytes; no
+cleanup was authorized. Old MacBook SSH timed out and remains queued.
 No broad release or foreground canary was started for this amendment, and no
 second schema census or review wave was opened.
+
+### Matt-ratified execution addendum — structural gates, resumed 2026-08-29
+
+This addendum is an execution contract, not advice. The remaining work is
+allowed to advance only when these repository/runtime structures are true:
+
+- **Long-canary node:** every long canary is a loaded launchd job with an
+  absolute plist, owner-only durable logs, and a read-backable run/exit state.
+  The collector process must be launchd-owned; a terminal, agent, or chat
+  session may never own it. A foreground long canary is invalid, even if its
+  output looks healthy.
+- **Deployment lease:** before any deploy, merge, restart, or connector write,
+  the session reads the repo-root [`.deployment-lease.json`](../../.deployment-lease.json).
+  Its named owner is the sole release owner. Any other session reads the file
+  and stands down; only an owner-authored commit may transfer the lease.
+- **Schema freeze:** before any broad release, the tracked
+  [`SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`](../SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md)
+  must record one live-schema census, one canonical validator, and exactly one
+  review wave followed by one repair and one re-review. A different runtime
+  requires a new checkpoint; no second wave may be opened for this one.
+
+The successor must enforce these gates from the files and launchd readbacks,
+not from a missing chat instruction. The current lease remains with
+`codex:macbook`/`01a046f9-9427-7343-9221-4135b50bc30f`; do not mutate hosts or
+the release while that lease is held.
 
 ## 1. Goal and current intent
 
