@@ -3,8 +3,8 @@
 **Handoff date:** 2026-08-29
 **Origin:** MacBook documentation turn
 **Destination:** successor agent operating on the Mac Studio
-**Current mode:** the deployment goal is paused; this document is a handoff,
-not authorization to resume it.
+**Current mode:** the deployment goal is resumed by the named lease owner;
+this document is the durable handoff and does not transfer the lease.
 
 This is the complete context for a successor that has the repository but none of
 the originating agent's conversation history. Treat the timestamps and host
@@ -58,6 +58,18 @@ These rules are binding for the successor:
    do not repeat that failure mode.
 7. **Heartbeat.** If 24 hours pass without activity, send Matt one line with
    status or “closing, here's why.”
+
+8. **Lease is structure, not advice.** The repo-root
+   [`.deployment-lease.json`](../../.deployment-lease.json) names the one
+   release owner, session, scope, commit, and expiry. Every session must read
+   it before touching a host; a non-owner session must stand down. Lease
+   transfer requires an owner commit.
+9. **Schema freeze before a broad release.** The tracked
+   [`SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`](../SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md)
+   is the gate record: one live-schema census, one canonical
+   `validate_archive_object` validator, then exactly one batched review wave,
+   one repair, and one re-review. A later release needs a new checkpoint; do
+   not edit this record in place to bless a different runtime.
 
 The preceding work had the best ratio of the three attempts, but still spent
 17 review waves in 21 hours. That cadence is a process defect, not a reason to
@@ -124,6 +136,18 @@ and the body-free evidence receipt is
 - No separate tracked ranking, graph, or wiki entry exists in this checkout.
   Do not invent one; the live-state file and dated receipt are the durable
   repository record.
+
+### Lease and schema checkpoint
+
+- The active deployment lease is the repo-root `.deployment-lease.json`. At the
+  time of this handoff it names `codex:macbook` session
+  `01a046f9-9427-7343-9221-4135b50bc30f` as the sole release owner through
+  `2026-08-30T16:49:17Z`. A Studio successor must read the file and stand down
+  until the owner explicitly transfers it in a commit.
+- The reviewed release's schema-freeze record is
+  `docs/SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`. It records the one census,
+  canonical validator hash, and one review wave. Any broad release after
+  `3c732d7` is blocked until its own checkpoint is committed.
 
 ## 4. Exact file and commit map
 

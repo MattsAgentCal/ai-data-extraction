@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "repository": "0xSero/ai-data-extraction",
+  "branch": "matt/fleet-chat-archive-deployed",
+  "status": "active",
+  "owner": "codex:macbook",
+  "owner_session": "01a046f9-9427-7343-9221-4135b50bc30f",
+  "owner_host": "Mac.lan",
+  "scope": [
+    "GitHub publication",
+    "Google Drive publication",
+    "reachable-host canaries",
+    "Mini disk-gate coordination"
+  ],
+  "commit": "a2b40c9165a82b022054d4d470bf371cbc9890b4",
+  "started_at": "2026-08-29T16:49:17Z",
+  "expires_at": "2026-08-30T16:49:17Z",
+  "stand_down_if_owner_differs": true,
+  "transfer_requires_owner_commit": true
+}
