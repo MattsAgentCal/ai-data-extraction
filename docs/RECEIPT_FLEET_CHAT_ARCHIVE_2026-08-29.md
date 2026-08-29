@@ -18,7 +18,7 @@ review wave.
 |---|---|
 | Checkout | `matt/fleet-chat-archive-deployed`, clean after the docs/addendum commit |
 | Reviewed code commit | `3c732d7b1031949bd18db90ae4ac40f667f6cfa7` |
-| Docs/addendum commit | Local `6625a608fce312c0124d7bd92cca90b938373447` (tree `df6d14c6a477428a81e318f3fbf13b79bc892e07`) |
+| Latest readback commit before this receipt update | `182114dd6cff89018761b72f5387dfc6ad6daa89` (pushed/read back on the owned fork) |
 | Test command | `python3.14 -m unittest discover -s tests -p 'test*.py'` |
 | Test result | 263 tests ran, `OK` |
 | GitHub connector | Handoff structural amendment local `9b747927b6217287e035eecbdee8e6309a9e7f4d` was published/read back at owned-fork commit `56e8b7f5f8a7ad47acd36bcd0a901e95339d4f20`, parent `aa9bf992f5a0404dd124e85e20b8b0bce3e0a001` |

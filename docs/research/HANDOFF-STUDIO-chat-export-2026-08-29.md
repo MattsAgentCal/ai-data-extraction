@@ -340,6 +340,9 @@ and the body-free evidence receipt is
   checks, and a fresh bundle-clone check were also green before deployment.
 - The exact release is deployed and clean at the last check on New MacBook,
   Mac Studio, and Mac mini. The Old MacBook was not reachable.
+- The latest documentation/readback commit is
+  `182114dd6cff89018761b72f5387dfc6ad6daa89`, pushed to and read back on the
+  owned fork; this handoff is part of that commit.
 - New's latest body-free receipt is
   `20260829T195959.324876Z-be2608f7`, collected at
   `2026-08-29T20:19:56.940667Z`, with zero errors and
@@ -436,7 +439,8 @@ and the body-free evidence receipt is
 | Current live-state docs | Local `f455158563003a127ce234d48244cbc5480580dd`; owned-fork readback `19423503453ebf6371bff09b03361dd5fbafe417` | Records the connector canary and the 20:09:39Z host readback; successor should pull this tree. |
 | Prior docs reconciliation | `16889d0baf1086012691ac735ddcb0ca964e690b` (owned-fork branch tip before this amendment) | Records New's completed second refresh, the 20:26:10Z Drive connector import, and the 20:43:59Z Studio CPU-bound launchd diagnosis. The current branch tip is the commit that carries this handoff amendment. |
 | Ratified structural enforcement amendment | `8802714639e5d6f1cc4ab383d287ac71cb15e477` | Adds the manager's launchd-only, single-lease-owner, and schema-freeze structures to this handoff; pushed to the owned fork and read back. |
-| Post-amendment live-state reconciliation | `6b5488a3938afa4d4c0b49a906f861d537b5d402` | Records the 21:09:53Z Studio and 21:12:17Z New/Mini/Old readbacks in the handoff, live-state, and receipt docs; branch tip is clean and remote-matched. |
+| Post-amendment live-state reconciliation | `6b5488a3938afa4d4c0b49a906f861d537b5d402` | Records the 21:09:53Z Studio and 21:12:17Z New/Mini/Old readbacks in the handoff, live-state, and receipt docs; superseded by the later readbacks below. |
+| Latest execution readback docs | `182114dd6cff89018761b72f5387dfc6ad6daa89` | Records the 21:35:42Z Studio/Mini readback, corrects the stale README branch pointer, and is the current owned-fork tip at handoff time. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub
@@ -508,9 +512,9 @@ are `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.log` and
 ### New MacBook (`newmac` / local originating host)
 
 - The originating checkout is at docs commit
-  `16889d0baf1086012691ac735ddcb0ca964e690b` (runtime `3c732d7`).
+  `182114dd6cff89018761b72f5387dfc6ad6daa89` (runtime `3c732d7`).
 - Production label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded by
--  `launchctl print` shows the collector as the supervised process; no terminal
+  launchd. `launchctl print` shows the collector as the supervised process; no terminal
   owns it. The label is idle at `runs=2`, exit 0.
 - Current completed receipt: run ID
   `20260829T195959.324876Z-be2608f7`, collected at
