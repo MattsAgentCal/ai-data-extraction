@@ -72,6 +72,25 @@ conversation bytes were opened or copied into this receipt.
 - A completed six-hour elapsed-cycle receipt and OpenClaw host collection proof.
 - Separate ranking, graph, or wiki entry: none exists in the tracked checkout.
 
+## Reconciliation addendum — 2026-08-29T19:09:31Z
+
+This addendum supersedes only the live-state observations above; the original
+19:00Z snapshot remains preserved as historical evidence.
+
+| Check | Current readback |
+|---|---|
+| MacBook/New | Launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, state `not running`, exit 0. Receipt `20260829T184200.680506Z-3949348d` (`collected_at=2026-08-29T19:03:34.040125Z`) is `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, with 9 new Codex objects and OpenClaw absent. |
+| Mac Studio | Launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336`, state `running`; the current attempt is launchd-owned and began at 18:42Z. Latest persisted receipt `20260829T164025.921717Z-279ff85a` is `failed` with `RunFailure` and `publication=not_attempted`; no elapsed six-hour proof exists. |
+| Mini | Runtime remains `3c732d7`; free capacity `7,537,844 KiB`; active `CoreSimulator.log` is `5,339,541,128` bytes and closed `CoreSimulator.prev.log` is `15,403,577,516` bytes. No cleanup or canary was performed. |
+| Old MacBook | `ssh oldmac` timed out again at 19:07Z; retry remains queued/offline and non-blocking. |
+| Drive | Studio CloudStorage contains zero `GoogleDrive-*` providers. The connector folder and two body-free docs remain verified; raw object publication and new-chat-in-Drive proof are absent. |
+| GitHub | Connector branch tip is `dd5d3063fafd15db495d879ffdc814a854e4c6b3`, tree `315acb0333de33173d64c02e544e2e38822cb846`, matching local `cab761c` content. |
+
+The deployment lease and schema-freeze checkpoint remain binding structural
+controls: every long canary is launchd-owned, non-owner sessions stand down via
+`.deployment-lease.json`, and a broad release requires one live-schema census,
+one canonical validator, and one review wave.
+
 This receipt intentionally contains no message content, credentials, or raw
 archive object. It is safe to commit; the body-bearing receipt files remain
 owner-only outside Git.

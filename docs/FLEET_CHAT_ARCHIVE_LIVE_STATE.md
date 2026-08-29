@@ -1,6 +1,6 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-08-29T19:00:00Z
+**Last reconciled:** 2026-08-29T19:09:31Z
 **State:** active deployment; the MacBook lease owner is running the reachable-host canaries and Drive connector publication. Mini disk approval and Old MacBook reachability remain external gates.
 
 This file is the repository's canonical rollout state. It records body-free
@@ -13,9 +13,9 @@ bodies, indexes, and other private archive data remain outside Git.
 |---|---|
 | Reviewed release | `3c732d7b1031949bd18db90ae4ac40f667f6cfa7` (`Rollback cleanly on terminal hangup`) |
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
-| Repository checkout | MacBook and Studio clean at docs commit `5cd62dab6e4b5898cddfc8404b398525636fde00`; Mini clean at runtime `3c732d7` |
+| Repository checkout | MacBook docs checkout at `cab761c`; Studio runtime checkout at `3c732d7`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub connector publication | Fork branch `MattsAgentCal/ai-data-extraction:matt/fleet-chat-archive-deployed` read back at connector commit `249082dba1cd3d7909eacb98f583c99717e12c91`; tree `80dcb504ef1b3131547c0db6414a3bd570e4ce68` matches local `7dbc965` content |
+| GitHub connector publication | Fork branch `MattsAgentCal/ai-data-extraction:matt/fleet-chat-archive-deployed` read back at connector commit `dd5d3063fafd15db495d879ffdc814a854e4c6b3`; tree `315acb0333de33173d64c02e544e2e38822cb846` matches local `cab761c` content |
 | Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; folder listing and bodies read back successfully |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
@@ -34,10 +34,10 @@ The deployed runtime pins are:
 
 | Host | Observed truth | Classification |
 |---|---|---|
-| New MacBook | Clean at `5cd62da` (runtime `3c732d7`). `com.mattrotundo.ai-chat-archive.new-macbook` is loaded under launchd, `runs=1`, `state=running`, and `StartInterval=21600`; its first live scan is in-flight. Last completed receipt: `2026-08-29T16:31:24.467081Z`, zero errors, `blocked_no_drive_root`, OpenClaw absent. | **DONE:** checkout, preflight, persistent schedule. **IN-FLIGHT:** first supervised scan and six-hour elapsed proof. |
-| Mac Studio | Clean at `5cd62da` (runtime `3c732d7`). `com.mattrotundo.ai-chat-archive.mac-studio` is loaded under launchd, `runs=1`, `state=running`, and `StartInterval=21600`; its first live scan is in-flight. Last completed receipt: `2026-08-29T16:40:20.517359Z`, zero errors, `blocked_drive_unavailable`; New pulled 1131/1131, Mini `pending_manifest`, Old unreachable. | **DONE:** checkout, preflight, persistent schedule, connector folder/receipt doc. **IN-FLIGHT:** File Provider mount, raw shard publication, first supervised scan, and six-hour elapsed proof. |
-| Mac mini | Clean at runtime `3c732d7`; no archive label is loaded. Free capacity `7,569,896 KiB`; active `CoreSimulator.log` `5,309,541,094` bytes, closed `CoreSimulator.prev.log` `15,403,577,516` bytes. | **DONE:** read-only disk census. **NOT STARTED:** approved cleanup, canary, schedule. |
-| Old MacBook | `ssh oldmac` timed out. No live source inventory, deployment, or canary proof exists. Earlier retry proof recorded run count 1 -> 2, exit 0, zero stderr delta, `offline_retryable`/`ssh_unreachable`; retry label remains unloaded on New. | **DONE:** retry behavior proof. **IN-FLIGHT:** queued retry. **NOT STARTED:** online deployment/canary. |
+| New MacBook | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.new-macbook` is loaded under launchd, `runs=1`, `state=not running` after exit 0, and `StartInterval=21600`. Current receipt `20260829T184200.680506Z-3949348d` reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, 9 new Codex objects, and OpenClaw absent. | **DONE:** checkout, preflight, persistent schedule, one successful supervised scan. **IN-FLIGHT:** six-hour elapsed proof and Drive publication. |
+| Mac Studio | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.mac-studio` is loaded under launchd, `runs=1`, `state=running`, pid `14336`, and `StartInterval=21600`. Latest persisted receipt `20260829T164025.921717Z-279ff85a` failed with `RunFailure`; the current launchd attempt began at 18:42Z and remains in-flight. CloudStorage has zero `GoogleDrive-*` providers. | **DONE:** checkout, preflight, persistent schedule, connector folder/receipt doc. **IN-FLIGHT:** current supervised scan, File Provider mount, raw shard publication, and six-hour elapsed proof. |
+| Mac mini | Clean at runtime `3c732d7`; no archive label is loaded. Free capacity `7,537,844 KiB`; active `CoreSimulator.log` `5,339,541,128` bytes, closed `CoreSimulator.prev.log` `15,403,577,516` bytes. | **DONE:** read-only disk census. **NOT STARTED:** approved cleanup, canary, schedule. |
+| Old MacBook | `ssh oldmac` timed out again at 19:07Z. No live source inventory, deployment, or canary proof exists. Earlier retry proof recorded run count 1 -> 2, exit 0, zero stderr delta, `offline_retryable`/`ssh_unreachable`; retry label remains unloaded on New. | **DONE:** retry behavior proof. **IN-FLIGHT:** queued retry. **NOT STARTED:** online deployment/canary. |
 
 ## DONE
 
@@ -50,9 +50,9 @@ The deployed runtime pins are:
 - The runtime release is deployed to the reachable New MacBook, Mac Studio, and
   Mac mini. The docs/addendum commit is published to the owned GitHub fork and
   pulled to Studio; the Studio and New worktrees are clean at that docs commit.
-- Body-free canary receipts were produced on New and Studio with zero parsed
-  errors. They correctly report absent harnesses and blocked Drive publication
-  rather than treating those conditions as success.
+- A current body-free, zero-error supervised receipt was produced on New. Studio
+  has prior zero-error receipts, but the latest persisted attempt failed and the
+  current launchd attempt has not completed.
 - The Studio Claude index repair was completed with a manifest-bound restore;
   the interrupted index backup remains at
   `/Users/calstudio/.local/share/ai-chat-archive-repair-proof.BCwlg8/live-current-index.backup.json`.
@@ -63,15 +63,16 @@ The deployed runtime pins are:
   size is 141,267,496 bytes and its SHA-256 is
   `fb6927060f8f20efb8ac2027d00a9c0787c111fa57c01fe6a29675afaf5c1178`.
 - The GitHub connector created/published the docs tree and read back branch-tip
-  commit `249082d` (the tree matches local commit `7dbc965` content); the owned
+  commit `dd5d3063` (the tree matches local commit `cab761c` content); the owned
   fork ref is verified. The Drive connector created and verified the private `AI Chat
   Archive` folder and two body-free receipt docs inside it; no raw local-path
   upload was attempted.
 
 ## IN-FLIGHT
 
-- The first production six-hour launchd labels on New and Studio are loaded with
-  durable owner-only logs and currently executing their first live scans. Their
+- The production six-hour launchd labels on New and Studio are loaded with
+  durable owner-only logs. New's first RunAtLoad scan completed with exit 0;
+  Studio's current first attempt remains active after a prior `RunFailure`. The
   launchd configuration proves persistent supervision and a 21,600-second
   interval; it does not yet prove an elapsed six-hour cycle.
 - The connector receipt is published, but the runtime still reports

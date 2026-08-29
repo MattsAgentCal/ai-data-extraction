@@ -57,10 +57,14 @@ These rules are binding for the successor:
    Do not let other agents deploy, merge, restart, or overwrite this repo while
    the lease is held.
 6. **Persistent supervision for long canaries.** A long canary must be owned
-   by launchd (a persistent wrapper with durable stdout, stderr, exit status,
-   and KeepAlive/retry behavior), never by a terminal, chat session, or agent
-   process. The prior run had two canaries die with their controlling sessions;
-   do not repeat that failure mode.
+   by launchd, never by a terminal, chat session, or agent process. The
+   launchd-owned node must have durable stdout, stderr, and read-backable run
+   and exit state. The shipped six-hour archive plist is an interval supervisor
+   (`RunAtLoad=true`, `StartInterval=21600`); it does not contain `KeepAlive`, so
+   do not describe it as a KeepAlive job. If a long canary needs retry-on-exit,
+   that retry policy must be explicit in its own launchd plist. The prior run
+   had two canaries die with their controlling sessions; do not repeat that
+   failure mode.
 7. **Heartbeat.** If 24 hours pass without activity, send Matt one line with
    status or “closing, here's why.”
 
@@ -80,9 +84,21 @@ The preceding work had the best ratio of the three attempts, but still spent
 17 review waves in 21 hours. That cadence is a process defect, not a reason to
 continue it. Preserve the one-wave rule above.
 
+### Structural enforcement (artifacts, not advice)
+
+| Control | Required repository/runtime structure | Read-only pass proof | Failure action |
+|---|---|---|---|
+| Long canary ownership | A launchd label and plist own every long canary. The plist uses absolute repo/config paths, owner-only stdout/stderr, `Umask=077`, and a background process. A terminal or agent may install/read the job but may not own the collector process. | `launchctl print gui/<uid>/<label>` shows the loaded service, process/run state, paths, and interval; the receipt and exit state are in the owner-only paths. | Do not call the canary started or passed; stop before any foreground fallback. |
+| Release ownership | Repo-root [`.deployment-lease.json`](../../.deployment-lease.json) is the single source of owner, session, host, scope, and expiry. | Read the file and compare the current session/host before any deployment, restart, merge, or connector write. | Any non-owner session stands down; transfer requires an owner commit. |
+| Broad-release schema | [`SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`](../SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md) is a release gate, not a note. | The checkpoint contains exactly one live-schema census, one canonical `validate_archive_object` validator/hash, and one batched review-wave result. | No broad release; create a new checkpoint for a new runtime instead of editing this one in place. |
+
+These structures are binding even when a chat message is unavailable. A loaded
+plist without a supervised process readback, a lease that names another owner,
+or a missing/future schema checkpoint is a hard stop.
+
 ## 3. Honest state during active deployment
 
-Last live reconciliation was 2026-08-29T19:00:00Z. The canonical repository
+Last live reconciliation was 2026-08-29T19:07:28Z. The canonical repository
 state is [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](../FLEET_CHAT_ARCHIVE_LIVE_STATE.md)
 and the body-free evidence receipt is
 [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](../RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md).
@@ -99,36 +115,41 @@ and the body-free evidence receipt is
   checks, and a fresh bundle-clone check were also green before deployment.
 - The exact release is deployed and clean at the last check on New MacBook,
   Mac Studio, and Mac mini. The Old MacBook was not reachable.
-- New and Studio have body-free, zero-error canary receipts. They correctly
-  report absent harnesses and blocked Drive publication rather than calling
-  those states success.
+- New has a current body-free, zero-error receipt. Studio has prior body-free,
+  zero-error receipts, but its latest persisted attempt ended with
+  `RunFailure`; the currently running launchd attempt is not yet a pass.
 - Studio's manifest-bound Claude index repair is complete; its interrupted-index
   backup is retained. The Old retry implementation was reviewed and its
   offline behavior was previously proven (run count 1 -> 2, exit 0, zero
   stderr delta, `offline_retryable`/`ssh_unreachable`).
 - The owner-only Google Drive DMG is staged and verified on Studio. It is not
   installed and no provider is mounted.
-- The GitHub connector published the current docs tree and read back connector
-  commit `249082dba1cd3d7909eacb98f583c99717e12c91` (tree
-  `80dcb504ef1b3131547c0db6414a3bd570e4ce68`, matching local `7dbc965` content).
+- The GitHub connector published the current docs tree through the owned fork:
+  branch tip `dd5d3063fafd15db495d879ffdc814a854e4c6b3`, tree
+  `315acb0333de33173d64c02e544e2e38822cb846`, matching local `cab761c`
+  content at the last connector readback.
 - The Drive connector created and verified the private folder `AI Chat Archive`
   (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and published/read back a body-free
   receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`) plus a launchd
   schedule receipt doc (ID `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`). No
   raw local-path upload was attempted.
 - New and Studio have their production six-hour labels loaded by launchd with
-  `RunAtLoad=true` and `StartInterval=21600`; the first live scans were still
-  running at the last check.
+  `RunAtLoad=true` and `StartInterval=21600`. New's current run has completed;
+  Studio's current run remains in-flight after its prior failed receipt.
 
 ### IN-FLIGHT — do not call these complete
 
-- New's last completed receipt (2026-08-29T16:31:24.467081Z) exited 0 with
-  `completed_with_absent_harnesses`, zero errors, and `blocked_no_drive_root`;
-  its first production launchd scan is in-flight.
-- Studio's last completed receipt (2026-08-29T16:40:20.517359Z) exited 0 with
-  `completed_with_absent_harnesses`, zero errors, and `blocked_drive_unavailable`;
-  New was pulled 1131/1131, Mini was `pending_manifest`, and Old was
-  `unreachable`. Its first production launchd scan is in-flight.
+- New's current receipt is run
+  `20260829T184200.680506Z-3949348d`, collected at
+  `2026-08-29T19:03:34.040125Z`, with
+  `completed_with_absent_harnesses`, zero errors, publication
+  `blocked_no_drive_root`, 9 new Codex objects, and OpenClaw absent. Its
+  launchd label is loaded and idle after `runs=1`, exit 0.
+- Studio's latest persisted receipt is run
+  `20260829T164025.921717Z-279ff85a`, collected at
+  `2026-08-29T16:42:06Z`, with `failed`/`RunFailure` and publication
+  `not_attempted`. A new launchd-owned attempt is running as pid 14336 at the
+  19:07:21Z check; do not call it passed until its receipt is read back.
 - A loaded six-hour plist proves persistent scheduling only. The next receipt
   after approximately 21,600 seconds and a new Drive object remain unproven.
 
@@ -143,7 +164,8 @@ and the body-free evidence receipt is
   retry label is currently disabled/unloaded on New; “previously proven retry
   behavior” is not the same as “active queue.”
 - New and Studio production six-hour archive schedules are loaded under launchd;
-  the first scans and elapsed-cycle proof remain in-flight.
+  the elapsed-cycle proof remains in-flight. New has one completed RunAtLoad
+  scan, but no approximately 21,600-second follow-up receipt.
 - OpenClaw host collection is not proven on New or Studio because the source is
   absent there; Mini and Old have no canary proof.
 - No separate tracked ranking, graph, or wiki entry exists in this checkout.
@@ -176,7 +198,7 @@ and the body-free evidence receipt is
 | Documentation commit | `5e982165e7ff4b05e10931a9466ce0888da52bc6` | Adds the live-state and receipt docs and corrects README/fleet-guide drift. |
 | Handoff parent | `a2b40c9165a82b022054d4d470bf371cbc9890b4` | Adds this handoff before the addendum. |
 | Lease/schema addendum | `5cd62dab6e4b5898cddfc8404b398525636fde00` | Adds `.deployment-lease.json`, schema-freeze checkpoint, and the binding lease/launchd rules. |
-| Active docs reconciliation | Local `6625a608fce312c0124d7bd92cca90b938373447`; connector publication `fab57fa8c71cdcfa769cb1bbad1f145d18061d56` | Reconciles live launchd/Drive state; connector commit has the same tree with connector-generated metadata. |
+| Active docs reconciliation | Local `cab761c498b61d1ebceee634e28a1c7b9f3f9dab`; connector publication `dd5d3063fafd15db495d879ffdc814a854e4c6b3` (tree `315acb0333de33173d64c02e544e2e38822cb846`) | Current published docs tree; connector commit has the same tree with connector-generated metadata. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub
@@ -247,33 +269,37 @@ are `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.log` and
 
 ### New MacBook (`newmac` / local originating host)
 
-- Checkout is clean at docs commit `5cd62da` (runtime `3c732d7`).
+- The originating checkout is at docs commit `cab761c` (runtime `3c732d7`).
 - Production label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded by
   launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and a live
   first scan. `launchctl print` shows the collector as the supervised process;
   no terminal owns it.
-- Last completed receipt: run ID
-  `20260829T162603.931669Z-89cb9c13`, collected at
-  `2026-08-29T16:31:24.467081+00:00`; status
+- Current completed receipt: run ID
+  `20260829T184200.680506Z-3949348d`, with status
   `completed_with_absent_harnesses`, errors 0, publication
-  `blocked_no_drive_root`; Claude/Codex/Hermes had no new conversations and
-  OpenClaw was `not_present_on_host`.
+  `blocked_no_drive_root`; Codex collected 9 conversations/9 new objects with
+  3,143 redactions, Claude and Hermes had no new conversations, and OpenClaw
+  was `not_present_on_host`. The label is loaded and idle after `runs=1`, exit
+  0; the six-hour elapsed proof is still absent.
 - Old retry remains unloaded; it is a queued offline retry, not an active proof.
 
 ### Mac Studio (`studio` / successor host)
 
-- Read-only SSH now finds a clean checkout at docs commit `5cd62da` (runtime
-  `3c732d7`).
+- Read-only SSH finds the shipped runtime at `3c732d7` and the checkout path
+  `/Users/calstudio/Projects/ai-data-extraction`.
 - Production label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded by
   launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and a live
   first scan. `launchctl print` shows the collector as the supervised process;
   no terminal owns it.
-- Last completed receipt: run ID
-  `20260829T153756.562461Z-d1520afe`, collected at
-  `2026-08-29T16:40:20.517359+00:00`; status
-  `completed_with_absent_harnesses`, errors 0, publication
-  `blocked_drive_unavailable`. It reported Claude 4 conversations/3 new
-  objects, Codex 7/7, Hermes 0, and OpenClaw `not_present_on_host`.
+- The latest persisted receipt is run ID
+  `20260829T164025.921717Z-279ff85a`, collected at
+  `2026-08-29T16:42:06Z`; status/collection_status `failed`, error component
+  `run`/code `RunFailure`, and publication `not_attempted`. The prior successful
+  receipt remains `20260829T153756.562461Z-d1520afe` with
+  `blocked_drive_unavailable`.
+- At 19:09:31Z, launchd showed `state=running`, `runs=1`, pid `14336`, about
+  27 minutes elapsed, and `StartInterval=21600`. The current run is launchd
+  owned; its result is not yet known.
 - Hub statuses were New `pulled` (1131/1131), Mini `pending_manifest`, and Old
   `unreachable`. The connector receipt is in Drive folder
   `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; no local File Provider mount is visible.
@@ -282,8 +308,8 @@ are `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.log` and
 
 - Read-only SSH found a clean checkout at `3c732d7`; no production archive label
   is enabled.
-- Free capacity was 7,569,896 KiB (about 7.22 GiB). The active
-  `CoreSimulator.log` is 5,309,541,094 bytes. The closed
+- Free capacity was 7,537,844 KiB (about 7.19 GiB). The active
+  `CoreSimulator.log` is 5,339,541,128 bytes. The closed
   `CoreSimulator.prev.log` is 15,403,577,516 bytes with zero open handles.
 - No cleanup, compression, or real canary was started. The only proposed
   cleanup is the closed, zero-handle log; never delete or compress the active
@@ -291,7 +317,7 @@ are `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.log` and
 
 ### Old MacBook (`oldmac`)
 
-- SSH timed out at the reconciliation check. No live inventory, deployment, or
+- SSH timed out again at 19:07Z. No live inventory, deployment, or
   canary proof exists.
 - The earlier final-pin retry proof advanced run count 1 -> 2, exited 0, had
   zero stderr delta, and reported `offline_retryable`/`ssh_unreachable`.
@@ -368,11 +394,12 @@ the six-hour automation path, while the controlling session is gone.
 Current execution evidence: New label
 `com.mattrotundo.ai-chat-archive.new-macbook` and Studio label
 `com.mattrotundo.ai-chat-archive.mac-studio` are both loaded by launchd with
-`RunAtLoad=true`, `StartInterval=21600`, and `runs=1`; their first live scans were
-still active at the last observation. This proves persistent supervision and
-the configured interval only. It does not prove the elapsed six-hour cycle,
-runtime `published` status, or a new chat visible in Drive. The Drive connector
-receipt doc is a body-free manifest and is not that proof.
+`RunAtLoad=true` and `StartInterval=21600`. New's RunAtLoad scan has completed
+with exit 0; Studio's current run is still active after a prior `RunFailure`.
+This proves launchd ownership and the configured interval only. It does not
+prove the elapsed six-hour cycle, runtime `published` status, or a new chat
+visible in Drive. The Drive connector receipt doc is a body-free manifest and
+is not that proof.
 
 ### A. Verify the shipped build and supervisor
 
@@ -392,10 +419,11 @@ inspect the temporary canary only through launchd and its files, for example:
 launchctl print gui/$(id -u)/com.mattrotundo.ai-chat-archive.canary-final-3c-studio
 ```
 
-For any new long canary, submit a dedicated launchd wrapper with `KeepAlive`,
-absolute repo/config paths, owner-only stdout/stderr, and an exit-code file.
-Record the label and receipt directory before starting. Do not run the Python
-process from a terminal or agent session.
+For any new long canary, submit a dedicated launchd wrapper with absolute
+repo/config paths, owner-only stdout/stderr, and an exit-code file; add an
+explicit `KeepAlive`/retry policy when retry-on-exit is required. Record the
+label and receipt directory before starting. Do not run the Python process from
+a terminal or agent session.
 
 ### B. Run the live-shaped preflight, then one canary
 
