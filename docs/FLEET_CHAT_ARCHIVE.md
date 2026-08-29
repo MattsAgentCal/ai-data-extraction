@@ -1,6 +1,6 @@
 # Fleet chat archive
 
-This local extension turns the upstream one-shot extractors into a recurring private archive for four explicitly approved harnesses: Claude Code, Codex, OpenClaw, and Hermes. No other source kind is accepted; in particular, Messages/iMessage is not supported. The implementation is locally tested; the fleet rollout table below is the source of truth for live readiness.
+This local extension turns the upstream one-shot extractors into a recurring private archive for four explicitly approved harnesses: Claude Code, Codex, OpenClaw, and Hermes. No other source kind is accepted; in particular, Messages/iMessage is not supported. The implementation is locally tested; [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](FLEET_CHAT_ARCHIVE_LIVE_STATE.md) is the source of truth for live readiness, and [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md) holds the dated body-free evidence.
 
 ## Data path
 
@@ -97,19 +97,20 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Host state as of 2026-08-28
+## Host state as of 2026-08-29T14:54:14Z
 
 | Host | Verified rollout truth | Scheduler / blocker |
 |---|---|---|
-| New MacBook | Prior local canary green | Scheduler disabled pending reviewed trusted-stream release |
-| Mac Studio | Prior local canary green | Scheduler disabled pending reviewed trusted-stream release |
-| Mac mini | Storage-blocked; no current release proof | Clear storage and rerun reviewed canary before enabling |
-| Old MacBook | Offline | Requires live deployment and canary proof after it returns |
+| New MacBook | Clean at reviewed release `3c732d7`; temporary final-release canary has 137 valid receipts and zero parsed errors through 2026-08-29T14:41:25Z. OpenClaw is absent on this host. | Production six-hour label is disabled; temporary final-release canary remains loaded under KeepAlive. |
+| Mac Studio | Clean at reviewed release `3c732d7`; temporary final-release canary has 28 valid receipts and zero parsed errors through 2026-08-29T14:29:11Z. Its latest hub statuses were Mini `pending_manifest`, New `unreachable`, and Old `unreachable`. | Production six-hour label is disabled; temporary final-release canary remains loaded under KeepAlive. Drive publication is unavailable until sign-in. |
+| Mac mini | Clean at reviewed release `3c732d7`; no real canary has run. Free capacity was 7,687,332 KiB at the read-only check, with an active 5.1 GB CoreSimulator log. | No production label is enabled; storage approval is required before the canary. |
+| Old MacBook | Offline; `oldmac` timed out at the reconciliation check. | No live deployment or canary proof; earlier retry behavior proof is retained but the current retry label is disabled/unloaded. |
 
 `configs/old-macbook.pending.json` is a placeholder, not a deployment receipt. It must be checked against the live host before installation.
 
-Google Drive is absent on the Studio and remains a human-gated completion step.
-No scheduler should be enabled merely to test Drive publication.
+Google Drive is not installed or mounted on the Studio and remains a human-gated
+completion step. The owner-only DMG is staged and verified; no scheduler should
+be enabled merely to test Drive publication.
 
 Existing v1 objects, nullable-session rows, and legacy base-format Codex rows
 are not trusted or silently migrated by the new stream.
@@ -132,8 +133,10 @@ Install or refresh the per-user six-hour launchd job:
 python3 fleet_chat_archive.py install-launchd --config configs/new-macbook.json --interval-seconds 21600
 ```
 
-Do not run the install command for the current rollout until the trusted-stream
-commit has been reviewed and deployed to the exact configured helper paths.
+The trusted-stream commit is reviewed and deployed to the reachable configured
+helper paths. Keep the production install command disabled until the live-state
+gates are cleared; the temporary final-release canary labels are separate test
+jobs and are not production schedules.
 
 The Studio config polls `newmac`, `cals-mac-mini`, and `oldmac` only when its
 scheduler or a reviewed manual run is active. An offline remote is recorded as
@@ -154,9 +157,10 @@ File Provider appears, the pipeline creates and uses this private folder:
 ```
 
 Zero providers remain blocked as unavailable; multiple signed-in Google accounts
-remain blocked as ambiguous instead of guessing. After a reviewed release,
-deployment, explicit human sign-in, and scheduler enablement, a Studio run can
-pull current remote shards and publish them. Completion requires a new chat
-object and its body-free receipt to appear in the mounted Drive folder, pass the
-built-in content-hash verification, and report `published`. This human gate has
-not yet been run against a live Google Drive mount.
+remain blocked as ambiguous instead of guessing. After explicit human sign-in,
+provider discovery, and an authorized production schedule, a Studio run can pull
+current remote shards and publish them. Completion requires a new chat object and
+its body-free receipt to appear in the mounted Drive folder, pass the built-in
+content-hash verification, and report `published`. This human gate has not yet
+been run against a live Google Drive mount; see the dated receipt and live-state
+file for the exact pause classification.

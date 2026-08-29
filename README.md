@@ -1,6 +1,6 @@
 # AI Coding Assistant Training Data Extraction Toolkit
 
-> Matt fleet extension: see [`docs/FLEET_CHAT_ARCHIVE.md`](docs/FLEET_CHAT_ARCHIVE.md) for the locally tested, four-harness, content-addressed archive pipeline. Live deployment is pending on the reachable Macs; the Old MacBook and Google Drive canary remain unverified. It adds OpenClaw and Hermes support, local credential redaction, recurring launchd jobs, host isolation, receipts, and a Google Drive publication gate. Do not use `extract_all.sh` for that pipeline.
+> Matt fleet extension: see [`docs/FLEET_CHAT_ARCHIVE.md`](docs/FLEET_CHAT_ARCHIVE.md) for the four-harness, content-addressed archive pipeline and [`docs/FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](docs/FLEET_CHAT_ARCHIVE_LIVE_STATE.md) for the current rollout truth. Reviewed release `3c732d7` is deployed to the reachable New MacBook, Mac Studio, and Mac mini; the verification receipt records 263/263 tests. The temporary New/Studio canaries remain in-flight, Old MacBook is offline, and Google Drive is still login-gated. It adds OpenClaw and Hermes support, local credential redaction, recurring launchd jobs, host isolation, receipts, and a Google Drive publication gate. Do not use `extract_all.sh` for that pipeline.
 
 Complete toolkit to extract ALL chat, agent, and code context data from AI coding assistants for machine learning training.
 
