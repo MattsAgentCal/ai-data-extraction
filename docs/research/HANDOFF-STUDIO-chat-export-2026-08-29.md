@@ -207,19 +207,19 @@ and the body-free evidence receipt is
   stderr delta, `offline_retryable`/`ssh_unreachable`).
 - The owner-only Google Drive DMG is staged and verified on Studio. It is not
   installed and no provider is mounted.
-- The GitHub connector published the Matt-ratified structural addendum through
-  the owned fork: readback commit
-  `86b505319b9fd30601773fd362d0af4fa704fa38`, tree
-  `78478c927b63d01d32d558f01a6639cf1a5e45cf`, matching local `9dd6bfe`
-  content. The owned fork ref was independently verified; do not infer a
-  different remote SHA.
+- The GitHub connector published the structural handoff amendment through the
+  owned fork: latest readback commit
+  `19423503453ebf6371bff09b03361dd5fbafe417` (parent
+  `56e8b7f5f8a7ad47acd36bcd0a901e95339d4f20`), whose tree contains local docs
+  commit `f455158563003a127ce234d48244cbc5480580dd`. The owned fork ref was
+  independently verified; do not infer a different remote SHA.
 - The Drive connector created and verified the private folder `AI Chat Archive`
-  (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and published/read back a body-free
+  (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`), published/read back a body-free
   receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`) plus a launchd
-  schedule receipt doc (ID `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`). A
-  current folder listing contains exactly those two native Docs and no raw
-  files; the connector upload action accepts only an authenticated connector
-  file reference, not a private local path.
+  schedule receipt doc (ID `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`), and
+  verified one 654-byte redacted Codex text canary (ID
+  `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5`) in the folder. Runtime JSON/raw shard
+  publication remains separate and blocked without the Studio File Provider.
 - New and Studio have their production six-hour labels loaded by launchd with
   `RunAtLoad=true` and `StartInterval=21600`. New's current run has completed;
   Studio's current run remains in-flight after its prior failed receipt.
@@ -286,7 +286,8 @@ and the body-free evidence receipt is
 | Documentation commit | `5e982165e7ff4b05e10931a9466ce0888da52bc6` | Adds the live-state and receipt docs and corrects README/fleet-guide drift. |
 | Handoff parent | `a2b40c9165a82b022054d4d470bf371cbc9890b4` | Adds this handoff before the addendum. |
 | Lease/schema addendum | `5cd62dab6e4b5898cddfc8404b398525636fde00` | Adds `.deployment-lease.json`, schema-freeze checkpoint, and the binding lease/launchd rules. |
-| Active docs reconciliation | Matt-ratified addendum local `9dd6bfe...`; connector publication `86b505319b9fd30601773fd362d0af4fa704fa38` (tree `78478c927b63d01d32d558f01a6639cf1a5e45cf`) | Connector readback matches the local amendment; the owned fork ref is verified. |
+| Structural handoff amendment | Local `9b747927b6217287e035eecbdee8e6309a9e7f4d`; owned-fork readback `56e8b7f5f8a7ad47acd36bcd0a901e95339d4f20` | Encodes the Matt-ratified launchd/lease/schema structures; ref independently verified. |
+| Current live-state docs | Local `f455158563003a127ce234d48244cbc5480580dd`; owned-fork readback `19423503453ebf6371bff09b03361dd5fbafe417` | Records the connector canary and the 20:09:39Z host readback; successor should pull this tree. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub
