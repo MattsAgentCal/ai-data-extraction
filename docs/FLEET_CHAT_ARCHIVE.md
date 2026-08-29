@@ -23,6 +23,21 @@ The Google Drive account is needed on only the Studio. Host folders never share 
 - Malformed or missing configured sources are marked incomplete and are not published. Prior index rows and immutable objects remain discoverable.
 - Remote shards are emitted from no-follow byte snapshots while the source archive lock is held, staged owner-only on the receiver, symlink-rejected, content-hash verified, and transactionally published without overwriting a differing immutable object. A process lock serializes scheduled and manual runs.
 - Publication positively requires a mounted path below the current user's `~/Library/CloudStorage/GoogleDrive-*`. Production configs cannot bypass this gate.
+- Every long canary is a launchd-owned node, never a foreground terminal or
+  agent process. Its plist must expose absolute repo/config paths, owner-only
+  stdout/stderr, `Umask=077`, and read-backable run/exit state; a loaded
+  `RunAtLoad`/`StartInterval` job proves supervision and cadence, not Drive
+  publication.
+- The repo-root [`.deployment-lease.json`](../.deployment-lease.json) is the
+  machine-readable release-owner gate. A session must read and match its owner,
+  host, session, branch, scope, and expiry before any deploy, restart, merge, or
+  connector write; every other session stands down. Transfer requires an owner
+  commit.
+- Before any broad release, the tracked
+  [`SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`](SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md)
+  must record exactly one live-schema census, one canonical
+  `validate_archive_object` validator/hash, and one batched review wave. A new
+  runtime requires a new checkpoint; this record is not edited in place.
 - Existing and newly copied objects are verified against their content-addressed filenames and approved harness provenance before publication; receipts, indexes, and the final manifest are verified after copying.
 - No pipeline command deletes a source chat or destroys a superseded archive body. A changed `(harness, source, session_id)` replaces its live index row; the prior object remains available for rollback until the healthy manifest commits, then moves to owner-only quarantine. Healthy remote snapshot replacement likewise quarantines a superseded last-good tree instead of discarding its stale body.
 
@@ -97,14 +112,14 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Host state as of 2026-08-29T18:45:00Z
+## Host state as of 2026-08-29T19:09:31Z
 
 | Host | Verified rollout truth | Scheduler / blocker |
 |---|---|---|
-| New MacBook | Clean at docs commit `5cd62da` (runtime `3c732d7`); launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded and running its first live scan. The last completed receipt was `2026-08-29T16:31:24.467081Z`, with `completed_with_absent_harnesses`, zero errors, and `blocked_no_drive_root`; OpenClaw is absent. | `RunAtLoad=true`, `StartInterval=21600`; first scan is **IN-FLIGHT**. Runtime Drive publication remains blocked with no File Provider root. |
-| Mac Studio | Clean at docs commit `5cd62da` (runtime `3c732d7`); launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded and running its first live scan. The last completed receipt was `2026-08-29T16:40:20.517359Z`, with `completed_with_absent_harnesses`, zero errors, and `blocked_drive_unavailable`; hub statuses were Mini `pending_manifest`, New `pulled` (1131/1131), and Old `unreachable`. | `RunAtLoad=true`, `StartInterval=21600`; first scan is **IN-FLIGHT**. Connector folder/doc exists, but no local File Provider mount is present. |
-| Mac mini | Clean at runtime `3c732d7`; no production archive label is enabled. Free capacity was 7,569,896 KiB at the current check; `CoreSimulator.log` is 5,309,541,094 bytes and active, while `CoreSimulator.prev.log` is 15,403,577,516 bytes and closed. | Storage approval is required before any canary or schedule; no cleanup was performed. |
-| Old MacBook | Offline; `oldmac` timed out at the reconciliation check. | No live deployment or canary proof; earlier retry behavior proof is retained but the current retry label is disabled/unloaded. |
+| New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, state `not running`, exit 0. Receipt `20260829T184200.680506Z-3949348d` is `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, with 9 new Codex objects and OpenClaw absent. | One supervised scan is **DONE**; the six-hour elapsed proof and runtime Drive publication remain **IN-FLIGHT**. |
+| Mac Studio | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336`, state `running`. The latest persisted receipt `20260829T164025.921717Z-279ff85a` failed with `RunFailure`; the current attempt is launchd-owned and no provider is mounted. | Current supervised scan, File Provider mount, raw shard publication, and six-hour proof are **IN-FLIGHT**. |
+| Mac mini | Clean at runtime `3c732d7`; no production archive label is enabled. Free capacity is 7,537,844 KiB; `CoreSimulator.log` is 5,339,541,128 bytes and active, while `CoreSimulator.prev.log` is 15,403,577,516 bytes and closed. | Storage approval is required before any canary or schedule; no cleanup was performed. |
+| Old MacBook | Offline; `oldmac` timed out again at 19:07Z. | No live deployment or canary proof; earlier retry behavior proof is retained but the current retry label is disabled/unloaded. |
 
 `configs/old-macbook.pending.json` is a placeholder, not a deployment receipt. It must be checked against the live host before installation.
 
@@ -138,10 +153,11 @@ python3 fleet_chat_archive.py install-launchd --config configs/new-macbook.json 
 ```
 
 The trusted-stream commit is reviewed and deployed to the reachable configured
-helper paths. New and Studio now have the production six-hour labels loaded under
+helper paths. New and Studio have the production six-hour labels loaded under
 launchd. A loaded plist proves schedule configuration only; the six-hour elapsed
 cycle and a new Drive object still require a completed receipt after 21,600 seconds
-and a mounted provider.
+and a mounted provider. New's first RunAtLoad scan has completed; Studio's current
+launchd attempt remains in-flight after a prior `RunFailure`.
 
 The Studio config polls `newmac`, `cals-mac-mini`, and `oldmac` only when its
 scheduler or a reviewed manual run is active. An offline remote is recorded as
