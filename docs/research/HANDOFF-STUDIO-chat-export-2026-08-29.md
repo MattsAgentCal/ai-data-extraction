@@ -164,8 +164,9 @@ and the body-free evidence receipt is
 - Matt has not approved Mini log compression/cleanup. Mini's real canary and
   production schedule have not run.
 - Old MacBook has not returned online for live deployment or canary proof. Its
-  retry label is currently disabled/unloaded on New; “previously proven retry
-  behavior” is not the same as “active queue.”
+  retry label is now enabled and loaded under launchd on New; one RunAtLoad
+  attempt exited 0 with `offline_retryable`/`ssh_unreachable`. “Active retry
+  queue” is not the same as online deployment/canary proof.
 - New and Studio production six-hour archive schedules are loaded under launchd;
   the elapsed-cycle proof remains in-flight. New has one completed RunAtLoad
   scan, but no approximately 21,600-second follow-up receipt.
@@ -284,7 +285,10 @@ are `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.log` and
   3,143 redactions, Claude and Hermes had no new conversations, and OpenClaw
   was `not_present_on_host`. The label is loaded and idle after `runs=1`, exit
   0; the six-hour elapsed proof is still absent.
-- Old retry remains unloaded; it is a queued offline retry, not an active proof.
+- Old retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is
+  enabled and loaded under launchd with `RunAtLoad=true`, `StartInterval=21600`,
+  `runs=1`, and exit 0 after its offline attempt. It is a queued retry, not an
+  online deployment proof.
 
 ### Mac Studio (`studio` / successor host)
 
@@ -324,9 +328,12 @@ are `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.log` and
   canary proof exists.
 - The earlier final-pin retry proof advanced run count 1 -> 2, exited 0, had
   zero stderr delta, and reported `offline_retryable`/`ssh_unreachable`.
-- The retry is not active now: New's retry label is disabled/unloaded. Once Old
+- The current retry label is enabled/loaded on New and its first RunAtLoad
+  attempt exited 0 with the same retryable offline status. The scripted install
+  command first failed closed and restored the disabled state; the exact plist
+  was then enabled/bootstrap-loaded and read back successfully. Once Old
   returns, the Studio release owner must recheck identity, deploy the exact
-  runtime pins, and prove the retry/canary before calling it queued and healthy.
+  runtime pins, and prove the retry/canary before calling it healthy.
 
 ### Google Drive (`Studio only`)
 
