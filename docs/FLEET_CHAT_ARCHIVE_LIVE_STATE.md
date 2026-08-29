@@ -15,7 +15,7 @@ bodies, indexes, and other private archive data remain outside Git.
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
 | Repository checkout | MacBook docs checkout at `cab761c`; Studio runtime checkout at `3c732d7`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub connector publication | Fork branch `MattsAgentCal/ai-data-extraction:matt/fleet-chat-archive-deployed` read back at connector commit `dd5d3063fafd15db495d879ffdc814a854e4c6b3`; tree `315acb0333de33173d64c02e544e2e38822cb846` matches local `cab761c` content |
+| GitHub connector publication | Preceding docs tree read back at connector commit `c39c65a3941acb56c5a31bc70c846fcd96eaf227`; tree `13168cd20d877e3e48c7ccf359c9402ef7b15a17` matches local `ed5d2b3` content. The final docs-only reconciliation is to be read back as a new child. |
 | Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; folder listing and bodies read back successfully |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
@@ -62,11 +62,12 @@ The deployed runtime pins are:
 - The owner-only Studio Google Drive DMG was staged and verified. Its observed
   size is 141,267,496 bytes and its SHA-256 is
   `fb6927060f8f20efb8ac2027d00a9c0787c111fa57c01fe6a29675afaf5c1178`.
-- The GitHub connector created/published the docs tree and read back branch-tip
-  commit `dd5d3063` (the tree matches local commit `cab761c` content); the owned
+- The GitHub connector created/published the preceding docs tree and read back
+  commit `c39c65a3` (the tree matches local commit `ed5d2b3` content); the owned
   fork ref is verified. The Drive connector created and verified the private `AI Chat
-  Archive` folder and two body-free receipt docs inside it; no raw local-path
-  upload was attempted.
+  Archive` folder and two body-free receipt docs inside it; the folder listing
+  has exactly those two native Docs and no raw files. Upload remains
+  connector-reference-only for private local paths.
 
 ## IN-FLIGHT
 
