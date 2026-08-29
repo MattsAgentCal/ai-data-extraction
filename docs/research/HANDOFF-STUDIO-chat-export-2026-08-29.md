@@ -155,11 +155,12 @@ and the body-free evidence receipt is
   stderr delta, `offline_retryable`/`ssh_unreachable`).
 - The owner-only Google Drive DMG is staged and verified on Studio. It is not
   installed and no provider is mounted.
-- The GitHub connector published the pre-amendment docs tree through the owned
-  fork: readback commit `fc74861ebae3357d77884473805c9166424782b9`, tree
-  `bb1b3533c980b8a98a871c945e12b65db7869ab5`, matching local `898f68a`
-  content. This structural addendum must be read back as its child after
-  connector publication; do not infer its remote SHA.
+- The GitHub connector published the Matt-ratified structural addendum through
+  the owned fork: readback commit
+  `86b505319b9fd30601773fd362d0af4fa704fa38`, tree
+  `78478c927b63d01d32d558f01a6639cf1a5e45cf`, matching local `9dd6bfe`
+  content. The owned fork ref was independently verified; do not infer a
+  different remote SHA.
 - The Drive connector created and verified the private folder `AI Chat Archive`
   (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and published/read back a body-free
   receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`) plus a launchd
@@ -233,7 +234,7 @@ and the body-free evidence receipt is
 | Documentation commit | `5e982165e7ff4b05e10931a9466ce0888da52bc6` | Adds the live-state and receipt docs and corrects README/fleet-guide drift. |
 | Handoff parent | `a2b40c9165a82b022054d4d470bf371cbc9890b4` | Adds this handoff before the addendum. |
 | Lease/schema addendum | `5cd62dab6e4b5898cddfc8404b398525636fde00` | Adds `.deployment-lease.json`, schema-freeze checkpoint, and the binding lease/launchd rules. |
-| Active docs reconciliation | Pre-amendment local `898f68a71148eb07a4a354055dfdd476d53e8cca`; preceding connector publication `fc74861ebae3357d77884473805c9166424782b9` (tree `bb1b3533c980b8a98a871c945e12b65db7869ab5`) | This structural addendum is the immediate local child and must be read back as the next connector child. |
+| Active docs reconciliation | Matt-ratified addendum local `9dd6bfe...`; connector publication `86b505319b9fd30601773fd362d0af4fa704fa38` (tree `78478c927b63d01d32d558f01a6639cf1a5e45cf`) | Connector readback matches the local amendment; the owned fork ref is verified. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub
