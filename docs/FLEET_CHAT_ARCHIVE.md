@@ -7,7 +7,7 @@ This local extension turns the upstream one-shot extractors into a recurring pri
 1. When its reviewed scheduler is enabled, each Mac collects local harness data every six hours into an owner-only spool at `~/.local/share/ai-chat-archive/spool`. Unchanged transcript files are fingerprinted and skipped; changed sessions are streamed one at a time.
 2. Conversations are normalized into the closed archive-object v2 contract, credential-redacted locally, staged until parsing is complete, stored as immutable content-addressed objects, and indexed separately by host and harness. Message content and normalized context/tool/event `payload` values are the only intentionally opaque body-bearing fields; their wrappers remain exact and bounded.
 3. The Mac Studio invokes the same trusted Python pipeline on each source host over authenticated SSH. The source validates one manifest-bound shard under its archive lock and emits a bounded binary stream; the Studio stages and validates that stream before a transactional logical-session merge.
-4. Once Google Drive is signed in on the Studio, the Studio publishes the fleet tree into one private `AI Chat Archive` folder. Until then, collection continues locally and receipts say exactly why publication is blocked.
+4. Once Google Drive is signed in on the Studio, the Studio publishes the fleet tree into one private `AI Chat Archive` folder. Until the File Provider is mounted, collection continues locally and receipts say exactly why publication is blocked. The active connector has separately created that private folder and published a body-free receipt doc; this does not bypass the runtime mount gate.
 
 The Google Drive account is needed on only the Studio. Host folders never share mutable object files, preventing cross-machine filename collisions.
 
@@ -97,20 +97,23 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Host state as of 2026-08-29T14:54:14Z
+## Host state as of 2026-08-29T18:45:00Z
 
 | Host | Verified rollout truth | Scheduler / blocker |
 |---|---|---|
-| New MacBook | Clean at reviewed release `3c732d7`; temporary final-release canary has 137 valid receipts and zero parsed errors through 2026-08-29T14:41:25Z. OpenClaw is absent on this host. | Production six-hour label is disabled; temporary final-release canary remains loaded under KeepAlive. |
-| Mac Studio | Clean at reviewed release `3c732d7`; temporary final-release canary has 28 valid receipts and zero parsed errors through 2026-08-29T14:29:11Z. Its latest hub statuses were Mini `pending_manifest`, New `unreachable`, and Old `unreachable`. | Production six-hour label is disabled; temporary final-release canary remains loaded under KeepAlive. Drive publication is unavailable until sign-in. |
-| Mac mini | Clean at reviewed release `3c732d7`; no real canary has run. Free capacity was 7,687,332 KiB at the read-only check, with an active 5.1 GB CoreSimulator log. | No production label is enabled; storage approval is required before the canary. |
+| New MacBook | Clean at docs commit `5cd62da` (runtime `3c732d7`); launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded and running its first live scan. The last completed receipt was `2026-08-29T16:31:24.467081Z`, with `completed_with_absent_harnesses`, zero errors, and `blocked_no_drive_root`; OpenClaw is absent. | `RunAtLoad=true`, `StartInterval=21600`; first scan is **IN-FLIGHT**. Runtime Drive publication remains blocked with no File Provider root. |
+| Mac Studio | Clean at docs commit `5cd62da` (runtime `3c732d7`); launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded and running its first live scan. The last completed receipt was `2026-08-29T16:40:20.517359Z`, with `completed_with_absent_harnesses`, zero errors, and `blocked_drive_unavailable`; hub statuses were Mini `pending_manifest`, New `pulled` (1131/1131), and Old `unreachable`. | `RunAtLoad=true`, `StartInterval=21600`; first scan is **IN-FLIGHT**. Connector folder/doc exists, but no local File Provider mount is present. |
+| Mac mini | Clean at runtime `3c732d7`; no production archive label is enabled. Free capacity was 7,569,896 KiB at the current check; `CoreSimulator.log` is 5,309,541,094 bytes and active, while `CoreSimulator.prev.log` is 15,403,577,516 bytes and closed. | Storage approval is required before any canary or schedule; no cleanup was performed. |
 | Old MacBook | Offline; `oldmac` timed out at the reconciliation check. | No live deployment or canary proof; earlier retry behavior proof is retained but the current retry label is disabled/unloaded. |
 
 `configs/old-macbook.pending.json` is a placeholder, not a deployment receipt. It must be checked against the live host before installation.
 
-Google Drive is not installed or mounted on the Studio and remains a human-gated
-completion step. The owner-only DMG is staged and verified; no scheduler should
-be enabled merely to test Drive publication.
+The Google Drive connector is authenticated. It created and verified the private
+folder `AI Chat Archive` (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and a body-free
+receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`) inside it. The
+runtime's File Provider is still not installed or mounted on Studio, so raw
+conversation-object publication and the automatic new-chat-in-Drive proof remain
+unearned; the connector receipt is not a substitute for that proof.
 
 Existing v1 objects, nullable-session rows, and legacy base-format Codex rows
 are not trusted or silently migrated by the new stream.
@@ -134,9 +137,10 @@ python3 fleet_chat_archive.py install-launchd --config configs/new-macbook.json 
 ```
 
 The trusted-stream commit is reviewed and deployed to the reachable configured
-helper paths. Keep the production install command disabled until the live-state
-gates are cleared; the temporary final-release canary labels are separate test
-jobs and are not production schedules.
+helper paths. New and Studio now have the production six-hour labels loaded under
+launchd. A loaded plist proves schedule configuration only; the six-hour elapsed
+cycle and a new Drive object still require a completed receipt after 21,600 seconds
+and a mounted provider.
 
 The Studio config polls `newmac`, `cals-mac-mini`, and `oldmac` only when its
 scheduler or a reviewed manual run is active. An offline remote is recorded as
@@ -150,17 +154,19 @@ On the Mac Studio, open the pre-staged installer at
 official installer: <https://dl.google.com/drive-file-stream/GoogleDrive.dmg>.
 
 The Studio config uses `drive_root: "auto"`. Once exactly one live Google Drive
-File Provider appears, the pipeline creates and uses this private folder:
+File Provider appears, the pipeline uses this private folder (the connector has
+already reserved the matching Drive folder ID, but that does not create a local
+mount):
 
 ```text
 /Users/calstudio/Library/CloudStorage/GoogleDrive-<account>/My Drive/AI Chat Archive
 ```
 
 Zero providers remain blocked as unavailable; multiple signed-in Google accounts
-remain blocked as ambiguous instead of guessing. After explicit human sign-in,
-provider discovery, and an authorized production schedule, a Studio run can pull
-current remote shards and publish them. Completion requires a new chat object and
-its body-free receipt to appear in the mounted Drive folder, pass the built-in
-content-hash verification, and report `published`. This human gate has not yet
-been run against a live Google Drive mount; see the dated receipt and live-state
-file for the exact pause classification.
+remain blocked as ambiguous instead of guessing. After explicit File Provider
+sign-in, provider discovery, and an authorized production schedule, a Studio run
+can pull current remote shards and publish them. Completion requires a new chat
+object and its body-free receipt to appear in the mounted Drive folder, pass the
+built-in content-hash verification, and report `published`. The connector has
+published only the body-free receipt doc so far; no raw-path upload was attempted,
+and the automatic six-hour new-chat proof is still in-flight.

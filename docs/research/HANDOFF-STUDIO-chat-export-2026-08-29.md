@@ -4,7 +4,9 @@
 **Origin:** MacBook documentation turn
 **Destination:** successor agent operating on the Mac Studio
 **Current mode:** the deployment goal is resumed by the named lease owner;
-this document is the durable handoff and does not transfer the lease.
+this document is the durable handoff and does not transfer the lease. GitHub and
+Drive connectors are active; the runtime File Provider mount and Mini disk
+approval remain separate gates.
 
 This is the complete context for a successor that has the repository but none of
 the originating agent's conversation history. Treat the timestamps and host
@@ -25,8 +27,9 @@ The manager's operating intent is deploy-first: prove the shipped build on the
 reachable New MacBook, Mac mini, and Mac Studio with real host canaries and
 launchd; keep Google Drive publication gated on Matt's login; queue the Old
 MacBook without blocking; and prove success by Matt watching a new chat appear
-in Drive automatically. Test counts alone are not success. The goal is paused
-for this documentation handoff. Do not start product work in this turn.
+in Drive automatically. Test counts alone are not success. The current lease
+owner is finishing reachable-host deployment; a Studio successor must read the
+lease and stand down until an owner-committed transfer.
 
 ## 2. Binding operating rules
 
@@ -46,11 +49,13 @@ These rules are binding for the successor:
    both outstanding gates in one message with the exact next click/action and
    consequence. Do not ask for the same gate repeatedly or hide it behind
    implementation work.
-5. **One release owner per repo with a deployment lease.** The Studio
-   successor is the sole release owner for this repository. Before touching a
-   host, hold a human-visible lease naming owner, commit, scope, and expiry;
-   stop if another lease or owner is active. Do not let other agents deploy,
-   merge, restart, or overwrite this repo while the lease is held.
+5. **One release owner per repo with a deployment lease.** The repo-root lease
+   is authoritative. Its named owner is the sole release owner for this
+   repository; currently that is `codex:macbook` session
+   `01a046f9-9427-7343-9221-4135b50bc30f`. Before touching a host, read the
+   lease; a Studio successor must stand down until an owner-committed transfer.
+   Do not let other agents deploy, merge, restart, or overwrite this repo while
+   the lease is held.
 6. **Persistent supervision for long canaries.** A long canary must be owned
    by launchd (a persistent wrapper with durable stdout, stderr, exit status,
    and KeepAlive/retry behavior), never by a terminal, chat session, or agent
@@ -75,9 +80,9 @@ The preceding work had the best ratio of the three attempts, but still spent
 17 review waves in 21 hours. That cadence is a process defect, not a reason to
 continue it. Preserve the one-wave rule above.
 
-## 3. Honest state at the pause
+## 3. Honest state during active deployment
 
-Last live reconciliation was 2026-08-29T14:54:14Z. The canonical repository
+Last live reconciliation was 2026-08-29T18:45:00Z. The canonical repository
 state is [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](../FLEET_CHAT_ARCHIVE_LIVE_STATE.md)
 and the body-free evidence receipt is
 [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](../RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md).
@@ -103,34 +108,40 @@ and the body-free evidence receipt is
   stderr delta, `offline_retryable`/`ssh_unreachable`).
 - The owner-only Google Drive DMG is staged and verified on Studio. It is not
   installed and no provider is mounted.
+- The GitHub connector idempotently updated the owned fork ref to
+  `5cd62dab6e4b5898cddfc8404b398525636fde00` and read back the commit/tree.
+- The Drive connector created and verified the private folder `AI Chat Archive`
+  (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and published/read back a body-free
+  receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`). No raw
+  local-path upload was attempted.
+- New and Studio have their production six-hour labels loaded by launchd with
+  `RunAtLoad=true` and `StartInterval=21600`; the first live scans were still
+  running at the last check.
 
 ### IN-FLIGHT — do not call these complete
 
-- The temporary final-release canary labels remain loaded under KeepAlive on
-  New and Studio. They are persistent test jobs, not production schedules.
-  The last snapshot saw New at `runs=138` with 137 valid receipt records and
-  Studio at `runs=29` with 28 valid receipt records. A terminal quiescent state
-  is intentionally not claimed.
-- New's latest completed receipt (2026-08-29T14:41:25Z) exited 0 with
-  `completed_with_absent_harnesses`, zero errors, and `blocked_no_drive_root`.
-  Studio's latest completed receipt (2026-08-29T14:29:11Z) exited 0 with the
-  same collection status, zero errors, and `blocked_drive_unavailable`.
-- The temporary canaries were already in flight when the manager paused the
-  goal. This documentation turn did not start another run or change their
-  lifecycle. Recheck them before acting.
+- New's last completed receipt (2026-08-29T16:31:24.467081Z) exited 0 with
+  `completed_with_absent_harnesses`, zero errors, and `blocked_no_drive_root`;
+  its first production launchd scan is in-flight.
+- Studio's last completed receipt (2026-08-29T16:40:20.517359Z) exited 0 with
+  `completed_with_absent_harnesses`, zero errors, and `blocked_drive_unavailable`;
+  New was pulled 1131/1131, Mini was `pending_manifest`, and Old was
+  `unreachable`. Its first production launchd scan is in-flight.
+- A loaded six-hour plist proves persistent scheduling only. The next receipt
+  after approximately 21,600 seconds and a new Drive object remain unproven.
 
 ### NOT STARTED — explicit gates, not implied completion
 
-- Matt has not installed or signed into Google Drive on Studio. There is no
-  File Provider mount, private `AI Chat Archive` folder, published receipt, or
-  new-chat-in-Drive proof.
+- Studio still has no proven local Google Drive File Provider mount. The
+  connector folder and body-free receipt doc exist, but raw object publication
+  and new-chat-in-Drive proof do not.
 - Matt has not approved Mini log compression/cleanup. Mini's real canary and
   production schedule have not run.
 - Old MacBook has not returned online for live deployment or canary proof. Its
   retry label is currently disabled/unloaded on New; “previously proven retry
   behavior” is not the same as “active queue.”
-- Production six-hour archive schedules remain disabled/unloaded on the
-  reachable hosts. The temporary final-release canaries are separate jobs.
+- New and Studio production six-hour archive schedules are loaded under launchd;
+  the first scans and elapsed-cycle proof remain in-flight.
 - OpenClaw host collection is not proven on New or Studio because the source is
   absent there; Mini and Old have no canary proof.
 - No separate tracked ranking, graph, or wiki entry exists in this checkout.
@@ -161,14 +172,15 @@ and the body-free evidence receipt is
 | Old checkout (expected) | `/Users/mattrotundo/Projects/ai-data-extraction` on `oldmac` | Expected path only; Old was offline at the last check. |
 | Reviewed runtime release | `3c732d7b1031949bd18db90ae4ac40f667f6cfa7` | The only release to canary/deploy unless a new review checkpoint is completed. |
 | Documentation commit | `5e982165e7ff4b05e10931a9466ce0888da52bc6` | Adds the live-state and receipt docs and corrects README/fleet-guide drift. |
-| This handoff | The commit that adds this file (reported by the originating turn) | Use `git log --follow -- docs/research/HANDOFF-STUDIO-chat-export-2026-08-29.md` to identify it. |
+| Handoff parent | `a2b40c9165a82b022054d4d470bf371cbc9890b4` | Adds this handoff before the addendum. |
+| Lease/schema addendum | `5cd62dab6e4b5898cddfc8404b398525636fde00` | Adds `.deployment-lease.json`, schema-freeze checkpoint, and the binding lease/launchd rules. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
-The previous attempt to push `5e98216` from the MacBook was rejected by GitHub:
-HTTPS returned 403 for `MattsAgentCal`, and the SSH fallback was denied by the
-available public key. Verify the Studio clone's actual `git log` and remote
-refs; do not assume the branch is present on `origin` merely because it exists
-in this handoff.
+The owned fork branch is now published and read back through the GitHub
+connector at
+`https://github.com/MattsAgentCal/ai-data-extraction/tree/matt/fleet-chat-archive-deployed`.
+The upstream repository remains read-only for this account; do not claim an
+upstream branch or merge from this fork ref without a fresh permission/ref check.
 
 ### Runtime files at `3c732d7`
 
@@ -232,47 +244,44 @@ are `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.log` and
 
 ### New MacBook (`newmac` / local originating host)
 
-- Checkout is clean at `3c732d7`.
-- Temporary label
-  `com.mattrotundo.ai-chat-archive.canary-final-3c-new` is active under
-  KeepAlive. At the last observation it showed `runs=138`; the receipt stream
-  had 137 valid JSONL records, zero invalid lines, and zero stderr bytes.
-- Latest completed receipt: run ID
-  `20260829T143100.686004Z-7124dbe2`, collected at
-  `2026-08-29T14:41:25.366392+00:00`; status
+- Checkout is clean at docs commit `5cd62da` (runtime `3c732d7`).
+- Production label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded by
+  launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and a live
+  first scan. `launchctl print` shows the collector as the supervised process;
+  no terminal owns it.
+- Last completed receipt: run ID
+  `20260829T162603.931669Z-89cb9c13`, collected at
+  `2026-08-29T16:31:24.467081+00:00`; status
   `completed_with_absent_harnesses`, errors 0, publication
-  `blocked_no_drive_root`. It reported Claude/Hermes with no conversations,
-  Codex 3 conversations/3 new objects, and OpenClaw
-  `not_present_on_host`.
-- Production label `com.mattrotundo.ai-chat-archive.new-macbook` and Old retry
-  label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` are disabled;
-  the retry label was also absent when printed. Do not describe either as
-  active.
+  `blocked_no_drive_root`; Claude/Codex/Hermes had no new conversations and
+  OpenClaw was `not_present_on_host`.
+- Old retry remains unloaded; it is a queued offline retry, not an active proof.
 
 ### Mac Studio (`studio` / successor host)
 
-- Read-only SSH found a clean checkout at `3c732d7`.
-- Temporary label
-  `com.mattrotundo.ai-chat-archive.canary-final-3c-studio` is active under
-  KeepAlive. At the last observation it showed `runs=29`; the receipt stream
-  had 28 valid JSONL records, zero invalid lines, and zero stderr bytes.
-- Latest completed receipt: run ID
-  `20260829T142123.868546Z-c5655519`, collected at
-  `2026-08-29T14:29:11.388973+00:00`; status
+- Read-only SSH now finds a clean checkout at docs commit `5cd62da` (runtime
+  `3c732d7`).
+- Production label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded by
+  launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and a live
+  first scan. `launchctl print` shows the collector as the supervised process;
+  no terminal owns it.
+- Last completed receipt: run ID
+  `20260829T153756.562461Z-d1520afe`, collected at
+  `2026-08-29T16:40:20.517359+00:00`; status
   `completed_with_absent_harnesses`, errors 0, publication
-  `blocked_drive_unavailable`. It reported Claude 1 conversation, Codex 6,
-  Hermes 0, and OpenClaw `not_present_on_host`.
-- Last hub statuses were Mini `pending_manifest`, New `unreachable`, and Old
-  `unreachable`. Production label
-  `com.mattrotundo.ai-chat-archive.mac-studio` is disabled.
+  `blocked_drive_unavailable`. It reported Claude 4 conversations/3 new
+  objects, Codex 7/7, Hermes 0, and OpenClaw `not_present_on_host`.
+- Hub statuses were New `pulled` (1131/1131), Mini `pending_manifest`, and Old
+  `unreachable`. The connector receipt is in Drive folder
+  `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; no local File Provider mount is visible.
 
 ### Mac mini (`cals-mac-mini`)
 
 - Read-only SSH found a clean checkout at `3c732d7`; no production archive label
   is enabled.
-- Free capacity was 7,687,332 KiB (about 7.33 GiB). The active
-  `CoreSimulator.log` was 5,109,616,254 bytes with one open handle. The closed
-  `CoreSimulator.prev.log` was 15,403,577,516 bytes with zero open handles.
+- Free capacity was 7,569,896 KiB (about 7.22 GiB). The active
+  `CoreSimulator.log` is 5,309,541,094 bytes. The closed
+  `CoreSimulator.prev.log` is 15,403,577,516 bytes with zero open handles.
 - No cleanup, compression, or real canary was started. The only proposed
   cleanup is the closed, zero-handle log; never delete or compress the active
   log without a separately reviewed safety decision.
@@ -293,26 +302,32 @@ are `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.log` and
 - Last verification: mode 0600, 141,267,496 bytes, SHA-256
   `fb6927060f8f20efb8ac2027d00a9c0787c111fa57c01fe6a29675afaf5c1178`, and
   `hdiutil verify` returned `VALID`.
-- Not started: installation, sign-in, File Provider discovery, private folder
-  creation, publication, and the new-chat proof.
+- The Drive connector profile is authenticated. It created and verified private
+  folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV` and placed
+  body-free receipt doc ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` in
+  it; metadata, folder listing, and document text read back successfully.
+- Not started: local File Provider installation/login/mount, raw conversation
+  object publication, and the new-chat-in-Drive proof. No raw local-path upload
+  was attempted because the connector requires a runtime file reference.
 
 ## 6. Matt gates — surface these first
 
-Send Matt one batched message before any successor work. These are the only
-outstanding human gates currently called out by the manager:
+The connector gates are cleared. Surface the remaining human/runtime gates once,
+first, and batched before a Studio successor takes the lease:
 
-1. **Studio Google Drive (two clicks):** open
+1. **Studio runtime Drive mount (two clicks):** open
    `/Users/calstudio/Downloads/GoogleDrive-2026-08-28.dmg`, double-click
    `GoogleDrive.pkg`, then complete the Google sign-in. If the staged DMG is
    unavailable, use Google's official installer:
    `https://dl.google.com/drive-file-stream/GoogleDrive.dmg`. Consequence:
-   exactly one mounted provider can unlock the private `AI Chat Archive`
-   publication gate. Do not claim Drive success before the provider and a
-   `published` receipt are visible.
+   exactly one mounted provider can unlock the runtime's private `AI Chat Archive`
+   publication gate. The connector folder/doc already exists, but do not claim
+   raw Drive success before the provider and a `published` runtime receipt are
+   visible.
 2. **Mini log-compression approval:** approve only the closed, zero-handle
    `CoreSimulator.prev.log` (15,403,577,516 bytes) for compression/archive and
    removal if the reviewed operation requires it. Do not touch the active
-   `CoreSimulator.log` (5,109,616,254 bytes, one open handle). Consequence:
+   `CoreSimulator.log` (5,309,541,094 bytes, one open handle). Consequence:
    enough free space to run the Mini canary; no cleanup has occurred yet.
 
 Surface both gates once, in this order, with the exact action and consequence.
@@ -320,14 +335,13 @@ Do not wait until after a canary or infrastructure change to mention them.
 
 ## 7. First three successor actions
 
-Do exactly these three bounded actions when the goal is resumed; until then,
-leave the deployment paused.
+The current owner has already started these bounded actions. A Studio successor
+must first read the lease and continue only after an owner-committed transfer.
 
-1. **Surface the two Matt gates and establish the deployment lease.** Send the
-   single batched Drive/Mini message above. Then, on Studio, verify the clone
-   path, branch, and `3c732d7` before writing a lease naming the Studio agent,
-   this commit, the host scope, and an expiry. If either gate is pending, record
-   it once and do not work around it.
+1. **Surface the two remaining gates and read the deployment lease.** Send the
+   single batched Drive/Mini message above. The current lease names the MacBook
+   owner; do not write a Studio lease or deploy until that owner transfers it in
+   a commit.
 2. **Perform a read-only, live-shaped preflight under the lease.** Verify the
    exact runtime hashes and clean worktree on Studio, New, and Mini; check
    `launchctl` labels and current temporary canary receipts; check source roots,
@@ -335,18 +349,27 @@ leave the deployment paused.
    state. Recheck Old with a bounded timeout and record it as offline if it
    still fails. Do not start a long run or enable production infrastructure from
    a terminal.
-3. **Run one supervised canary checkpoint.** Use one persistent launchd
-   supervisor on Studio with durable owner-only stdout/stderr/exit receipt
-   paths; do not let a controlling chat session own the process. Run the
-   live-shaped canary on the shipped `3c732d7` build, batch all findings into
-   one review wave, make at most one bounded repair, and re-review once. Only a
-   clean checkpoint can authorize the next infrastructure step.
+3. **Read back the existing supervised checkpoint.** New and Studio already
+   have production launchd supervisors with durable owner-only stdout/stderr and
+   six-hour intervals. Do not start a second long canary. Wait for the current
+   receipts, batch any findings into one review wave, make at most one bounded
+   repair, and re-review once. Only a clean checkpoint can authorize the next
+   infrastructure step.
 
 ## 8. Proving the automatic six-hour cycle on the shipped build
 
 The proof target is not “launchd is installed.” The proof target is: a new
 allowed chat is collected, merged, and appears in the Studio Drive folder after
 the six-hour automation path, while the controlling session is gone.
+
+Current execution evidence: New label
+`com.mattrotundo.ai-chat-archive.new-macbook` and Studio label
+`com.mattrotundo.ai-chat-archive.mac-studio` are both loaded by launchd with
+`RunAtLoad=true`, `StartInterval=21600`, and `runs=1`; their first live scans were
+still active at the last observation. This proves persistent supervision and
+the configured interval only. It does not prove the elapsed six-hour cycle,
+runtime `published` status, or a new chat visible in Drive. The Drive connector
+receipt doc is a body-free manifest and is not that proof.
 
 ### A. Verify the shipped build and supervisor
 
@@ -405,7 +428,8 @@ Drive success.
 ### C. Enable and prove the six-hour schedule only after the checkpoint
 
 After the one-wave checkpoint is reviewed and the required Matt gates are
-cleared, install the per-user schedule on each authorized reachable host:
+cleared, install (or read back) the per-user schedule on each authorized
+reachable host:
 
 ```bash
 python3 fleet_chat_archive.py install-launchd \
