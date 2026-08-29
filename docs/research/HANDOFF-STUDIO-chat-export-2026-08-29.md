@@ -124,15 +124,18 @@ and the body-free evidence receipt is
   stderr delta, `offline_retryable`/`ssh_unreachable`).
 - The owner-only Google Drive DMG is staged and verified on Studio. It is not
   installed and no provider is mounted.
-- The GitHub connector published the current docs tree through the owned fork:
-  branch tip `dd5d3063fafd15db495d879ffdc814a854e4c6b3`, tree
-  `315acb0333de33173d64c02e544e2e38822cb846`, matching local `cab761c`
-  content at the last connector readback.
+- The GitHub connector published the preceding docs tree through the owned
+  fork: readback commit `c39c65a3941acb56c5a31bc70c846fcd96eaf227`, tree
+  `13168cd20d877e3e48c7ccf359c9402ef7b15a17`, matching local `ed5d2b3`
+  content. The final docs-only reconciliation in this handoff must be read
+  back again after connector publication; do not infer its remote SHA.
 - The Drive connector created and verified the private folder `AI Chat Archive`
   (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and published/read back a body-free
   receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`) plus a launchd
-  schedule receipt doc (ID `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`). No
-  raw local-path upload was attempted.
+  schedule receipt doc (ID `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`). A
+  current folder listing contains exactly those two native Docs and no raw
+  files; the connector upload action accepts only an authenticated connector
+  file reference, not a private local path.
 - New and Studio have their production six-hour labels loaded by launchd with
   `RunAtLoad=true` and `StartInterval=21600`. New's current run has completed;
   Studio's current run remains in-flight after its prior failed receipt.
@@ -198,7 +201,7 @@ and the body-free evidence receipt is
 | Documentation commit | `5e982165e7ff4b05e10931a9466ce0888da52bc6` | Adds the live-state and receipt docs and corrects README/fleet-guide drift. |
 | Handoff parent | `a2b40c9165a82b022054d4d470bf371cbc9890b4` | Adds this handoff before the addendum. |
 | Lease/schema addendum | `5cd62dab6e4b5898cddfc8404b398525636fde00` | Adds `.deployment-lease.json`, schema-freeze checkpoint, and the binding lease/launchd rules. |
-| Active docs reconciliation | Local `cab761c498b61d1ebceee634e28a1c7b9f3f9dab`; connector publication `dd5d3063fafd15db495d879ffdc814a854e4c6b3` (tree `315acb0333de33173d64c02e544e2e38822cb846`) | Current published docs tree; connector commit has the same tree with connector-generated metadata. |
+| Active docs reconciliation | Local `ed5d2b3df9e507e976c79dd31d74490a2f8b29c6`; preceding connector publication `c39c65a3941acb56c5a31bc70c846fcd96eaf227` (tree `13168cd20d877e3e48c7ccf359c9402ef7b15a17`) | Connector commit has the same tree; the final docs-only reconciliation must be read back as a new child. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub

@@ -83,8 +83,8 @@ This addendum supersedes only the live-state observations above; the original
 | Mac Studio | Launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336`, state `running`; the current attempt is launchd-owned and began at 18:42Z. Latest persisted receipt `20260829T164025.921717Z-279ff85a` is `failed` with `RunFailure` and `publication=not_attempted`; no elapsed six-hour proof exists. |
 | Mini | Runtime remains `3c732d7`; free capacity `7,537,844 KiB`; active `CoreSimulator.log` is `5,339,541,128` bytes and closed `CoreSimulator.prev.log` is `15,403,577,516` bytes. No cleanup or canary was performed. |
 | Old MacBook | `ssh oldmac` timed out again at 19:07Z; retry remains queued/offline and non-blocking. |
-| Drive | Studio CloudStorage contains zero `GoogleDrive-*` providers. The connector folder and two body-free docs remain verified; raw object publication and new-chat-in-Drive proof are absent. |
-| GitHub | Connector branch tip is `dd5d3063fafd15db495d879ffdc814a854e4c6b3`, tree `315acb0333de33173d64c02e544e2e38822cb846`, matching local `cab761c` content. |
+| Drive | Studio CloudStorage contains zero `GoogleDrive-*` providers. The connector folder listing contains exactly two native Docs (`1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`, `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`) and no raw files; raw object publication and new-chat-in-Drive proof are absent. |
+| GitHub | Preceding connector branch tip is `c39c65a3941acb56c5a31bc70c846fcd96eaf227`, tree `13168cd20d877e3e48c7ccf359c9402ef7b15a17`, matching local `ed5d2b3` content; the final docs-only reconciliation is being published as a new child. |
 
 The deployment lease and schema-freeze checkpoint remain binding structural
 controls: every long canary is launchd-owned, non-owner sessions stand down via
