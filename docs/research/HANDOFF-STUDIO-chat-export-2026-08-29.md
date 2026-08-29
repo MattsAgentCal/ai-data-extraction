@@ -231,7 +231,7 @@ Do not expect these absolute paths to exist on Studio:
 | Repo | `/Users/mattrotundo/Projects/ai-data-extraction` | `/Users/calstudio/Projects/ai-data-extraction` | `/Users/calrotundo/Projects/ai-data-extraction` | `/Users/mattrotundo/Projects/ai-data-extraction` (expected) |
 | Spool root | `/Users/mattrotundo/.local/share/ai-chat-archive/spool` | `/Users/calstudio/.local/share/ai-chat-archive/spool` | `/Users/calrotundo/.local/share/ai-chat-archive/spool` | `/Users/mattrotundo/.local/share/ai-chat-archive/spool` (expected) |
 | Temporary canary receipt | `/Users/mattrotundo/.local/share/ai-chat-archive-canary-final-3c.ABxGZG/stdout.jsonl` | `/Users/calstudio/.local/share/ai-chat-archive-canary-final-3c.4zhNaQ/stdout.jsonl` | none | none |
-| Special evidence | New temporary label; production and Old retry labels disabled | Claude restore backup and staged Drive DMG | CoreSimulator logs and storage gate | SSH alias `oldmac`; offline |
+| Special evidence | Production label loaded; Old retry unloaded | Claude restore backup, staged Drive DMG, and connector receipt | CoreSimulator logs and storage gate | SSH alias `oldmac`; offline |
 
 The Studio-only repair backup is
 `/Users/calstudio/.local/share/ai-chat-archive-repair-proof.BCwlg8/live-current-index.backup.json`.
@@ -410,8 +410,9 @@ Before the canary, check all of the following and record only body-free values:
   blocked, multiple means ambiguous and blocked.
 - No unrelated `.run.lock` or `.work` transaction is active; preserve a live
   transaction rather than starting over it.
-- The supervisor is loaded and will survive logout; the production six-hour
-  label is still disabled during this canary-first checkpoint.
+- The supervisor is loaded and will survive logout; New and Studio production
+  six-hour labels are active and their first scans are being observed under the
+  deployment lease.
 
 Run the configured collection only through the supervisor. The repository's
 manual command shape is:
