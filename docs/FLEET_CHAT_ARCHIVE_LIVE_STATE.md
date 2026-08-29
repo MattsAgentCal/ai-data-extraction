@@ -15,7 +15,7 @@ bodies, indexes, and other private archive data remain outside Git.
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
 | Repository checkout | MacBook docs checkout at `cab761c`; Studio runtime checkout at `3c732d7`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub connector publication | Pre-amendment docs tree read back at connector commit `fc74861ebae3357d77884473805c9166424782b9`; tree `bb1b3533c980b8a98a871c945e12b65db7869ab5` matches local `898f68a` content. This structural addendum is its child and must be read back after connector publication. |
+| GitHub connector publication | Matt-ratified structural addendum local `9dd6bfe` was read back at connector commit `86b505319b9fd30601773fd362d0af4fa704fa38`; tree `78478c927b63d01d32d558f01a6639cf1a5e45cf` matches the local amendment. |
 | Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; folder listing and bodies read back successfully |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
@@ -63,10 +63,10 @@ The deployed runtime pins are:
 - The owner-only Studio Google Drive DMG was staged and verified. Its observed
   size is 141,267,496 bytes and its SHA-256 is
   `fb6927060f8f20efb8ac2027d00a9c0787c111fa57c01fe6a29675afaf5c1178`.
-- The GitHub connector created/published the pre-amendment docs tree and read
-  back commit `fc74861e` (the tree matches local commit `898f68a` content); the
-  structural addendum is being published as its child. The owned fork ref is
-  verified. The Drive connector created and verified the private `AI Chat
+- The GitHub connector created/published the Matt-ratified structural addendum
+  and read back commit `86b505319b9fd30601773fd362d0af4fa704fa38` (the tree
+  matches local commit `9dd6bfe` content); the owned fork ref is verified. The
+  Drive connector created and verified the private `AI Chat
   Archive` folder and two body-free receipt docs inside it; the folder listing
   has exactly those two native Docs and no raw files. Upload remains
   connector-reference-only for private local paths.
