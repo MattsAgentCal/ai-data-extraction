@@ -72,6 +72,37 @@ not from a missing chat instruction. The current lease remains with
 `codex:macbook`/`01a046f9-9427-7343-9221-4135b50bc30f`; do not mutate hosts or
 the release while that lease is held.
 
+### Matt-ratified manager addendum — structural enforcement readback, 2026-08-29T21:09:28Z
+
+These controls are encoded in the repository and host job shape, not left as
+advice for a future agent:
+
+- **Every long-canary node is launchd-owned.** The New MacBook, Studio, and Old
+  retry jobs are the concrete nodes currently represented by loaded plists;
+  their absolute paths, owner-only logs, `RunAtLoad`, and `StartInterval` are
+  read back with `launchctl print`. A terminal, agent, or chat session is never
+  an eligible process owner. A long canary without that readback is invalid and
+  must not be replaced with a foreground run.
+- **The deployment lease is the owner gate.** The tracked repo-root
+  [`.deployment-lease.json`](../../.deployment-lease.json) is the single
+  machine-readable owner record. At this readback it names
+  `codex:macbook`/`01a046f9-9427-7343-9221-4135b50bc30f` on `Mac.lan`; every
+  session must compare its identity before deployment, restart, merge, or
+  connector write. A different session stands down; only an owner-authored
+  commit can transfer the lease.
+- **The schema freeze is a broad-release checkpoint.** The tracked
+  [`SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`](../SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md)
+  records one live-schema census, one canonical
+  `archive_object_contract.validate_archive_object` validator, and one batched
+  review wave followed by one repair and one re-review for `3c732d7`. This
+  amendment opens no second census or review wave; any different runtime must
+  create a new checkpoint before a broad release.
+
+Execution remains read-only until the current launchd-owned Studio transaction
+finishes or has one bounded diagnosis. No foreground canary, second Studio run,
+lease transfer, broad release, or extra review wave is authorized by this
+amendment.
+
 ### Resume execution readback — 2026-08-29T20:09:39Z
 
 - New's second supervised refresh is still running as launchd pid `36868`
