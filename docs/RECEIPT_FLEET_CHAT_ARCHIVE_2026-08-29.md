@@ -79,7 +79,7 @@ This addendum supersedes only the live-state observations above; the original
 
 | Check | Current readback |
 |---|---|
-| MacBook/New | Launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, state `not running`, exit 0. Receipt `20260829T184200.680506Z-3949348d` is `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, with 9 new Codex objects and OpenClaw absent. |
+| MacBook/New | Launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, state `not running`, exit 0. Receipt `20260829T184200.680506Z-3949348d` (`collected_at=2026-08-29T19:03:34.040125Z`) is `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, with 9 new Codex objects and OpenClaw absent. |
 | Mac Studio | Launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336`, state `running`; the current attempt is launchd-owned and began at 18:42Z. Latest persisted receipt `20260829T164025.921717Z-279ff85a` is `failed` with `RunFailure` and `publication=not_attempted`; no elapsed six-hour proof exists. |
 | Mini | Runtime remains `3c732d7`; free capacity `7,537,844 KiB`; active `CoreSimulator.log` is `5,339,541,128` bytes and closed `CoreSimulator.prev.log` is `15,403,577,516` bytes. No cleanup or canary was performed. |
 | Old MacBook | `ssh oldmac` timed out again at 19:07Z; retry remains queued/offline and non-blocking. |

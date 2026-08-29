@@ -141,7 +141,7 @@ and the body-free evidence receipt is
 
 - New's current receipt is run
   `20260829T184200.680506Z-3949348d`, collected at
-  `2026-08-29T18:42:00Z` (body-free receipt mtime), with
+  `2026-08-29T19:03:34.040125Z`, with
   `completed_with_absent_harnesses`, zero errors, publication
   `blocked_no_drive_root`, 9 new Codex objects, and OpenClaw absent. Its
   launchd label is loaded and idle after `runs=1`, exit 0.
