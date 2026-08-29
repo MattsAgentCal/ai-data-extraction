@@ -6,11 +6,12 @@ and launchd-only documentation controls, New and Studio six-hour launchd jobs
 are loaded, and the Drive connector folder/receipt doc are verified. Mini
 cleanup and Old MacBook remain gated/offline.
 
-**Observed:** 2026-08-29T21:35:42Z, from the local MacBook plus SSH probes to
+**Observed:** 2026-08-29T22:03:47Z, from the local MacBook plus SSH probes to
 Studio and Mini, launchd readback, GitHub connector readback, and Drive connector
-readback. New's second launchd scan completed; Studio's first launchd scan was
-still active at the observation. The 21:35 readback opened no new release or
-review wave.
+readback. New's second launchd scan had completed; Studio's first launchd scan
+had completed with exit 0 and a zero-error receipt whose publication was blocked
+by the absent Drive provider. The 22:03 readback opened no new release or review
+wave.
 
 ## Code and verification
 
@@ -18,7 +19,7 @@ review wave.
 |---|---|
 | Checkout | `matt/fleet-chat-archive-deployed`, clean after the docs/addendum commit |
 | Reviewed code commit | `3c732d7b1031949bd18db90ae4ac40f667f6cfa7` |
-| Latest readback commit before this receipt update | `182114dd6cff89018761b72f5387dfc6ad6daa89` (pushed/read back on the owned fork) |
+| Latest readback commit before this receipt update | `1e3acf9b48c16d1d501570c52fb4d495f0a7b285` (pushed/read back on the owned fork) |
 | Test command | `python3.14 -m unittest discover -s tests -p 'test*.py'` |
 | Test result | 263 tests ran, `OK` |
 | GitHub connector | Handoff structural amendment local `9b747927b6217287e035eecbdee8e6309a9e7f4d` was published/read back at owned-fork commit `56e8b7f5f8a7ad47acd36bcd0a901e95339d4f20`, parent `aa9bf992f5a0404dd124e85e20b8b0bce3e0a001` |
@@ -35,9 +36,9 @@ conversation bytes were opened or copied into this receipt.
 | Host | Receipt/probe evidence |
 |---|---|
 | New MacBook | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, now idle with exit 0. Receipt `20260829T195959.324876Z-be2608f7` collected at `20:19:56.940667Z`, reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`; Claude 1, Codex 5, Hermes none, OpenClaw absent. |
-| Mac Studio | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336`, PPID `1`, at the 21:35:38Z poll. A 5-second sample at 21:35:42Z was CPU-bound in regex redaction/JSON encoding; latest persisted receipt `20260829T164025.921717Z-279ff85a` remains `RunFailure`, receipt count is 42, and CloudStorage has zero `GoogleDrive-*` providers. |
-| Mac mini | Clean `3c732d7` checkout. At 21:33:49Z, free capacity was 7,351,536 KB; active `CoreSimulator.log` was 5,470,568,332 bytes and closed `CoreSimulator.prev.log` was 15,403,577,516 bytes. No cleanup or canary started. |
-| Old MacBook | `ssh oldmac` timed out at 21:12:17Z. No live deployment or canary proof. Current New-host retry label remains enabled/loaded under launchd (`runs=1`, exit 0); its latest body-free record is `offline_retryable`/`ssh_unreachable`. |
+| Mac Studio | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, `state=not running`, and `last exit code=0` at the 22:03:47Z poll. Receipt count is 43; newest receipt `20260829T184201.313238Z-c87faa38` was collected at `2026-08-29T22:01:36.872837Z`, reports `completed_with_absent_harnesses`, zero errors, and `publication=blocked_drive_unavailable`; CloudStorage has zero `GoogleDrive-*` providers. |
+| Mac mini | Clean `3c732d7` checkout. At 21:59:33Z, free capacity was 7,295,288 KB; active `CoreSimulator.log` was 5,493,598,617 bytes and closed `CoreSimulator.prev.log` was 15,403,577,516 bytes. No cleanup or canary started. |
+| Old MacBook | `ssh oldmac` timed out at 22:03:47Z. No live deployment or canary proof. Current New-host retry label remains enabled/loaded under launchd (`runs=1`, exit 0); its latest body-free record is `offline_retryable`/`ssh_unreachable`. |
 | Google Drive | Connector profile is Matt Rotundo. Exact folder `AI Chat Archive` was read back with two receipt Docs plus redacted text canaries `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` (654 bytes) and `18kklPXiMM2bzF1ZU8tCzlJJ9k-HblbC_` (49,484,530 bytes). Studio File Provider installation/mount and runtime raw object publication remain absent. |
 
 ## Structural addendum readback — 2026-08-29T21:12:17Z
@@ -52,12 +53,13 @@ conversation bytes were opened or copied into this receipt.
   `3c732d7`: one live-schema census, one canonical validator, one review wave,
   one repair, and one re-review. This readback does not create another wave.
 
-## Current execution readback — 2026-08-29T21:35:42Z
+## Current execution readback — 2026-08-29T22:03:47Z
 
-- Studio's launchd-owned pid `14336` is still active with PPID `1`; the
-  read-only sample remains a diagnosis of CPU-bound regex/JSON work, not a
-  successful receipt. No restart, kill, foreground fallback, or second canary
-  was used.
+- Studio's launchd-owned pid `14336` exited before the readback. `launchctl
+  print` shows `state=not running`, `runs=1`, and exit 0. Newest receipt
+  `20260829T184201.313238Z-c87faa38` is `completed_with_absent_harnesses`, has
+  zero errors, and reports `publication=blocked_drive_unavailable`; no restart,
+  kill, foreground fallback, or second canary was used.
 - New remains at the zero-error receipt recorded above. The Drive connector
   folder readback remains exactly four verified items, and no new approved text
   artifact was available; no connector write occurred.
@@ -86,9 +88,8 @@ conversation bytes were opened or copied into this receipt.
 
 ### IN-FLIGHT
 
-- The first production six-hour launchd scans on New and Studio are still active;
-  their completion receipts and the approximately 21,600-second elapsed-cycle
-  proof are not yet available.
+- New's second and Studio's first production launchd scans completed with exit
+  0. The approximately 21,600-second elapsed-cycle proof is not yet available.
 - Runtime File Provider publication, a new chat appearing in Drive, and the
   connector-to-launchd handoff remain in-flight.
 
