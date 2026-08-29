@@ -37,7 +37,7 @@ The deployed runtime pins are:
 | New MacBook | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.new-macbook` is loaded under launchd, `runs=1`, `state=not running` after exit 0, and `StartInterval=21600`. Current receipt `20260829T184200.680506Z-3949348d` reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, 9 new Codex objects, and OpenClaw absent. | **DONE:** checkout, preflight, persistent schedule, one successful supervised scan. **IN-FLIGHT:** six-hour elapsed proof and Drive publication. |
 | Mac Studio | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.mac-studio` is loaded under launchd, `runs=1`, `state=running`, pid `14336`, and `StartInterval=21600`. Latest persisted receipt `20260829T164025.921717Z-279ff85a` failed with `RunFailure`; the current launchd attempt began at 18:42Z and remains in-flight. CloudStorage has zero `GoogleDrive-*` providers. | **DONE:** checkout, preflight, persistent schedule, connector folder/receipt doc. **IN-FLIGHT:** current supervised scan, File Provider mount, raw shard publication, and six-hour elapsed proof. |
 | Mac mini | Clean at runtime `3c732d7`; no archive label is loaded. Free capacity `7,537,844 KiB`; active `CoreSimulator.log` `5,339,541,128` bytes, closed `CoreSimulator.prev.log` `15,403,577,516` bytes. | **DONE:** read-only disk census. **NOT STARTED:** approved cleanup, canary, schedule. |
-| Old MacBook | `ssh oldmac` timed out again at 19:07Z. No live source inventory, deployment, or canary proof exists. Earlier retry proof recorded run count 1 -> 2, exit 0, zero stderr delta, `offline_retryable`/`ssh_unreachable`; retry label remains unloaded on New. | **DONE:** retry behavior proof. **IN-FLIGHT:** queued retry. **NOT STARTED:** online deployment/canary. |
+| Old MacBook | `ssh oldmac` timed out again at 19:07Z. No live source inventory, deployment, or canary proof exists. New's retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is enabled/loaded under launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and exit 0 after `offline_retryable`/`ssh_unreachable`. | **DONE:** retry behavior proof and active launchd queue. **IN-FLIGHT:** offline retry. **NOT STARTED:** online deployment/canary. |
 
 ## DONE
 
@@ -57,8 +57,9 @@ The deployed runtime pins are:
   the interrupted index backup remains at
   `/Users/calstudio/.local/share/ai-chat-archive-repair-proof.BCwlg8/live-current-index.backup.json`.
 - The Old Mac retry implementation was reviewed and its offline behavior was
-  proven without blocking the reachable-host rollout. It is not currently
-  loaded.
+  proven without blocking the reachable-host rollout. Its retry plist is now
+  enabled/loaded under launchd; the first queued attempt exited 0 with the
+  retryable offline status.
 - The owner-only Studio Google Drive DMG was staged and verified. Its observed
   size is 141,267,496 bytes and its SHA-256 is
   `fb6927060f8f20efb8ac2027d00a9c0787c111fa57c01fe6a29675afaf5c1178`.
