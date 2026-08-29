@@ -6,7 +6,7 @@ and launchd-only documentation controls, New and Studio six-hour launchd jobs
 are loaded, and the Drive connector folder/receipt doc are verified. Mini
 cleanup and Old MacBook remain gated/offline.
 
-**Observed:** 2026-08-29T19:00:00Z, from the local MacBook plus SSH probes to
+**Observed:** 2026-08-29T20:09:39Z, from the local MacBook plus SSH probes to
 Studio and Mini, launchd readback, GitHub connector readback, and Drive connector
 readback. The two first launchd scans were still running at the observation.
 
@@ -19,8 +19,8 @@ readback. The two first launchd scans were still running at the observation.
 | Docs/addendum commit | Local `6625a608fce312c0124d7bd92cca90b938373447` (tree `df6d14c6a477428a81e318f3fbf13b79bc892e07`) |
 | Test command | `python3.14 -m unittest discover -s tests -p 'test*.py'` |
 | Test result | 263 tests ran, `OK` |
-| GitHub connector | Matt-ratified structural addendum local `9dd6bfe` was published/read back at connector commit `86b505319b9fd30601773fd362d0af4fa704fa38`; tree `78478c927b63d01d32d558f01a6639cf1a5e45cf` matches the local amendment |
-| Drive connector | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; metadata and bodies read back |
+| GitHub connector | Handoff structural amendment local `9b747927b6217287e035eecbdee8e6309a9e7f4d` was published/read back at owned-fork commit `56e8b7f5f8a7ad47acd36bcd0a901e95339d4f20`, parent `aa9bf992f5a0404dd124e85e20b8b0bce3e0a001` |
+| Drive connector | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; redacted text canary `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` (`text/plain`, 654 bytes) moved into the folder and metadata/listing read back |
 | Bundle | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle` |
 | Bundle SHA-256 | `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
@@ -32,11 +32,11 @@ conversation bytes were opened or copied into this receipt.
 
 | Host | Receipt/probe evidence |
 |---|---|
-| New MacBook | Clean at `5cd62da` (runtime `3c732d7`). `com.mattrotundo.ai-chat-archive.new-macbook` loaded under launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and active first scan. Last completed receipt: `2026-08-29T16:31:24.467081Z`, zero errors, `blocked_no_drive_root`; OpenClaw absent. |
-| Mac Studio | Clean at `5cd62da` (runtime `3c732d7`). `com.mattrotundo.ai-chat-archive.mac-studio` loaded under launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and active first scan. Last completed receipt: `2026-08-29T16:40:20.517359Z`, zero errors, `blocked_drive_unavailable`; hub New pulled 1131/1131, Mini pending, Old unreachable. |
-| Mac mini | Clean `3c732d7` checkout. Free capacity 7,569,896 KiB at the current probe. `CoreSimulator.log`: 5,309,541,094 bytes and active. `CoreSimulator.prev.log`: 15,403,577,516 bytes and closed. No cleanup or canary started. |
-| Old MacBook | `ssh oldmac` timed out. No live deployment or canary proof. Current New-host retry label is disabled/unloaded; earlier offline retry proof is preserved as historical evidence in the live-state file. |
-| Google Drive | Connector profile is Matt Rotundo. Exact folder `AI Chat Archive` was created under My Drive and read back. Two body-free receipt docs are in that folder. Studio File Provider installation/mount and raw object publication remain absent. |
+| New MacBook | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, active pid `36868` at 20:09:38Z. Prior completed receipt `20260829T184200.680506Z-3949348d` is zero-error `blocked_no_drive_root`; the supervised refresh has not emitted a new receipt. |
+| Mac Studio | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336` at 20:09:39Z. Latest persisted receipt `20260829T164025.921717Z-279ff85a` is `RunFailure`; the current supervised attempt remains in-flight. CloudStorage has zero `GoogleDrive-*` providers. |
+| Mac mini | Clean `3c732d7` checkout. At 20:09:39Z, free capacity was 7,489,840 KiB; active `CoreSimulator.log` was 5,378,451,586 bytes and closed `CoreSimulator.prev.log` was 15,403,577,516 bytes. No cleanup or canary started. |
+| Old MacBook | `ssh oldmac` timed out at 20:09:39Z. No live deployment or canary proof. Current New-host retry label remains enabled/loaded under launchd; earlier offline retry proof is preserved as historical evidence in the live-state file. |
+| Google Drive | Connector profile is Matt Rotundo. Exact folder `AI Chat Archive` was read back with the two receipt Docs plus redacted text canary `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` (654 bytes). Studio File Provider installation/mount and runtime raw object publication remain absent. |
 
 ## Classification at pause
 
@@ -94,3 +94,20 @@ one canonical validator, and one review wave.
 This receipt intentionally contains no message content, credentials, or raw
 archive object. It is safe to commit; the body-bearing receipt files remain
 owner-only outside Git.
+
+## Resume execution readback — 2026-08-29T20:09:39Z
+
+- New's launchd label is still active at `runs=2`, pid `36868`,
+  `StartInterval=21600`; the second supervised refresh has not emitted a new
+  receipt. Studio's label is still active at `runs=1`, pid `14336`; its latest
+  persisted receipt remains `RunFailure`. No foreground process or restart was
+  used.
+- The authenticated Drive connector imported and moved one approved 654-byte
+  redacted Codex text canary into `AI Chat Archive`: file ID
+  `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5`, title `AI Chat Archive — Codex canary —
+  c009ce3a`, MIME `text/plain`. Folder metadata/listing read back with the
+  canary plus the two receipt Docs.
+- This connector canary is not runtime publication or automatic six-hour proof:
+  Studio still has zero Google Drive File Provider entries, and the runtime
+  remains blocked from publishing raw JSON shards until that provider is
+  mounted.

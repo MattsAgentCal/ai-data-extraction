@@ -72,6 +72,30 @@ not from a missing chat instruction. The current lease remains with
 `codex:macbook`/`01a046f9-9427-7343-9221-4135b50bc30f`; do not mutate hosts or
 the release while that lease is held.
 
+### Resume execution readback — 2026-08-29T20:09:39Z
+
+- New's second supervised refresh is still running as launchd pid `36868`
+  (`runs=2`, `StartInterval=21600`); no new receipt has been emitted. The last
+  receipt remains `20260829T184200.680506Z-3949348d`, zero-error
+  `completed_with_absent_harnesses`, publication `blocked_no_drive_root`.
+- Studio's first launchd-owned attempt remains pid `14336` (`runs=1`,
+  `StartInterval=21600`); the latest persisted receipt remains
+  `20260829T164025.921717Z-279ff85a` with `RunFailure`. Its current process is
+  still active in redaction/validation; it is not a pass and was not restarted.
+- The Drive connector canary is verified in folder
+  `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`: file
+  `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5`, title `AI Chat Archive — Codex canary —
+  c009ce3a`, `text/plain`, 654 bytes. This is an authenticated connector
+  import of one approved redacted object, not automatic runtime publication.
+- Mini remains unmodified: 7,489,840 KiB free; active
+  `CoreSimulator.log` 5,378,451,586 bytes; closed `.prev` log
+  15,403,577,516 bytes. Old SSH timed out; its New-host retry queue remains
+  enabled. Both are still gates.
+
+The next execution action remains a read-only poll of the two launchd-owned
+refreshes. Do not stop Studio's active process or start a foreground fallback;
+do not launch a second long canary while either transaction is active.
+
 ## 1. Goal and current intent
 
 Matt's goal, in his words:
