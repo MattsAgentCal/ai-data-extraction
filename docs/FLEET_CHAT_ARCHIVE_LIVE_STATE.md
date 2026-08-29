@@ -1,7 +1,7 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-08-29T20:09:39Z
-**State:** active deployment; the MacBook lease owner is running the reachable-host canaries and a verified Drive connector canary. Runtime File Provider publication, Mini disk approval, and Old MacBook reachability remain separate gates.
+**Last reconciled:** 2026-08-29T20:26:10Z
+**State:** active deployment; New's second launchd refresh completed and the authenticated Drive connector published a second redacted text canary. Studio's launchd run remains active after a prior `RunFailure`; runtime File Provider publication, the six-hour elapsed proof, Mini disk approval, and Old MacBook reachability remain separate gates.
 
 This file is the repository's canonical rollout state. It records body-free
 counts, hashes, paths, and lifecycle observations only. Raw conversation
@@ -16,7 +16,7 @@ bodies, indexes, and other private archive data remain outside Git.
 | Repository checkout | MacBook docs checkout at `cab761c`; Studio runtime checkout at `3c732d7`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
 | GitHub connector publication | Handoff structural amendment local `9b747927b6217287e035eecbdee8e6309a9e7f4d` is published on the owned fork at `56e8b7f5f8a7ad47acd36bcd0a901e95339d4f20`, parent `aa9bf992f5a0404dd124e85e20b8b0bce3e0a001`; ref read back independently. |
-| Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; redacted text canary `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` (`text/plain`, 654 bytes) moved into the folder and metadata/listing read back. |
+| Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; redacted text canaries `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` (654 bytes) and `18kklPXiMM2bzF1ZU8tCzlJJ9k-HblbC_` (49,484,530 bytes) moved into the folder and metadata/listing read back. |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
 The deployed runtime pins are:
@@ -34,8 +34,8 @@ The deployed runtime pins are:
 
 | Host | Observed truth | Classification |
 |---|---|---|
-| New MacBook | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.new-macbook` is loaded under launchd, `runs=2`, active pid `36868`, and `StartInterval=21600` at 20:09:38Z. Prior receipt `20260829T184200.680506Z-3949348d` reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, 9 new Codex objects, and OpenClaw absent; the supervised refresh has not emitted a new receipt yet. | **DONE:** checkout, preflight, persistent schedule, one successful supervised scan. **IN-FLIGHT:** supervised refresh, six-hour elapsed proof, and Drive publication. |
-| Mac Studio | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.mac-studio` is loaded under launchd, `runs=1`, `state=running`, pid `14336`, and `StartInterval=21600` at 20:09:39Z. Latest persisted receipt `20260829T164025.921717Z-279ff85a` failed with `RunFailure`; the current launchd attempt remains in-flight. CloudStorage has zero `GoogleDrive-*` providers. | **DONE:** checkout, preflight, persistent schedule, connector folder/receipt doc, verified redacted text canary. **IN-FLIGHT:** current supervised scan, File Provider mount, raw shard publication, and six-hour elapsed proof. |
+| New MacBook | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.new-macbook` completed its second launchd-owned refresh at `2026-08-29T20:19:56.940667Z`. Receipt `20260829T195959.324876Z-be2608f7` reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`; Claude 1 conversation, Codex 5, Hermes none, OpenClaw absent. The label is idle at `runs=2`, exit 0, `StartInterval=21600`. The current goal session object is digest `d5883edd…` and 49,484,530 bytes outside Git. | **DONE:** checkout, preflight, persistent schedule, two successful supervised scans, current-session collection. **IN-FLIGHT:** six-hour elapsed proof and runtime Drive publication. |
+| Mac Studio | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.mac-studio` is loaded under launchd, `runs=1`, `state=running`, pid `14336`, and `StartInterval=21600` at 20:26:10Z. Latest persisted receipt `20260829T164025.921717Z-279ff85a` failed with `RunFailure`; the current launchd attempt remains in-flight. CloudStorage has zero `GoogleDrive-*` providers. | **DONE:** checkout, preflight, persistent schedule, connector folder/receipt docs, two verified redacted connector text canaries. **IN-FLIGHT:** current supervised scan, File Provider mount, raw shard publication, and six-hour elapsed proof. |
 | Mac mini | Clean at runtime `3c732d7`; no archive label is loaded. At 20:09:39Z, free capacity was `7,489,840 KiB`; active `CoreSimulator.log` was `5,378,451,586` bytes, and closed `CoreSimulator.prev.log` was `15,403,577,516` bytes. | **DONE:** read-only disk census. **NOT STARTED:** approved cleanup, canary, schedule. |
 | Old MacBook | `ssh oldmac` timed out at 20:09:39Z. No live source inventory, deployment, or canary proof exists. New's retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` remains enabled/loaded under launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and exit 0 after `offline_retryable`/`ssh_unreachable`. | **DONE:** retry behavior proof and active launchd queue. **IN-FLIGHT:** offline retry. **NOT STARTED:** online deployment/canary. |
 
@@ -70,18 +70,25 @@ The deployed runtime pins are:
   654-byte redacted Codex text canary (`1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5`)
   into that folder. JSON/raw archive upload remains unsupported by the
   connector, and runtime File Provider publication is separate.
+- The New second launchd refresh completed with zero errors and collected the
+  current goal session as redacted object `d5883edd…` (49,484,530 bytes).
+- The authenticated Drive connector imported that object once as text, moved
+  it to the exact `AI Chat Archive` folder, and read back file ID
+  `18kklPXiMM2bzF1ZU8tCzlJJ9k-HblbC_`, MIME `text/plain`, and size
+  49,484,530 bytes. This is connector publication evidence only.
 
 ## IN-FLIGHT
 
 - The production six-hour launchd labels on New and Studio are loaded with
-  durable owner-only logs. New's second launchd-owned refresh (pid `36868`)
-  and Studio's first launchd-owned attempt (pid `14336`) were still active at
-  the latest readback. The launchd configuration proves persistent supervision
-  and a 21,600-second interval; it does not yet prove an elapsed six-hour cycle.
+  durable owner-only logs. New's second launchd-owned refresh completed with
+  exit 0; Studio's first launchd-owned attempt (pid `14336`) remains active.
+  The launchd configuration proves persistent supervision and a
+  21,600-second interval; it does not yet prove an elapsed six-hour cycle.
 - The connector canary is visible in Drive, but runtime publication still
   reports `blocked_no_drive_root`/`blocked_drive_unavailable` because Studio has
-  no local File Provider mount. Raw shard publication and the automatic
-  new-chat-in-Drive proof are in-flight.
+  no local File Provider mount. The second connector canary is visible, but
+  raw shard publication and the automatic new-chat-in-Drive proof remain
+  in-flight.
 
 ## NOT STARTED
 
@@ -92,8 +99,9 @@ The deployed runtime pins are:
 - The Mini storage gate has not been approved or acted on, so its real canary
   and production schedule remain unstarted.
 - Old MacBook has not returned online for live deployment or canary proof.
-- The six-hour labels are loaded on New and Studio, but their first runs have not
-  completed and no approximately 21,600-second elapsed-cycle receipt exists yet.
+- The six-hour labels are loaded on New and Studio; New's RunAtLoad refreshes
+  have completed, but no approximately 21,600-second elapsed-cycle receipt
+  exists yet.
 - OpenClaw host collection has not been proven on New or Studio because the
   source is absent there; Mini and Old have no canary proof.
 - This checkout contains no separate tracked ranking, graph, or wiki entry for

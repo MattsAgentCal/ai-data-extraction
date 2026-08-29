@@ -96,6 +96,48 @@ The next execution action remains a read-only poll of the two launchd-owned
 refreshes. Do not stop Studio's active process or start a foreground fallback;
 do not launch a second long canary while either transaction is active.
 
+### Resume execution readback — 2026-08-29T20:26:10Z
+
+This is the latest body-free execution readback and supersedes the earlier
+20:09:39Z snapshot without rewriting that historical record:
+
+- **New MacBook:** the second launchd-owned refresh completed at
+  `2026-08-29T20:19:56.940667Z`. Receipt
+  `20260829T195959.324876Z-be2608f7.json` reports
+  `completed_with_absent_harnesses`, zero errors, and
+  `publication=blocked_no_drive_root`; Claude collected 1 conversation,
+  Codex 5, Hermes had no conversations, and OpenClaw is not present. The
+  label is now idle at `runs=2`, exit 0. The current goal session is a new
+  redacted object digest
+  `d5883edd0e8b0a0f8d86ae477acb1e6e70a4c7bbe6e1ef2f6d38b8020c0c54a3`
+  (49,484,530 bytes), retained outside Git.
+- **Mac Studio:** at `20:26:10Z`,
+  `com.mattrotundo.ai-chat-archive.mac-studio` is still launchd-owned,
+  `runs=1`, pid `14336`, `StartInterval=21600`, and active. The latest
+  persisted receipt remains `20260829T164025.921717Z-279ff85a.json` with
+  `RunFailure`; no restart or foreground fallback was used. Studio still has
+  zero Google Drive File Provider entries, so runtime publication is not
+  proven. The active transaction remains in-flight and must be allowed to
+  finish or be diagnosed once, boundedly, under the lease.
+- **Google Drive connector:** the authenticated connector imported the current
+  49,484,530-byte redacted goal-session object once, moved it into `AI Chat
+  Archive`, and read back parent, MIME, and size. File ID
+  `18kklPXiMM2bzF1ZU8tCzlJJ9k-HblbC_` was created at
+  `2026-08-29T20:23:37.511Z`; the folder now lists exactly four items (two
+  receipt Docs and two redacted text canaries). This is a verified connector
+  publication, not proof that a launchd runtime cycle publishes automatically.
+- **Mac mini:** the latest read-only census remains 7,489,840 KiB free;
+  active `CoreSimulator.log` is 5,378,451,586 bytes and closed `.prev` is
+  15,403,577,516 bytes. No cleanup, compression, canary, or schedule was
+  started; Matt's closed-log approval remains open.
+- **Old MacBook:** `ssh oldmac` remains unreachable. The New-host retry label
+  is enabled and launchd-loaded at `RunAtLoad=true`, `StartInterval=21600`,
+  with the prior retryable offline receipt; no live deployment exists.
+
+The six-hour elapsed-cycle proof and a new chat appearing through runtime
+Drive publication remain unproven. Keep the launchd process and lease rules
+binding; do not claim completion from the connector canary alone.
+
 ## 1. Goal and current intent
 
 Matt's goal, in his words:

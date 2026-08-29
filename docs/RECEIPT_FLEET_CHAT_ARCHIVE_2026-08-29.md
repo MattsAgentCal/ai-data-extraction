@@ -6,9 +6,10 @@ and launchd-only documentation controls, New and Studio six-hour launchd jobs
 are loaded, and the Drive connector folder/receipt doc are verified. Mini
 cleanup and Old MacBook remain gated/offline.
 
-**Observed:** 2026-08-29T20:09:39Z, from the local MacBook plus SSH probes to
+**Observed:** 2026-08-29T20:26:10Z, from the local MacBook plus SSH probes to
 Studio and Mini, launchd readback, GitHub connector readback, and Drive connector
-readback. The two first launchd scans were still running at the observation.
+readback. New's second launchd scan completed; Studio's first launchd scan was
+still active at the observation.
 
 ## Code and verification
 
@@ -32,11 +33,11 @@ conversation bytes were opened or copied into this receipt.
 
 | Host | Receipt/probe evidence |
 |---|---|
-| New MacBook | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, active pid `36868` at 20:09:38Z. Prior completed receipt `20260829T184200.680506Z-3949348d` is zero-error `blocked_no_drive_root`; the supervised refresh has not emitted a new receipt. |
+| New MacBook | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, now idle with exit 0. Receipt `20260829T195959.324876Z-be2608f7` collected at `20:19:56.940667Z`, reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`; Claude 1, Codex 5, Hermes none, OpenClaw absent. |
 | Mac Studio | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336` at 20:09:39Z. Latest persisted receipt `20260829T164025.921717Z-279ff85a` is `RunFailure`; the current supervised attempt remains in-flight. CloudStorage has zero `GoogleDrive-*` providers. |
 | Mac mini | Clean `3c732d7` checkout. At 20:09:39Z, free capacity was 7,489,840 KiB; active `CoreSimulator.log` was 5,378,451,586 bytes and closed `CoreSimulator.prev.log` was 15,403,577,516 bytes. No cleanup or canary started. |
 | Old MacBook | `ssh oldmac` timed out at 20:09:39Z. No live deployment or canary proof. Current New-host retry label remains enabled/loaded under launchd; earlier offline retry proof is preserved as historical evidence in the live-state file. |
-| Google Drive | Connector profile is Matt Rotundo. Exact folder `AI Chat Archive` was read back with the two receipt Docs plus redacted text canary `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` (654 bytes). Studio File Provider installation/mount and runtime raw object publication remain absent. |
+| Google Drive | Connector profile is Matt Rotundo. Exact folder `AI Chat Archive` was read back with two receipt Docs plus redacted text canaries `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` (654 bytes) and `18kklPXiMM2bzF1ZU8tCzlJJ9k-HblbC_` (49,484,530 bytes). Studio File Provider installation/mount and runtime raw object publication remain absent. |
 
 ## Classification at pause
 
@@ -52,6 +53,9 @@ conversation bytes were opened or copied into this receipt.
 - The connector published the body-free fleet receipt doc into the private Drive
   folder and read it back; this is a connector receipt, not raw-shard or
   automatic-cycle proof.
+- The connector imported the current New goal-session object once as redacted
+  `text/plain`, moved it to the same folder, and read back its parent, MIME,
+  and size. This does not satisfy automatic runtime publication.
 - Studio's manifest-bound Claude index restore, the Old retry behavior proof,
   and the owner-only Drive DMG staging are retained as receipts/pointers.
 
@@ -111,3 +115,24 @@ owner-only outside Git.
   Studio still has zero Google Drive File Provider entries, and the runtime
   remains blocked from publishing raw JSON shards until that provider is
   mounted.
+
+## Resume execution readback — 2026-08-29T20:26:10Z
+
+- New's second launchd refresh completed at `2026-08-29T20:19:56.940667Z`.
+  Receipt `20260829T195959.324876Z-be2608f7` is
+  `completed_with_absent_harnesses`, zero-error, and
+  `publication=blocked_no_drive_root`; launchd is idle at `runs=2`, exit 0.
+  The current goal session was collected as redacted object
+  `d5883edd…` (49,484,530 bytes), outside Git.
+- The Drive connector imported that object once, moved file
+  `18kklPXiMM2bzF1ZU8tCzlJJ9k-HblbC_` into folder
+  `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`, and read back MIME `text/plain` and
+  size 49,484,530 bytes. The folder listing now contains exactly four items.
+  This is not automatic launchd publication.
+- Studio remains launchd-owned and active at `20:26:10Z` (pid `14336`,
+  `runs=1`, `StartInterval=21600`); its latest persisted receipt remains
+  `RunFailure` and CloudStorage has zero Google Drive providers. Mini remains
+  unapproved for closed-log compression; Old remains unreachable with its
+  launchd retry queue enabled.
+
+The six-hour elapsed-cycle receipt and new-chat-in-Drive proof remain pending.
