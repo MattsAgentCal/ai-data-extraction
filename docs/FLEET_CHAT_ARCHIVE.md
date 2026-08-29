@@ -112,13 +112,13 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Host state as of 2026-08-29T21:25:51Z
+## Host state as of 2026-08-29T21:35:42Z
 
 | Host | Verified rollout truth | Scheduler / blocker |
 |---|---|---|
 | New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, state `not running`, exit 0. Receipt `20260829T195959.324876Z-be2608f7` is `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`; Claude 1, Codex 5, Hermes none, OpenClaw absent. | Two supervised scans are **DONE**; the six-hour elapsed proof and runtime Drive publication remain **IN-FLIGHT**. |
-| Mac Studio | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336`, state `running` at the 21:25:51Z readback. The latest persisted receipt `20260829T164025.921717Z-279ff85a` failed with `RunFailure`; the current attempt is launchd-owned, CPU-bound, and no provider is mounted. | Current supervised scan, File Provider mount, raw shard publication, and six-hour proof are **IN-FLIGHT**. |
-| Mac mini | Clean at runtime `3c732d7`; no production archive label is enabled. At 21:12:17Z, free capacity was 7,385,588 KB; `CoreSimulator.log` was 5,451,026,129 bytes and active, while `CoreSimulator.prev.log` was 15,403,577,516 bytes and closed. | Storage approval is required before any canary or schedule; no cleanup was performed. |
+| Mac Studio | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336`, PPID `1`, and state `running` at the 21:35:38Z readback. The latest persisted receipt `20260829T164025.921717Z-279ff85a` remains `RunFailure`; a 5-second sample at 21:35:42Z was CPU-bound in regex redaction/JSON encoding and no provider is mounted. | Current supervised scan, File Provider mount, raw shard publication, and six-hour proof are **IN-FLIGHT**. |
+| Mac mini | Clean at runtime `3c732d7`; no production archive label is enabled. At 21:33:49Z, free capacity was 7,351,536 KB; `CoreSimulator.log` was 5,470,568,332 bytes and active, while `CoreSimulator.prev.log` was 15,403,577,516 bytes and closed. | Storage approval is required before any canary or schedule; no cleanup was performed. |
 | Old MacBook | Offline; `oldmac` timed out at 21:12:17Z. New's retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is enabled/loaded under launchd with one `offline_retryable`/`ssh_unreachable` attempt. | Retry queue is **ACTIVE**; no live deployment or canary proof. |
 
 `configs/old-macbook.pending.json` is a placeholder, not a deployment receipt. It must be checked against the live host before installation.
@@ -164,6 +164,14 @@ launchd attempt remains in-flight after a prior `RunFailure`.
 The Studio config polls `newmac`, `cals-mac-mini`, and `oldmac` only when its
 scheduler or a reviewed manual run is active. An offline remote is recorded as
 `unreachable`; it does not invalidate a previously verified cached shard.
+
+## Current execution readback — 2026-08-29T21:35:42Z
+
+Studio remains a single launchd-owned transaction (pid `14336`, PPID `1`);
+the read-only sample did not justify a restart or code change. New is idle
+after its zero-error supervised refresh. The Drive connector folder still has
+exactly four verified items and no new approved text artifact was available for
+import. No release, lease, schema checkpoint, or review wave changed.
 
 ## Google Drive completion gate
 

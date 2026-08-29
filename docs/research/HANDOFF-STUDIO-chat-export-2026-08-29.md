@@ -128,6 +128,38 @@ This is a read-only status update under amendment commit
 `8802714639e5d6f1cc4ab383d287ac71cb15e477`; it does not open a new schema
 census, release, or review wave.
 
+### Current execution readback — 2026-08-29T21:35:42Z
+
+- **Lease and release:** the repo-root lease remains unchanged and still names
+  `codex:macbook` as sole release owner. The branch is clean and its fork ref
+  was independently read back at `880358eb0026696deca6d6226a0cfd7a5f3a3bc4`.
+  This readback made no deploy, merge, restart, connector write, or lease
+  transfer.
+- **New MacBook:** launchd label `com.mattrotundo.ai-chat-archive.new-macbook`
+  remains idle at `runs=2`, exit 0. Receipt
+  `20260829T195959.324876Z-be2608f7` is unchanged: zero errors,
+  `completed_with_absent_harnesses`, and `blocked_no_drive_root`.
+- **Mac Studio:** launchd still owns pid `14336` (PPID `1`), `runs=1`,
+  elapsed `02:53:37` at the 21:35:38Z readback, and `StartInterval=21600`.
+  A bounded sample at 21:35:42Z remained in regex redaction/JSON encoding;
+  receipt count is 42, the latest persisted receipt remains
+  `20260829T164025.921717Z-279ff85a`/`RunFailure`, and CloudStorage still has
+  zero Google Drive providers. No restart or foreground fallback was used.
+- **Mac mini:** the 21:33:49Z read-only census found `7,351,536 KB` free,
+  active `CoreSimulator.log` at `5,470,568,332` bytes, and closed
+  `CoreSimulator.prev.log` at `15,403,577,516` bytes. No archive label or
+  process is loaded; Matt's closed-log approval remains open.
+- **Old MacBook:** no new probe was performed in this readback; the last
+  verified state remains the launchd retry queue with Old unreachable.
+- **Drive:** the authenticated connector read back the exact four-item
+  `AI Chat Archive` folder and found no new approved text artifact; no write
+  occurred. Connector publication remains manual evidence, not runtime
+  six-hour proof.
+
+This readback changes no release, schema checkpoint, or review wave. Keep the
+Studio process under launchd and leave it untouched until it exits or a single
+bounded diagnosis justifies one repair.
+
 ### Resume execution readback — 2026-08-29T20:09:39Z
 
 - New's second supervised refresh is still running as launchd pid `36868`
@@ -291,7 +323,7 @@ or a missing/future schema checkpoint is a hard stop.
 
 ## 3. Honest state during active deployment
 
-Last live reconciliation was 2026-08-29T20:43:59Z. The canonical repository
+Last live reconciliation was 2026-08-29T21:35:42Z. The canonical repository
 state is [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](../FLEET_CHAT_ARCHIVE_LIVE_STATE.md)
 and the body-free evidence receipt is
 [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](../RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md).
@@ -316,7 +348,7 @@ and the body-free evidence receipt is
   exit 0.
 - Studio has prior body-free, zero-error receipts, but its latest persisted
   attempt ended with `RunFailure`; the currently running launchd attempt is
-  still not a pass. At the 20:43:59Z diagnosis it was CPU-bound in Python
+  still not a pass. At the 21:35:42Z diagnosis it was CPU-bound in Python
   redaction/JSON serialization (`R`, about 99% CPU), not I/O-wait; no restart
   or foreground fallback was used.
 - Studio's manifest-bound Claude index repair is complete; its interrupted-index
@@ -507,10 +539,11 @@ are `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.log` and
   `run`/code `RunFailure`, and publication `not_attempted`. The prior successful
   receipt remains `20260829T153756.562461Z-d1520afe` with
   `blocked_drive_unavailable`.
-- At 20:43:59Z, launchd showed `state=running`, `runs=1`, pid `14336`, about
-  2:01:58 elapsed, and `StartInterval=21600`. A read-only `sample` was
-  CPU-bound in Python regex redaction and JSON serialization, not I/O wait;
-  the current run is launchd-owned and its result is not yet known.
+- At 21:35:38Z, launchd showed `state=running`, `runs=1`, pid `14336`, PPID
+  `1`, about `02:53:37` elapsed, and `StartInterval=21600`. A read-only
+  `sample` at 21:35:42Z was CPU-bound in Python regex redaction and JSON
+  serialization, not I/O wait; the current run is launchd-owned and its result
+  is not yet known.
 - Hub statuses were New `pulled` (1131/1131), Mini `pending_manifest`, and Old
   `unreachable`. The connector receipt is in Drive folder
   `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; no local File Provider mount is visible.
@@ -519,8 +552,8 @@ are `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.log` and
 
 - Read-only SSH found a clean checkout at `3c732d7`; no production archive label
   is enabled.
-- Free capacity was 7,537,844 KiB (about 7.19 GiB). The active
-  `CoreSimulator.log` is 5,339,541,128 bytes. The closed
+- Free capacity was 7,351,536 KB. The active `CoreSimulator.log` is
+  5,470,568,332 bytes. The closed
   `CoreSimulator.prev.log` is 15,403,577,516 bytes with zero open handles.
 - No cleanup, compression, or real canary was started. The only proposed
   cleanup is the closed, zero-handle log; never delete or compress the active
