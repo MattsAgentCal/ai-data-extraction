@@ -1,10 +1,10 @@
 # Fleet chat archive documentation receipt — 2026-08-29
 
 **Receipt scope:** body-free deployment and publication evidence. The reviewed
-runtime remains `3c732d7`; docs/addendum commit `5cd62da` is published to the
-owned GitHub fork, New and Studio six-hour launchd jobs are loaded, and the Drive
-connector folder/receipt doc are verified. Mini cleanup and Old MacBook remain
-gated/offline.
+runtime remains `3c732d7`; the current branch contains the lease, schema-freeze,
+and launchd-only documentation controls, New and Studio six-hour launchd jobs
+are loaded, and the Drive connector folder/receipt doc are verified. Mini
+cleanup and Old MacBook remain gated/offline.
 
 **Observed:** 2026-08-29T19:00:00Z, from the local MacBook plus SSH probes to
 Studio and Mini, launchd readback, GitHub connector readback, and Drive connector
@@ -19,7 +19,7 @@ readback. The two first launchd scans were still running at the observation.
 | Docs/addendum commit | Local `6625a608fce312c0124d7bd92cca90b938373447` (tree `df6d14c6a477428a81e318f3fbf13b79bc892e07`) |
 | Test command | `python3.14 -m unittest discover -s tests -p 'test*.py'` |
 | Test result | 263 tests ran, `OK` |
-| GitHub connector | Fork branch read back at connector commit `249082dba1cd3d7909eacb98f583c99717e12c91`; tree `80dcb504ef1b3131547c0db6414a3bd570e4ce68` matches local docs commit `7dbc965` content |
+| GitHub connector | Pre-amendment fork branch read back at connector commit `fc74861ebae3357d77884473805c9166424782b9`; tree `bb1b3533c980b8a98a871c945e12b65db7869ab5` matches local docs commit `898f68a` content; this structural addendum is the child to publish/read back |
 | Drive connector | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; metadata and bodies read back |
 | Bundle | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle` |
 | Bundle SHA-256 | `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
@@ -84,7 +84,7 @@ This addendum supersedes only the live-state observations above; the original
 | Mini | Runtime remains `3c732d7`; free capacity `7,537,844 KiB`; active `CoreSimulator.log` is `5,339,541,128` bytes and closed `CoreSimulator.prev.log` is `15,403,577,516` bytes. No cleanup or canary was performed. |
 | Old MacBook | `ssh oldmac` timed out again at 19:07Z; retry label is enabled/loaded under launchd (`RunAtLoad=true`, `StartInterval=21600`, `runs=1`, exit 0) and remains offline/non-blocking. |
 | Drive | Studio CloudStorage contains zero `GoogleDrive-*` providers. The connector folder listing contains exactly two native Docs (`1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`, `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`) and no raw files; raw object publication and new-chat-in-Drive proof are absent. |
-| GitHub | Preceding connector branch tip is `c39c65a3941acb56c5a31bc70c846fcd96eaf227`, tree `13168cd20d877e3e48c7ccf359c9402ef7b15a17`, matching local `ed5d2b3` content; the final docs-only reconciliation is being published as a new child. |
+| GitHub | Pre-amendment connector branch tip is `fc74861ebae3357d77884473805c9166424782b9`, tree `bb1b3533c980b8a98a871c945e12b65db7869ab5`, matching local `898f68a` content; this structural addendum is being published as a new child. |
 
 The deployment lease and schema-freeze checkpoint remain binding structural
 controls: every long canary is launchd-owned, non-owner sessions stand down via

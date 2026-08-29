@@ -48,8 +48,10 @@ the release commit. No parallel review wave is authorized for this checkpoint.
   identity does not match that file must stand down; transfer is an owner
   commit, not an informal chat handoff.
 - Every long canary is a launchd-owned job with durable stdout, stderr, exit
-  status, and KeepAlive/retry state. A foreground shell or controlling chat
-  session is not a canary node and cannot satisfy this gate.
+  status, and an explicit schedule (`RunAtLoad`/`StartInterval`). A foreground
+  shell or controlling chat session is not a canary node and cannot satisfy
+  this gate. If retry-on-exit is required, it is declared in that canary's own
+  launchd plist; it is not inferred from an interactive session.
 - Before enabling a broad release, update this checkpoint with the new census,
   validator hash, and exactly one review-wave result. Do not reuse this record
   by changing only the release commit.

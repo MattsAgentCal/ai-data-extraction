@@ -13,6 +13,37 @@ the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
+### Matt-ratified structural addendum — 2026-08-29
+
+The following are repository/runtime invariants, not advice or a chat promise:
+
+- Every long-canary node is a launchd-owned service with an absolute plist,
+  durable owner-only stdout/stderr, and read-backable exit/run state. A
+  terminal, agent, or controlling chat session may install or inspect it but
+  may never own the long-running process. A canary without a live `launchctl
+  print` readback is not started or passed.
+- The repo-root [`.deployment-lease.json`](../../.deployment-lease.json) is the
+  machine-readable deployment lease. It names the one release owner, session,
+  host, scope, and expiry. Every session reads and compares it before a host
+  mutation, merge, restart, or connector write; a non-owner stands down, and a
+  transfer is valid only as an owner-authored commit.
+- Before any broad release, the tracked
+  [`SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`](../SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md)
+  must contain exactly one live-schema census, one canonical validator, and
+  one batched review wave. A new runtime requires a new checkpoint; this
+  checkpoint cannot be edited in place to bless it.
+
+At this amendment's readback, the lease still names
+`codex:macbook`/`01a046f9-9427-7343-9221-4135b50bc30f` as the sole release owner.
+At 2026-08-29T19:31:10Z, New and the Old retry queue were loaded locally under
+launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and exit 0. At
+2026-08-29T19:33:27Z, Studio's
+`com.mattrotundo.ai-chat-archive.mac-studio` remained launchd-owned and
+running (pid `14336`, `runs=1`, `RunAtLoad=true`, `StartInterval=21600`); its
+latest persisted receipt was still `RunFailure`, so the canary is not a pass.
+No broad release or foreground canary was started for this amendment, and no
+second schema census or review wave was opened.
+
 ## 1. Goal and current intent
 
 Matt's goal, in his words:
@@ -124,11 +155,11 @@ and the body-free evidence receipt is
   stderr delta, `offline_retryable`/`ssh_unreachable`).
 - The owner-only Google Drive DMG is staged and verified on Studio. It is not
   installed and no provider is mounted.
-- The GitHub connector published the preceding docs tree through the owned
-  fork: readback commit `c39c65a3941acb56c5a31bc70c846fcd96eaf227`, tree
-  `13168cd20d877e3e48c7ccf359c9402ef7b15a17`, matching local `ed5d2b3`
-  content. The final docs-only reconciliation in this handoff must be read
-  back again after connector publication; do not infer its remote SHA.
+- The GitHub connector published the pre-amendment docs tree through the owned
+  fork: readback commit `fc74861ebae3357d77884473805c9166424782b9`, tree
+  `bb1b3533c980b8a98a871c945e12b65db7869ab5`, matching local `898f68a`
+  content. This structural addendum must be read back as its child after
+  connector publication; do not infer its remote SHA.
 - The Drive connector created and verified the private folder `AI Chat Archive`
   (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and published/read back a body-free
   receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`) plus a launchd
@@ -202,7 +233,7 @@ and the body-free evidence receipt is
 | Documentation commit | `5e982165e7ff4b05e10931a9466ce0888da52bc6` | Adds the live-state and receipt docs and corrects README/fleet-guide drift. |
 | Handoff parent | `a2b40c9165a82b022054d4d470bf371cbc9890b4` | Adds this handoff before the addendum. |
 | Lease/schema addendum | `5cd62dab6e4b5898cddfc8404b398525636fde00` | Adds `.deployment-lease.json`, schema-freeze checkpoint, and the binding lease/launchd rules. |
-| Active docs reconciliation | Local `ed5d2b3df9e507e976c79dd31d74490a2f8b29c6`; preceding connector publication `c39c65a3941acb56c5a31bc70c846fcd96eaf227` (tree `13168cd20d877e3e48c7ccf359c9402ef7b15a17`) | Connector commit has the same tree; the final docs-only reconciliation must be read back as a new child. |
+| Active docs reconciliation | Pre-amendment local `898f68a71148eb07a4a354055dfdd476d53e8cca`; preceding connector publication `fc74861ebae3357d77884473805c9166424782b9` (tree `bb1b3533c980b8a98a871c945e12b65db7869ab5`) | This structural addendum is the immediate local child and must be read back as the next connector child. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub
