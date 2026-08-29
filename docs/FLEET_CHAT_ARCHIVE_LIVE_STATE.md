@@ -15,8 +15,8 @@ bodies, indexes, and other private archive data remain outside Git.
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
 | Repository checkout | MacBook and Studio clean at docs commit `5cd62dab6e4b5898cddfc8404b398525636fde00`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub connector publication | Fork branch `MattsAgentCal/ai-data-extraction:matt/fleet-chat-archive-deployed` read back at `5cd62da`; tree `16cd1967c3fe1b19607e6933d1b9b4f44b499a96` |
-| Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt doc ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`; both read back successfully |
+| GitHub connector publication | Fork branch `MattsAgentCal/ai-data-extraction:matt/fleet-chat-archive-deployed` read back at connector commit `fab57fa8c71cdcfa769cb1bbad1f145d18061d56`; tree `df6d14c6a477428a81e318f3fbf13b79bc892e07` matches local `6625a60` content |
+| Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; folder listing and bodies read back successfully |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
 The deployed runtime pins are:
@@ -62,10 +62,11 @@ The deployed runtime pins are:
 - The owner-only Studio Google Drive DMG was staged and verified. Its observed
   size is 141,267,496 bytes and its SHA-256 is
   `fb6927060f8f20efb8ac2027d00a9c0787c111fa57c01fe6a29675afaf5c1178`.
-- The GitHub connector idempotently updated and read back the owned fork ref at
-  `5cd62da`. The Drive connector created and verified the private `AI Chat
-  Archive` folder and a body-free receipt doc inside it; no raw local-path upload
-  was attempted.
+- The GitHub connector created/published the docs tree and read back connector
+  commit `fab57fa` (the tree matches local commit `6625a60`); the owned fork ref
+  is verified. The Drive connector created and verified the private `AI Chat
+  Archive` folder and two body-free receipt docs inside it; no raw local-path
+  upload was attempted.
 
 ## IN-FLIGHT
 
@@ -103,8 +104,9 @@ The deployed runtime pins are:
 - Release bundle: `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`.
 - Structured evidence and read-only observation details:
   [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md).
-- Connector Drive receipt: folder ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`, doc ID
-  `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`.
+- Connector Drive receipts: folder ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`,
+  docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and
+  `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`.
 
 All paths above point to owner-only or temporary artifacts. They are references,
 not instructions to copy raw conversation data into Git.

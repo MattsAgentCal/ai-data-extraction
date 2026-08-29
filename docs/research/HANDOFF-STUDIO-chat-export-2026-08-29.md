@@ -108,12 +108,14 @@ and the body-free evidence receipt is
   stderr delta, `offline_retryable`/`ssh_unreachable`).
 - The owner-only Google Drive DMG is staged and verified on Studio. It is not
   installed and no provider is mounted.
-- The GitHub connector idempotently updated the owned fork ref to
-  `5cd62dab6e4b5898cddfc8404b398525636fde00` and read back the commit/tree.
+- The GitHub connector published the current docs tree and read back connector
+  commit `fab57fa8c71cdcfa769cb1bbad1f145d18061d56` (tree
+  `df6d14c6a477428a81e318f3fbf13b79bc892e07`, matching local `6625a60` content).
 - The Drive connector created and verified the private folder `AI Chat Archive`
   (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and published/read back a body-free
-  receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`). No raw
-  local-path upload was attempted.
+  receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`) plus a launchd
+  schedule receipt doc (ID `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`). No
+  raw local-path upload was attempted.
 - New and Studio have their production six-hour labels loaded by launchd with
   `RunAtLoad=true` and `StartInterval=21600`; the first live scans were still
   running at the last check.
@@ -174,6 +176,7 @@ and the body-free evidence receipt is
 | Documentation commit | `5e982165e7ff4b05e10931a9466ce0888da52bc6` | Adds the live-state and receipt docs and corrects README/fleet-guide drift. |
 | Handoff parent | `a2b40c9165a82b022054d4d470bf371cbc9890b4` | Adds this handoff before the addendum. |
 | Lease/schema addendum | `5cd62dab6e4b5898cddfc8404b398525636fde00` | Adds `.deployment-lease.json`, schema-freeze checkpoint, and the binding lease/launchd rules. |
+| Active docs reconciliation | Local `6625a608fce312c0124d7bd92cca90b938373447`; connector publication `fab57fa8c71cdcfa769cb1bbad1f145d18061d56` | Reconciles live launchd/Drive state; connector commit has the same tree with connector-generated metadata. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub

@@ -109,11 +109,12 @@ when the new remote attempt reports `unreachable`.
 `configs/old-macbook.pending.json` is a placeholder, not a deployment receipt. It must be checked against the live host before installation.
 
 The Google Drive connector is authenticated. It created and verified the private
-folder `AI Chat Archive` (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and a body-free
-receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`) inside it. The
-runtime's File Provider is still not installed or mounted on Studio, so raw
-conversation-object publication and the automatic new-chat-in-Drive proof remain
-unearned; the connector receipt is not a substitute for that proof.
+folder `AI Chat Archive` (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and two body-free
+receipt docs (IDs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and
+`1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`) inside it. The runtime's File
+Provider is still not installed or mounted on Studio, so raw conversation-object
+publication and the automatic new-chat-in-Drive proof remain unearned; connector
+receipts are not a substitute for that proof.
 
 Existing v1 objects, nullable-session rows, and legacy base-format Codex rows
 are not trusted or silently migrated by the new stream.
