@@ -103,6 +103,31 @@ finishes or has one bounded diagnosis. No foreground canary, second Studio run,
 lease transfer, broad release, or extra review wave is authorized by this
 amendment.
 
+### Post-amendment live readback — 2026-08-29T21:12:17Z
+
+- **New MacBook:** the launchd label is idle at `runs=2`, exit 0. The latest
+  body-free receipt remains `20260829T195959.324876Z-be2608f7`, with zero
+  errors, `completed_with_absent_harnesses`, and `publication=blocked_no_drive_root`.
+- **Mac Studio:** the launchd label is still `running`, `runs=1`, pid `14336`
+  at the 21:09:53Z poll, with `last exit=(never exited)` and about 98.9% CPU.
+  Receipt count remains 42; the latest persisted receipt remains
+  `failed`/`RunFailure`, `publication=not_attempted`, and CloudStorage has
+  zero Google Drive providers. No restart or foreground fallback was used.
+- **Mac mini:** the 21:12:17Z SSH preflight reached `Cals-Mac-mini`, found
+  7,385,588 KB free, and found no archive launchd label, plist, or process.
+  The closed-log approval remains open; the active log was not touched.
+- **Old MacBook:** the bounded SSH retry still timed out. The local retry label
+  is loaded but idle at `runs=1`, exit 0; its latest body-free record is
+  `offline_retryable` with `ssh_unreachable`. The queue remains non-blocking.
+- **Drive connector:** the authenticated folder listing remains exactly four
+  items. No new approved text artifact was present, so this readback performed
+  no connector write. Runtime publication and the elapsed six-hour proof remain
+  unproven.
+
+This is a read-only status update under amendment commit
+`8802714639e5d6f1cc4ab383d287ac71cb15e477`; it does not open a new schema
+census, release, or review wave.
+
 ### Resume execution readback — 2026-08-29T20:09:39Z
 
 - New's second supervised refresh is still running as launchd pid `36868`

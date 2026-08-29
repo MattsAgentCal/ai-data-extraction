@@ -6,10 +6,11 @@ and launchd-only documentation controls, New and Studio six-hour launchd jobs
 are loaded, and the Drive connector folder/receipt doc are verified. Mini
 cleanup and Old MacBook remain gated/offline.
 
-**Observed:** 2026-08-29T20:43:59Z, from the local MacBook plus SSH probes to
+**Observed:** 2026-08-29T21:12:17Z, from the local MacBook plus SSH probes to
 Studio and Mini, launchd readback, GitHub connector readback, and Drive connector
 readback. New's second launchd scan completed; Studio's first launchd scan was
-still active at the observation.
+still active at the observation. This readback opened no new release or review
+wave.
 
 ## Code and verification
 
@@ -34,10 +35,22 @@ conversation bytes were opened or copied into this receipt.
 | Host | Receipt/probe evidence |
 |---|---|
 | New MacBook | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, now idle with exit 0. Receipt `20260829T195959.324876Z-be2608f7` collected at `20:19:56.940667Z`, reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`; Claude 1, Codex 5, Hermes none, OpenClaw absent. |
-| Mac Studio | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336` at 20:43:59Z. Latest persisted receipt `20260829T164025.921717Z-279ff85a` is `RunFailure`; the current supervised attempt remains in-flight and is CPU-bound in redaction/JSON serialization. CloudStorage has zero `GoogleDrive-*` providers. |
-| Mac mini | Clean `3c732d7` checkout. At 20:09:39Z, free capacity was 7,489,840 KiB; active `CoreSimulator.log` was 5,378,451,586 bytes and closed `CoreSimulator.prev.log` was 15,403,577,516 bytes. No cleanup or canary started. |
-| Old MacBook | `ssh oldmac` timed out at 20:09:39Z. No live deployment or canary proof. Current New-host retry label remains enabled/loaded under launchd; earlier offline retry proof is preserved as historical evidence in the live-state file. |
+| Mac Studio | Runtime `3c732d7`; launchd label loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, pid `14336` at the 21:09:53Z poll. Latest persisted receipt `20260829T164025.921717Z-279ff85a` is `RunFailure`; the current supervised attempt remains in-flight and CPU-bound in redaction/JSON serialization. Receipt count is 42 and CloudStorage has zero `GoogleDrive-*` providers. |
+| Mac mini | Clean `3c732d7` checkout. At 21:12:17Z, free capacity was 7,385,588 KB; active `CoreSimulator.log` was 5,451,026,129 bytes and closed `CoreSimulator.prev.log` was 15,403,577,516 bytes. No cleanup or canary started. |
+| Old MacBook | `ssh oldmac` timed out at 21:12:17Z. No live deployment or canary proof. Current New-host retry label remains enabled/loaded under launchd (`runs=1`, exit 0); its latest body-free record is `offline_retryable`/`ssh_unreachable`. |
 | Google Drive | Connector profile is Matt Rotundo. Exact folder `AI Chat Archive` was read back with two receipt Docs plus redacted text canaries `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` (654 bytes) and `18kklPXiMM2bzF1ZU8tCzlJJ9k-HblbC_` (49,484,530 bytes). Studio File Provider installation/mount and runtime raw object publication remain absent. |
+
+## Structural addendum readback — 2026-08-29T21:12:17Z
+
+- The repo-root `.deployment-lease.json` still names one release owner;
+  non-owner sessions must stand down before a host mutation, restart, merge, or
+  connector write.
+- The New and Studio long-canary nodes remain launchd-owned with durable logs;
+  no foreground canary was started. Mini has no archive node until its closed-log
+  gate is approved, and Old remains queued by its launchd retry job.
+- The existing schema-freeze checkpoint remains the only checkpoint for
+  `3c732d7`: one live-schema census, one canonical validator, one review wave,
+  one repair, and one re-review. This readback does not create another wave.
 
 ## Classification at pause
 
