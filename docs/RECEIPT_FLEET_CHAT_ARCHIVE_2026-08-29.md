@@ -16,11 +16,11 @@ readback. The two first launchd scans were still running at the observation.
 |---|---|
 | Checkout | `matt/fleet-chat-archive-deployed`, clean after the docs/addendum commit |
 | Reviewed code commit | `3c732d7b1031949bd18db90ae4ac40f667f6cfa7` |
-| Docs/addendum commit | `5cd62dab6e4b5898cddfc8404b398525636fde00` |
+| Docs/addendum commit | Local `6625a608fce312c0124d7bd92cca90b938373447` (tree `df6d14c6a477428a81e318f3fbf13b79bc892e07`) |
 | Test command | `python3.14 -m unittest discover -s tests -p 'test*.py'` |
 | Test result | 263 tests ran, `OK` |
-| GitHub connector | Fork branch read back at `5cd62da`; tree `16cd1967c3fe1b19607e6933d1b9b4f44b499a96` |
-| Drive connector | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt doc ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`; metadata and body read back |
+| GitHub connector | Fork branch read back at connector commit `fab57fa8c71cdcfa769cb1bbad1f145d18061d56`; tree `df6d14c6a477428a81e318f3fbf13b79bc892e07` matches local docs commit content |
+| Drive connector | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; metadata and bodies read back |
 | Bundle | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle` |
 | Bundle SHA-256 | `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
@@ -36,7 +36,7 @@ conversation bytes were opened or copied into this receipt.
 | Mac Studio | Clean at `5cd62da` (runtime `3c732d7`). `com.mattrotundo.ai-chat-archive.mac-studio` loaded under launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, and active first scan. Last completed receipt: `2026-08-29T16:40:20.517359Z`, zero errors, `blocked_drive_unavailable`; hub New pulled 1131/1131, Mini pending, Old unreachable. |
 | Mac mini | Clean `3c732d7` checkout. Free capacity 7,569,896 KiB at the current probe. `CoreSimulator.log`: 5,309,541,094 bytes and active. `CoreSimulator.prev.log`: 15,403,577,516 bytes and closed. No cleanup or canary started. |
 | Old MacBook | `ssh oldmac` timed out. No live deployment or canary proof. Current New-host retry label is disabled/unloaded; earlier offline retry proof is preserved as historical evidence in the live-state file. |
-| Google Drive | Connector profile is Matt Rotundo. Exact folder `AI Chat Archive` was created under My Drive and read back. Receipt doc `1ovOGhi7Edw...` is in that folder with body-free text. Studio File Provider installation/mount and raw object publication remain absent. |
+| Google Drive | Connector profile is Matt Rotundo. Exact folder `AI Chat Archive` was created under My Drive and read back. Two body-free receipt docs are in that folder. Studio File Provider installation/mount and raw object publication remain absent. |
 
 ## Classification at pause
 
