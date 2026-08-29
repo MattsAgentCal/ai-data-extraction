@@ -1,6 +1,6 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-08-29T18:45:00Z
+**Last reconciled:** 2026-08-29T19:00:00Z
 **State:** active deployment; the MacBook lease owner is running the reachable-host canaries and Drive connector publication. Mini disk approval and Old MacBook reachability remain external gates.
 
 This file is the repository's canonical rollout state. It records body-free
@@ -15,7 +15,7 @@ bodies, indexes, and other private archive data remain outside Git.
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
 | Repository checkout | MacBook and Studio clean at docs commit `5cd62dab6e4b5898cddfc8404b398525636fde00`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub connector publication | Fork branch `MattsAgentCal/ai-data-extraction:matt/fleet-chat-archive-deployed` read back at connector commit `fab57fa8c71cdcfa769cb1bbad1f145d18061d56`; tree `df6d14c6a477428a81e318f3fbf13b79bc892e07` matches local `6625a60` content |
+| GitHub connector publication | Fork branch `MattsAgentCal/ai-data-extraction:matt/fleet-chat-archive-deployed` read back at connector commit `249082dba1cd3d7909eacb98f583c99717e12c91`; tree `80dcb504ef1b3131547c0db6414a3bd570e4ce68` matches local `7dbc965` content |
 | Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; folder listing and bodies read back successfully |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 

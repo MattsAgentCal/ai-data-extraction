@@ -82,7 +82,7 @@ continue it. Preserve the one-wave rule above.
 
 ## 3. Honest state during active deployment
 
-Last live reconciliation was 2026-08-29T18:45:00Z. The canonical repository
+Last live reconciliation was 2026-08-29T19:00:00Z. The canonical repository
 state is [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](../FLEET_CHAT_ARCHIVE_LIVE_STATE.md)
 and the body-free evidence receipt is
 [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](../RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md).
@@ -109,8 +109,8 @@ and the body-free evidence receipt is
 - The owner-only Google Drive DMG is staged and verified on Studio. It is not
   installed and no provider is mounted.
 - The GitHub connector published the current docs tree and read back connector
-  commit `fab57fa8c71cdcfa769cb1bbad1f145d18061d56` (tree
-  `df6d14c6a477428a81e318f3fbf13b79bc892e07`, matching local `6625a60` content).
+  commit `249082dba1cd3d7909eacb98f583c99717e12c91` (tree
+  `80dcb504ef1b3131547c0db6414a3bd570e4ce68`, matching local `7dbc965` content).
 - The Drive connector created and verified the private folder `AI Chat Archive`
   (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and published/read back a body-free
   receipt doc (ID `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM`) plus a launchd
