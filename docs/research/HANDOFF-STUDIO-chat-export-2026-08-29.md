@@ -403,6 +403,8 @@ and the body-free evidence receipt is
 | Structural handoff amendment | Local `9b747927b6217287e035eecbdee8e6309a9e7f4d`; owned-fork readback `56e8b7f5f8a7ad47acd36bcd0a901e95339d4f20` | Encodes the Matt-ratified launchd/lease/schema structures; ref independently verified. |
 | Current live-state docs | Local `f455158563003a127ce234d48244cbc5480580dd`; owned-fork readback `19423503453ebf6371bff09b03361dd5fbafe417` | Records the connector canary and the 20:09:39Z host readback; successor should pull this tree. |
 | Prior docs reconciliation | `16889d0baf1086012691ac735ddcb0ca964e690b` (owned-fork branch tip before this amendment) | Records New's completed second refresh, the 20:26:10Z Drive connector import, and the 20:43:59Z Studio CPU-bound launchd diagnosis. The current branch tip is the commit that carries this handoff amendment. |
+| Ratified structural enforcement amendment | `8802714639e5d6f1cc4ab383d287ac71cb15e477` | Adds the manager's launchd-only, single-lease-owner, and schema-freeze structures to this handoff; pushed to the owned fork and read back. |
+| Post-amendment live-state reconciliation | `6b5488a3938afa4d4c0b49a906f861d537b5d402` | Records the 21:09:53Z Studio and 21:12:17Z New/Mini/Old readbacks in the handoff, live-state, and receipt docs; branch tip is clean and remote-matched. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub
