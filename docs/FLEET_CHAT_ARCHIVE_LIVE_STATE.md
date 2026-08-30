@@ -15,7 +15,7 @@ bodies, indexes, and other private archive data remain outside Git.
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
 | Repository checkout | MacBook docs checkout at `182114d`; Studio runtime checkout at `3c732d7`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub publication | This docs snapshot is local `92bc5fcf35212b96484b98e0a6dd54e28d83fb8f`, published by the GitHub plugin as owned-fork commit `e25458991eac2ccdd6ef7572e186857a7991679f`, tree `3286505a316937204804235f4374423998cddd3d`, parent `3232cab277c9b72904abc9955d2e8edde8bc5f37`, `force=false`; recursive readback matched all 34 local blobs. |
+| GitHub publication | This final docs ref is local `42457cc8eba6b8cda7a50f597d6670a28089e47d`, published by the GitHub plugin as owned-fork commit `5fc48e9f07a15cbdf482a212df75b83268a2b7a6`, tree `a259691e74a7ca2b08efd2e17ca38eca0b6d6f22`, parent `e25458991eac2ccdd6ef7572e186857a7991679f`, `force=false`; recursive readback matched all 34 local blobs. |
 | Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; New moved the folder 5→12, then Studio moved it 12→90. All 78 Studio object titles are unique, exact-parent, `text/plain`, and total 418,815,569 bytes; the three repaired Codex IDs and Drive IDs are in the dated receipt. |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 

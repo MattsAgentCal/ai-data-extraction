@@ -23,11 +23,13 @@ those sections remain historical receipts. The active lease is still
 `codex:macbook` session `01a046f9-9427-7343-9221-4135b50bc30f` on `Mac.lan`,
 expiring `2026-08-30T16:49:17Z`; a Studio successor must read it and stand down
 until an owner-authored transfer. The last clean local tip before this snapshot
-was `44b65aa`. The current docs snapshot is local
-`92bc5fcf35212b96484b98e0a6dd54e28d83fb8f`, published by the GitHub plugin as
-fork commit `e25458991eac2ccdd6ef7572e186857a7991679f` (tree
-`3286505a316937204804235f4374423998cddd3d`, parent
-`3232cab277c9b72904abc9955d2e8edde8bc5f37`, `force=false`); recursive readback
+was `44b65aa`. The content reconciliation commit was local
+`92bc5fcf35212b96484b98e0a6dd54e28d83fb8f`, published as fork commit
+`e25458991eac2ccdd6ef7572e186857a7991679f`. The final docs ref is local
+`42457cc8eba6b8cda7a50f597d6670a28089e47d`, published by the GitHub plugin as
+fork commit `5fc48e9f07a15cbdf482a212df75b83268a2b7a6` (tree
+`a259691e74a7ca2b08efd2e17ca38eca0b6d6f22`, parent
+`e25458991eac2ccdd6ef7572e186857a7991679f`, `force=false`); recursive readback
 matched all 34 local blobs. Upstream was untouched.
 
 | Machine | Current observed state | Honest classification |
@@ -543,7 +545,8 @@ and the body-free evidence receipt is
 | Post-amendment live-state reconciliation | `6b5488a3938afa4d4c0b49a906f861d537b5d402` | Records the 21:09:53Z Studio and 21:12:17Z New/Mini/Old readbacks in the handoff, live-state, and receipt docs; superseded by the later readbacks below. |
 | Latest execution readback docs before this amendment | `1e3acf9b48c16d1d501570c52fb4d495f0a7b285` | Records the 21:35:42Z Studio/Mini readback and handoff commit-map alignment; this post-run amendment supersedes it. |
 | Historical docs/runtime readback | Local `bb8308ca1d27e5f6959a19300d71076844c3081c`; remote `3e377e92646675db1d70c47036a66dee16ad6ede` | Historical five-doc tree. The current tracked tree has six documentation files, including this handoff and `SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`. |
-| Current final docs snapshot | Local `92bc5fcf35212b96484b98e0a6dd54e28d83fb8f`; owned-fork plugin commit `e25458991eac2ccdd6ef7572e186857a7991679f`; tree `3286505a316937204804235f4374423998cddd3d`, parent `3232cab277c9b72904abc9955d2e8edde8bc5f37`, `force=false` | 2026-08-30 Studio receipt/Drive repair reconciliation; recursive readback matched 34/34 blobs and upstream was untouched. |
+| Content reconciliation docs | Local `92bc5fcf35212b96484b98e0a6dd54e28d83fb8f`; owned-fork plugin commit `e25458991eac2ccdd6ef7572e186857a7991679f`; tree `3286505a316937204804235f4374423998cddd3d`, parent `3232cab277c9b72904abc9955d2e8edde8bc5f37`, `force=false` | 2026-08-30 Studio receipt/Drive repair reconciliation content; recursive readback matched 34/34 blobs and upstream was untouched. |
+| Current final docs ref | Local `42457cc8eba6b8cda7a50f597d6670a28089e47d`; owned-fork plugin commit `5fc48e9f07a15cbdf482a212df75b83268a2b7a6`; tree `a259691e74a7ca2b08efd2e17ca38eca0b6d6f22`, parent `e25458991eac2ccdd6ef7572e186857a7991679f`, `force=false` | Metadata-only ref receipt for the final handoff/live-state/README/receipt tree; recursive readback matched 34/34 blobs and upstream was untouched. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub plugin at
