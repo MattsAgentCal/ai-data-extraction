@@ -15,7 +15,7 @@ bodies, indexes, and other private archive data remain outside Git.
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
 | Repository checkout | MacBook docs checkout at `182114d`; Studio runtime checkout at `3c732d7`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub publication | GitHub plugin `github_update_ref` (`force=false`) read back owned-fork branch `matt/fleet-chat-archive-deployed` at `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`; tree `fedd522a329c3091711e3e674c308b748a0a5da3`, parent `1e3acf9b48c16d1d501570c52fb4d495f0a7b285`. |
+| GitHub publication | GitHub plugin Git-data workflow (`force=false`) read back owned-fork branch `matt/fleet-chat-archive-deployed` at remote commit `3e377e92646675db1d70c47036a66dee16ad6ede`; tree `d0ffc52708dd1b28e32be2fdf845f8a47ba5f939`, parent `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`. Local equivalent docs commit is `bb8308ca1d27e5f6959a19300d71076844c3081c`. |
 | Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; pre-list count 5, final count 12. The seven New-host object IDs, titles, MIME types, and exact byte sizes are recorded in the 2026-08-30 receipt below; each has the exact target-folder parent and `text/plain` MIME. |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 

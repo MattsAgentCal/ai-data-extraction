@@ -17,12 +17,13 @@ wave.
 
 This addendum supersedes only the live status above; all older sections remain
 historical evidence. The active Drive route is the authenticated Google Drive
-plugin, not the staged Desktop DMG. The GitHub plugin also performed an
-idempotent `github_update_ref` (`force=false`) after reading the active lease.
+plugin, not the staged Desktop DMG. After reading the active lease, the GitHub
+plugin used its Git-data workflow (`create_blob → create_tree → create_commit →
+github_update_ref`, `force=false`) to publish the five-doc tree.
 
 | Check | Current body-free evidence |
 |---|---|
-| GitHub plugin | `MattsAgentCal/ai-data-extraction:matt/fleet-chat-archive-deployed` read back at `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`; tree `fedd522a329c3091711e3e674c308b748a0a5da3`, parent `1e3acf9b48c16d1d501570c52fb4d495f0a7b285`, `force=false`, success `true`. |
+| GitHub plugin | Local docs commit `bb8308ca1d27e5f6959a19300d71076844c3081c` was published through the Git-data workflow as remote `3e377e92646675db1d70c47036a66dee16ad6ede`; tree `d0ffc52708dd1b28e32be2fdf845f8a47ba5f939`, parent `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`, `force=false`, final ref readback success `true`. |
 | New six-hour receipt | Prior receipt `20260829T195959.324876Z-be2608f7` collected `2026-08-29T20:19:56.940667+00:00`; next receipt `20260830T022016.788683Z-c11f0266` collected `2026-08-30T02:39:32.956025+00:00`; gap `6:19:36.015358`; launchd `runs=2→3`, exit 0, status `completed_with_absent_harnesses`, errors `[]`, runtime publication `blocked_no_drive_root`. |
 | New collection | Claude 1 conversation/1 new object; Codex 6 conversations/6 new objects/302 redactions; Hermes 0; OpenClaw `not_present_on_host`; all parse-quality failure counts are zero. |
 | Drive plugin folder | `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; pre-list count 5, final list count 12. Seven imported files were moved into the exact target parent and metadata-read back as `text/plain` with the local byte sizes below. |

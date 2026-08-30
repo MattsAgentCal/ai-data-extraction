@@ -20,8 +20,11 @@ This section is the current truth and supersedes older dated readbacks below;
 those sections remain historical receipts. The active lease is still
 `codex:macbook` session `01a046f9-9427-7343-9221-4135b50bc30f` on `Mac.lan`,
 expiring `2026-08-30T16:49:17Z`. The branch is clean at
-`0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`, and the GitHub plugin performed an
-idempotent `github_update_ref` with `force=false`, then read the same SHA back.
+`bb8308ca1d27e5f6959a19300d71076844c3081c`; the GitHub plugin published the
+same five-doc tree as remote commit
+`3e377e92646675db1d70c47036a66dee16ad6ede` (parent
+`0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`) with `force=false`, then read the
+remote ref back.
 
 | Machine | Current observed state | Honest classification |
 |---|---|---|
@@ -516,7 +519,7 @@ and the body-free evidence receipt is
 | Ratified structural enforcement amendment | `8802714639e5d6f1cc4ab383d287ac71cb15e477` | Adds the manager's launchd-only, single-lease-owner, and schema-freeze structures to this handoff; pushed to the owned fork and read back. |
 | Post-amendment live-state reconciliation | `6b5488a3938afa4d4c0b49a906f861d537b5d402` | Records the 21:09:53Z Studio and 21:12:17Z New/Mini/Old readbacks in the handoff, live-state, and receipt docs; superseded by the later readbacks below. |
 | Latest execution readback docs before this amendment | `1e3acf9b48c16d1d501570c52fb4d495f0a7b285` | Records the 21:35:42Z Studio/Mini readback and handoff commit-map alignment; this post-run amendment supersedes it. |
-| Current docs/runtime readback | `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb` | Current branch tip. Records the 2026-08-30 New six-hour receipt, Drive plugin publication, GitHub plugin ref verification, Studio in-flight state, Mini gate, and Old retry queue. |
+| Current docs/runtime readback | Local `bb8308ca1d27e5f6959a19300d71076844c3081c`; remote `3e377e92646675db1d70c47036a66dee16ad6ede` | Current five-doc tree. GitHub plugin remote commit has tree `d0ffc52708dd1b28e32be2fdf845f8a47ba5f939` and parent `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`; records the 2026-08-30 New six-hour receipt, Drive plugin publication, Studio in-flight state, Mini gate, and Old retry queue. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub plugin at
