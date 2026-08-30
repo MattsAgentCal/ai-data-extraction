@@ -15,7 +15,7 @@ bodies, indexes, and other private archive data remain outside Git.
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
 | Repository checkout | MacBook docs checkout at `182114d`; Studio runtime checkout at `3c732d7`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub publication | The prior docs tree was read back at remote commit `21f8bca5e92f38033cc9e553df796f9a17c76e6c`; this snapshot's local and plugin-published commit hashes are recorded in the dated receipt after the docs commit. |
+| GitHub publication | This docs snapshot is local `92bc5fcf35212b96484b98e0a6dd54e28d83fb8f`, published by the GitHub plugin as owned-fork commit `e25458991eac2ccdd6ef7572e186857a7991679f`, tree `3286505a316937204804235f4374423998cddd3d`, parent `3232cab277c9b72904abc9955d2e8edde8bc5f37`, `force=false`; recursive readback matched all 34 local blobs. |
 | Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; New moved the folder 5→12, then Studio moved it 12→90. All 78 Studio object titles are unique, exact-parent, `text/plain`, and total 418,815,569 bytes; the three repaired Codex IDs and Drive IDs are in the dated receipt. |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
