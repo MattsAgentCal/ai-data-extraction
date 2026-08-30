@@ -117,12 +117,12 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Host state as of 2026-08-30T05:36:21Z
+## Host state as of 2026-08-30T06:17:38Z
 
 | Host | Verified rollout truth | Scheduler / blocker |
 |---|---|---|
 | New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=3`, state `not running`, exit 0. Receipt `20260830T022016.788683Z-c11f0266` is `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`; Claude 1, Codex 6, Hermes none, OpenClaw absent. Its prior receipt is 6:19:36 earlier, and seven new redacted objects from the follow-up were imported and verified through the Drive plugin. | Six-hour elapsed collection proof and seven-object plugin publication are **DONE**; automatic runtime Drive publication remains **IN-FLIGHT** because no local provider is mounted. |
-| Mac Studio | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, `state=running`, PID `76865` (PPID 1), and `last exit code=0`. Receipt `20260829T184201.313238Z-c87faa38` was collected at `2026-08-29T22:01:36.872837Z`, reports `completed_with_absent_harnesses`, zero errors, and `publication=blocked_drive_unavailable`; the second scan is still in-flight. CloudStorage has zero `GoogleDrive-*` providers. | Checkout, preflight, schedule, and first supervised scan are **DONE**; second scan, Studio plugin publication, and runtime File Provider publication are **IN-FLIGHT**. |
+| Mac Studio | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, `state=running`, PID `76865` (PPID 1), and `last exit code=0`. The process started at `00:02:18` local time and was still active at the 06:17:38Z poll. Receipt `20260829T184201.313238Z-c87faa38` was collected at `2026-08-29T22:01:36.872837Z`, reports `completed_with_absent_harnesses`, zero errors, and `publication=blocked_drive_unavailable`; the second scan is still in-flight. CloudStorage has zero `GoogleDrive-*` providers. | Checkout, preflight, schedule, and first supervised scan are **DONE**; second scan, Studio plugin publication, and runtime File Provider publication are **IN-FLIGHT**. |
 | Mac mini | Clean at runtime `3c732d7`; no production archive label is enabled. The latest read-only census found approximately 7.29 GB free; active `CoreSimulator.log` is about 5.51 GB and closed `CoreSimulator.prev.log` is 15,403,577,516 bytes. | Storage approval is required before any canary or schedule; no cleanup or log mutation was performed. |
 | Old MacBook | Offline; `oldmac` remains unreachable. New's retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is enabled/loaded under launchd with `StartInterval=21600`, `runs=2`, exit 0, and `offline_retryable`/`ssh_unreachable` records. | Retry queue is **ACTIVE**; no live deployment or canary proof. |
 
@@ -170,16 +170,17 @@ The Studio config polls `newmac`, `cals-mac-mini`, and `oldmac` only when its
 scheduler or a reviewed manual run is active. An offline remote is recorded as
 `unreachable`; it does not invalidate a previously verified cached shard.
 
-## Current execution readback — 2026-08-30T05:36:21Z
+## Current execution readback — 2026-08-30T06:17:38Z
 
 New's launchd-owned receipts are 6:19:36 apart (`20260829T195959.324876Z-be2608f7`
 at `20:19:56.940667Z` and `20260830T022016.788683Z-c11f0266` at
 `02:39:32.956025Z`), with launchd `runs=2→3`, exit 0, zero errors, and seven
 new redacted objects. The Drive plugin imported exactly those seven objects and
 the folder count moved from 5 to 12 with metadata/listing verification. Studio's
-second launchd-owned transaction remains active at `runs=2`, PID `76865`, PPID 1;
-its last persisted receipt is `20260829T184201.313238Z-c87faa38`, zero errors,
-`blocked_drive_unavailable`. Mini remains paused and Old remains on its
+second launchd-owned transaction remains active at `runs=2`, PID `76865`, PPID 1,
+and `last exit code=0` at the 06:17:38Z poll; its last persisted receipt is
+`20260829T184201.313238Z-c87faa38`, zero errors, `blocked_drive_unavailable`.
+Mini remains paused and Old remains on its
 non-blocking retry queue. No release, lease, schema checkpoint, or review wave
 changed.
 
