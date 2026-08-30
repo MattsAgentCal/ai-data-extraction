@@ -117,21 +117,24 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Current host state as of 2026-08-30T08:44:33Z
+## Current host state as of 2026-08-30T09:40:49Z
 
 | Host | Verified rollout truth | Scheduler / blocker |
 |---|---|---|
-| New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is currently running at `runs=4` (PID `86900`, PPID `1`), with prior exit 0 and `StartInterval=21600`. The completed receipts `20260829T195959.324876Z-be2608f7` and `20260830T022016.788683Z-c11f0266` are 6:19:36.015358 apart; the latter is zero-error `completed_with_absent_harnesses`, `blocked_no_drive_root`, Claude 1/Codex 6/Hermes 0/OpenClaw absent. Seven new redacted objects were imported once through the Drive plugin and verified. The next interval run began at `2026-08-30T04:39:56Z` and has not emitted a receipt yet. | Six-hour elapsed collection proof and seven-object plugin publication are **DONE**; the current supervised collection run and automatic runtime Drive publication are **IN-FLIGHT**. |
+| New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is idle after `runs=4`, last exit 0, with `StartInterval=21600`. The three successive completed receipts are `20260829T195959.324876Z-be2608f7` (`20:19:56.940667Z`), `20260830T022016.788683Z-c11f0266` (`02:39:32.956025Z`), and `20260830T083957.226400Z-280640fe` (`09:08:58.239553Z`); the gaps are 6:19:36.015358 and 6:29:25.283528. The latest is zero-error `completed_with_absent_harnesses`, `blocked_no_drive_root`, Claude 1 conversation/0 new objects, Codex 4 conversations/4 new objects, Hermes 0/OpenClaw absent. Four latest redacted objects were imported once through the Drive plugin and verified. | Repeated six-hour elapsed collection proof and eleven-object plugin publication are **DONE**; automatic runtime Drive publication is **IN-FLIGHT** because the plugin has no launchd/shell bridge. |
 | Mac Studio | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.mac-studio` is idle after `runs=2`, last exit 0, `StartInterval=21600`. The long process was launchd-owned (`PID 76865`, `PPID 1`) from `00:02:18` until completion. Receipt `20260830T040218.778731Z-c65bac22` collected at `07:38:20.693304+00:00` reports `completed_with_absent_harnesses`, errors `[]`, and runtime `publication=blocked_drive_unavailable`: Claude 18/16 new objects/319 redactions, Codex 71/62/881, Hermes 0/0, OpenClaw absent. Exactly 78 finalized objects were imported through the Drive plugin; one bounded repair/re-review recovered the three initially absent Codex objects. | Checkout, preflight, schedule, supervised scan, receipt, and 78-object plugin publication are **DONE**; runtime automatic Drive publication and the end-to-end new-chat proof remain **IN-FLIGHT**. |
 | Mac Mini | Runtime `3c732d7`; no production archive label or process is loaded. The latest read-only census found approximately 7.29 GB free, active `CoreSimulator.log` about 5.51 GB, and closed `CoreSimulator.prev.log` 15,403,577,516 bytes. | Storage approval is required before any export, cleanup, canary, or schedule; no log was touched. |
 | Old MacBook | `ssh oldmac` remains unreachable. New's retry label is loaded at `StartInterval=21600`, `runs=3`, exit 0, with `offline_retryable`/`ssh_unreachable` records. | Non-blocking retry queue is **IN-FLIGHT**; online deployment/canary is not started. |
 
 The Drive plugin test write was body-free canary ID
 `1kFQrT2pFI2qSZl2A1Fovv-qyagvod47l` (125 bytes, `text/plain`, exact target
-parent). It was followed by seven New objects and all 78 Studio objects,
-verified by exact parent, MIME, and size; the `AI Chat Archive` folder now has
-90 items, and the Studio set totals 418,815,569 bytes. This is staged plugin
-publication, not evidence that launchd can call the plugin. Studio has no File
+parent). It was followed by seven New objects, all 78 Studio objects, and the
+four objects from New receipt `20260830T083957.226400Z-280640fe`, verified by
+exact parent, MIME, and size. The `AI Chat Archive` folder now has 94 items
+(92 `text/plain` files plus two receipt Docs; 634,718,155 listed bytes), and
+the Studio set totals 418,815,569 bytes. This is staged plugin publication, not
+evidence that launchd can call the plugin: `codex mcp list` has no Google Drive
+server and no shell `mcp`, `gdrive`, or `rclone` bridge. Studio has no File
 Provider, so automatic launchd-to-Drive and the success criterion “Matt watches
 a new chat appear in Drive” remain unproven.
 

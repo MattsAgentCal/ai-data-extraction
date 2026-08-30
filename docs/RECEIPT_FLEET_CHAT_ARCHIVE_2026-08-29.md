@@ -13,12 +13,12 @@ had completed with exit 0 and a zero-error receipt whose publication was blocked
 by the absent Drive provider. The 22:03 readback opened no new release or review
 wave.
 
-## Current execution receipt — 2026-08-30T08:44:33Z
+## Current execution receipt — 2026-08-30T09:40:49Z
 
-This addendum is the current body-free readback; the 06:04 section below is
-historical. The active Drive route is the authenticated Google Drive plugin,
-not the superseded Desktop DMG. No raw conversation body, index, database, or
-credential was opened or uploaded.
+This addendum is the current body-free readback; the 08:44 and 06:04 sections
+below are historical. The active Drive route is the authenticated Google Drive
+plugin, not the superseded Desktop DMG. No raw conversation body, index,
+database, or credential was opened or uploaded.
 
 | Check | Current body-free evidence |
 |---|---|
@@ -27,13 +27,15 @@ credential was opened or uploaded.
 | Studio collection | Claude: 18 conversations, 57 indexed, 16 new objects, 319 redactions, 0 quality failures. Codex: 71 conversations, 814 indexed, 62 new objects, 881 redactions, 0 quality failures. Hermes: 0 conversations, 187 indexed, 0 new objects. OpenClaw: absent on host. The finalized object set is exactly 78 files (16 Claude + 62 Codex), total 418,815,569 bytes. |
 | Studio Drive publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; prior New publication left 12 items, then all 78 Studio objects were imported once and moved to the exact target parent, producing 90 items. Every title is unique; every metadata readback is exact parent, `text/plain`, and matching size. |
 | Bounded repair/re-review | The first import wave had three Codex internal errors. One allowed retry, one attempt per file, recovered all three: `2de79d52481e6d99d01cd84a6c1c5f59b2378a74b178450b6a884ecb073f8bd1.json` → Drive `1LebzFHzi7w7jaLBm0bsnIHp8B7cac6l5` (694,936 bytes); `71b6360fca5000ea459b6351da25eab58e09fc809b6fd757eb208daae2adc050.json` → `1Y7MaXw399RPkHWnXFsbkcX9szHlD0C5R` (2,020,806 bytes); `e85139b62736f876f5e455d164328c66a38d19b4cb75e725d3ec1ca8f9e5f2a7.json` → `1ZmLz3ersWITKgsTRLjZXQ-XvRNd_EooO` (2,505,007 bytes). All three were exact-parent/MIME/size verified; no second bulk wave occurred. |
-| New six-hour proof | Receipts `20260829T195959.324876Z-be2608f7` (`20:19:56.940667Z`) and `20260830T022016.788683Z-c11f0266` (`02:39:32.956025Z`) are 6:19:36.015358 apart; launchd advanced `runs=2→3`, exit 0, with zero errors. Seven new redacted objects were imported and metadata-verified through the plugin. A subsequent launchd interval is currently running at `runs=4`, PID `86900`, PPID `1`, with no receipt emitted yet. |
-| Automatic-publication boundary | The receipt proves launchd collection and separately verified plugin imports. Studio has no File Provider and a plugin call is not a launchd executable, so an automatic launchd-to-Drive event and “new chat appears in Drive” remain unproven. |
+| New six-hour proof | Receipts `20260829T195959.324876Z-be2608f7` (`20:19:56.940667Z`), `20260830T022016.788683Z-c11f0266` (`02:39:32.956025Z`), and `20260830T083957.226400Z-280640fe` (`09:08:58.239553Z`) are separated by 6:19:36.015358 and 6:29:25.283528; launchd advanced `runs=2→3→4`, each exit 0, with zero errors. The latest receipt has four new Codex objects; all four were imported and metadata-verified through the plugin. |
+| New Drive publication | The four latest New objects were imported exactly once. `d7ff7670b3c118c58c50cb874c85ae62dd11eae9958542419e470c905338340a.json` → `1FapTYnbeOcUOyQyip6CAKCeuYcPD28vU` (2,266,694 bytes); `6bd04a25dba53cd9e801bf06bf5d718f90d061755bbe667f8d915994bb3efecf.json` → `11deTLHv3gQmoAVBb8Kp3xh8P3PfAX3x2` (1,015,906 bytes); `61cec7fda8558ff196bb4b5fdc1f7364ba0fe847732ec30a90a5929774c57d95.json` → `11aFXzqIfRE518nH1WwP_EXJ2XQNHn-5n` (15,926,911 bytes); `8ab7289bcb3c323b536771793693e0f7193daaed60d365c37e27eb712e480181.json` → `1k0uTQ2L7ASy2vMFEjreR_LaJqKbTd9ch` (68,754,228 bytes). Each exact-title search returned one result with the target parent and `text/plain` MIME. |
+| Drive folder readback | `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV` now lists 94 items: 92 `text/plain` files plus two receipt Docs, totaling 634,718,155 listed bytes. The four latest objects add 87,963,739 bytes. |
+| Automatic-publication boundary | The receipt proves repeated launchd collection and separately verified plugin imports. `codex mcp list` has no Google Drive server; no shell `mcp`, `gdrive`, or `rclone` bridge exists; and Studio has no File Provider. Therefore an automatic launchd-to-Drive event and “new chat appears in Drive” remain unproven. |
 
-The source and owner-only staging copies used for the Studio import remain
-intact after the repair/re-review; the Studio source spool remains host-local.
-Mini's closed-log approval is still open and its export was not touched. Old
-MacBook remains unreachable with the launchd retry queue enabled/non-blocking.
+The source and owner-only staging copies used for the New and Studio imports
+remain intact; both source spools remain host-local. Mini's closed-log approval
+is still open and its export was not touched. Old MacBook remains unreachable
+with the launchd retry queue enabled/non-blocking.
 
 ## Historical execution receipt — 2026-08-30T06:04:38Z
 
