@@ -5,53 +5,61 @@
 **Destination:** successor agent operating on the Mac Studio
 **Current mode:** the deployment goal is resumed by the named lease owner;
 this document is the durable handoff and does not transfer the lease. GitHub and
-Drive plugins are active; New's six-hour collection proof and staged plugin
-publication are complete, while Studio's second launchd run, runtime Drive
-publication, and Mini disk approval remain separate gates.
+Drive plugins are active. New's six-hour collection proof and seven-object
+publication are complete; Studio's second launchd scan and all 78 staged Studio
+objects are now collected/imported/metadata-verified. Runtime automatic
+launchd-to-Drive publication is still unproven, Mini's closed-log approval is
+still open, and Old MacBook remains offline.
 
 This is the complete context for a successor that has the repository but none of
 the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
-### Current successor snapshot — 2026-08-30T06:04:38Z
+### Current successor snapshot — 2026-08-30T08:14:18Z
 
 This section is the current truth and supersedes older dated readbacks below;
 those sections remain historical receipts. The active lease is still
 `codex:macbook` session `01a046f9-9427-7343-9221-4135b50bc30f` on `Mac.lan`,
-expiring `2026-08-30T16:49:17Z`. The branch is clean at
-`47dbcce9afb4aeeb19e6a0265faf198346ce64ed`; the GitHub plugin published the
-content-equivalent five-doc tree as remote commit
-`21f8bca5e92f38033cc9e553df796f9a17c76e6c` (tree
-`27cde313d1e890d82a1b2404b8f61f90989c5e93`, parent
-`3e377e92646675db1d70c47036a66dee16ad6ede`) with `force=false`, then read the
-remote ref back.
+expiring `2026-08-30T16:49:17Z`; a Studio successor must read it and stand down
+until an owner-authored transfer. The last clean local tip before this snapshot
+was `44b65aa`; the current docs commit and GitHub plugin ref are recorded in the
+receipt and plugin readback after this update.
 
 | Machine | Current observed state | Honest classification |
 |---|---|---|
 | New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is idle at `runs=3`, exit 0, `StartInterval=21600`. Receipt `20260829T195959.324876Z-be2608f7` at `20:19:56.940667Z` and follow-up `20260830T022016.788683Z-c11f0266` at `02:39:32.956025Z` are 6:19:36 apart; follow-up status `completed_with_absent_harnesses`, errors `[]`, runtime publication `blocked_no_drive_root`, Claude 1/Codex 6/Hermes 0/OpenClaw absent. | **DONE:** six-hour launchd collection proof and seven-object Drive-plugin publication. **IN-FLIGHT:** automatic runtime Drive publication; no local provider exists. |
-| Mac Studio | Runtime `3c732d7`; launchd label is running at `runs=2`, PID `76865`, PPID 1, `StartInterval=21600`; process started `00:02:18Z` and remained active at the `06:04:38Z` poll. Prior receipt `20260829T184201.313238Z-c87faa38` at `22:01:36.872837Z` is zero-error `completed_with_absent_harnesses`/`blocked_drive_unavailable`; second scan has not emitted a receipt. | **DONE:** checkout, preflight, persistent schedule, first supervised scan. **IN-FLIGHT:** second scan and subsequent Studio object publication through the Drive plugin. |
+| Mac Studio | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is idle after `runs=2`, last exit 0, `StartInterval=21600`; the long process was launchd-owned (`PID 76865`, `PPID 1`) and ran from `00:02:18` until completion. Receipt `20260830T040218.778731Z-c65bac22` was collected at `07:38:20.693304Z`, generated a zero-error `completed_with_absent_harnesses` result, and reports `publication=blocked_drive_unavailable`: Claude 18/16 new objects/319 redactions, Codex 71/62/881, Hermes 0/0, OpenClaw absent. Exactly 78 finalized objects (16 Claude + 62 Codex) were imported through the Drive plugin; one bounded repair/review recovered the three initially absent Codex objects. | **DONE:** checkout, live-shaped preflight, launchd supervision, second scan, receipt, and 78-object plugin publication. **IN-FLIGHT:** runtime automatic Drive publication and the end-to-end “new chat appears in Drive” proof; the plugin is not a launchd executable. |
 | Mac Mini | SSH is reachable, runtime `3c732d7`; no archive label or process is loaded. Latest read-only census found approximately 7.29 GB free; active `CoreSimulator.log` is about 5.51 GB; closed `CoreSimulator.prev.log` is 15,403,577,516 bytes. | **NOT STARTED:** export, canary, schedule, or cleanup. Matt has not approved touching the closed log; no Mini log was changed. |
-| Old MacBook | `ssh oldmac` remains unreachable. New's retry label is loaded at `StartInterval=21600`, `runs=2`, exit 0; logs report `offline_retryable`/`ssh_unreachable`. | **DONE:** non-blocking retry queue. **NOT STARTED:** online inventory, deployment, or canary. |
+| Old MacBook | `ssh oldmac` remains unreachable. New's retry label is loaded at `StartInterval=21600`, `runs=2`, exit 0; logs report `offline_retryable`/`ssh_unreachable`. | **DONE:** non-blocking retry queue. **IN-FLIGHT:** queued retry. **NOT STARTED:** online inventory, deployment, or canary. |
 
 The authenticated Drive plugin test write succeeded before publication: body-free
 canary ID `1kFQrT2pFI2qSZl2A1Fovv-qyagvod47l` was imported into `AI Chat Archive`
 and read back with its exact parent, `text/plain` MIME, and 125-byte size. The
-seven New-host objects were then imported exactly once; the folder count moved
-from 5 to 12. Their complete ID/size map is in the dated receipt
+seven New-host objects were imported exactly once, then the 78 finalized Studio
+objects were imported once each. The folder count moved from 5 to 12 after New,
+then to 90 after Studio; all 78 Studio titles are unique, exact-parent,
+`text/plain`, and total 418,815,569 bytes. The three repaired Codex files were
+`2de79d52481e6d99d01cd84a6c1c5f59b2378a74b178450b6a884ecb073f8bd1.json` →
+`1LebzFHzi7w7jaLBm0bsnIHp8B7cac6l5`,
+`71b6360fca5000ea459b6351da25eab58e09fc809b6fd757eb208daae2adc050.json` →
+`1Y7MaXw399RPkHWnXFsbkcX9szHlD0C5R`, and
+`e85139b62736f876f5e455d164328c66a38d19b4cb75e725d3ec1ca8f9e5f2a7.json` →
+`1ZmLz3ersWITKgsTRLjZXQ-XvRNd_EooO`. Their complete ID/size map is in the dated receipt
 [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](../RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md).
 No raw DB/index/state files were uploaded. The plugin is an agent capability,
-not a launchd executable; therefore the seven-object plugin publication does not
-by itself prove an automatic launchd-to-Drive event.
+not a launchd executable; therefore the plugin publication does not by itself
+prove an automatic launchd-to-Drive event.
 
 **Done with receipts:** reviewed runtime `3c732d7`, 263/263 tests and bundle
-proof, lease/schema/launchd structures, reachable New and first Studio
-supervised scans, New six-hour collection proof, seven-object Drive plugin
-publication with metadata readback, GitHub plugin ref readback, and Old retry
-queue. **In flight:** Studio second launchd scan and any safe post-receipt Drive
-plugin publication; end-to-end automatic chat-to-Drive proof. **Not started:**
-Mini export/cleanup/canary/schedule and Old online deployment/canary. No separate
-tracked ranking, graph, or wiki entry exists.
+proof, lease/schema/launchd structures, reachable New and Studio supervised
+scans, New six-hour collection proof, Studio's final receipt, all 78 Studio
+Drive imports plus the single three-file repair/re-review, GitHub plugin ref
+readback, and Old retry queue. **In flight:** runtime automatic Drive
+publication/end-to-end new-chat proof, Mini approval, and Old's non-blocking
+retry. **Not started:** Mini export/cleanup/canary/schedule, Old online
+deployment/canary, and OpenClaw host collection where its source is absent. No
+separate tracked ranking, graph, or wiki entry exists.
 
 ### Matt-ratified structural addendum — 2026-08-29
 
@@ -199,7 +207,7 @@ binding: long canaries are launchd-owned, the repo lease has one release owner,
 and a broad release requires one schema census, one canonical validator, and one
 review wave.
 
-### Current execution readback — 2026-08-29T21:35:42Z
+### Historical execution readback — 2026-08-29T21:35:42Z
 
 - **Lease and release:** the repo-root lease remains unchanged and still names
   `codex:macbook` as sole release owner. The branch is clean and its fork ref
@@ -341,10 +349,12 @@ These rules are binding for the successor:
 3. **One review wave per checkpoint.** Batch all findings, make one bounded
    repair, then run one re-review. Do not open parallel review waves or repair
    while a review is still running.
-4. **Surface Matt gates first, once, batched, pre-staged to two clicks.** Put
-   both outstanding gates in one message with the exact next click/action and
-   consequence. Do not ask for the same gate repeatedly or hide it behind
-   implementation work.
+4. **Surface Matt gates first, once, batched, pre-staged to two clicks.** At
+   the original resume, the Drive Desktop install/login and Mini log decisions
+   were batched. Matt then activated the GitHub/Drive plugins, superseding the
+   Desktop gate; record that change and surface only the still-open Mini
+   decision once, with its exact action and consequence. Do not ask for a
+   superseded gate repeatedly or hide a live gate behind implementation work.
 5. **One release owner per repo with a deployment lease.** The repo-root lease
    is authoritative. Its named owner is the sole release owner for this
    repository; currently that is `codex:macbook` session
@@ -394,7 +404,7 @@ or a missing/future schema checkpoint is a hard stop.
 
 ## 3. Honest state during active deployment
 
-The current live reconciliation is 2026-08-30T05:36:21Z. The canonical
+The current live reconciliation is 2026-08-30T08:14:18Z. The canonical
 repository state is [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](../FLEET_CHAT_ARCHIVE_LIVE_STATE.md)
 and the body-free evidence receipt is
 [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](../RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md).
@@ -417,19 +427,22 @@ and the body-free evidence receipt is
 - New's latest body-free receipt is
   `20260829T195959.324876Z-be2608f7`, collected at
   `2026-08-29T20:19:56.940667Z`, with zero errors and
-  `blocked_no_drive_root`; Claude collected 1 conversation, Codex 5, Hermes
+  `blocked_no_drive_root`; Claude collected 1 conversation, Codex 6, Hermes
   had none, and OpenClaw is absent. Its launchd label is idle at `runs=2`,
   exit 0.
-- Studio's launchd-owned attempt completed with exit 0. Its newest body-free
-  receipt is `20260829T184201.313238Z-c87faa38`, with zero errors and
-  `publication=blocked_drive_unavailable`; the prior `RunFailure` is historical
-  and no restart or foreground fallback was used.
+- Studio's launchd-owned second attempt completed with exit 0. Its newest
+  body-free receipt is `20260830T040218.778731Z-c65bac22`, collected at
+  `2026-08-30T07:38:20.693304+00:00`, with zero errors and
+  `publication=blocked_drive_unavailable`; Claude produced 16 new objects and
+  Codex 62, with Hermes empty and OpenClaw absent. The process was PID `76865`,
+  PPID 1, and no restart or foreground fallback was used.
 - Studio's manifest-bound Claude index repair is complete; its interrupted-index
   backup is retained. The Old retry implementation was reviewed and its
   offline behavior was previously proven (run count 1 -> 2, exit 0, zero
   stderr delta, `offline_retryable`/`ssh_unreachable`).
-- The owner-only Google Drive DMG is staged and verified on Studio. It is not
-  installed and no provider is mounted.
+- The owner-only Google Drive DMG is a historical staging artifact. Matt's
+  activated Drive plugin is the active route; no Desktop install is required,
+  and no local File Provider is mounted on Studio.
 - The preceding docs reconciliation is local commit
   `16889d0baf1086012691ac735ddcb0ca964e690b`, pushed to and read back at the
   owned-fork branch tip before this amendment. This handoff/live-state/receipt
@@ -441,30 +454,33 @@ and the body-free evidence receipt is
   schedule receipt doc (ID `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`), and
   verified redacted Codex text canaries IDs
   `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` (654 bytes) and
-  `18kklPXiMM2bzF1ZU8tCzlJJ9k-HblbC_` (49,484,530 bytes) in the folder.
-  Runtime JSON/raw shard publication remains separate and blocked without the
-  Studio File Provider.
+  `18kklPXiMM2bzF1ZU8tCzlJJ9k-HblbC_` (49,484,530 bytes) in the folder. It
+  then imported seven New objects and 78 Studio objects; the folder is now 90
+  items and the Studio set totals 418,815,569 bytes. Runtime JSON/raw shard
+  publication remains separate and blocked without the Studio File Provider.
 - New and Studio have their production six-hour labels loaded by launchd with
-  `RunAtLoad=true` and `StartInterval=21600`. New's current run and Studio's
-  first run have completed with exit 0; neither has an elapsed six-hour proof or
-  runtime Drive publication.
+  `RunAtLoad=true` and `StartInterval=21600`. New's two receipts prove one
+  elapsed cycle; Studio's second receipt and bounded plugin publication are
+  complete. Automatic launchd-to-Drive publication remains unproven.
 
 ### IN-FLIGHT — do not call these complete
 
 - Studio's newest persisted receipt is run
-  `20260829T184201.313238Z-c87faa38`, collected at
-  `2026-08-29T22:01:36.872837Z`, with
+  `20260830T040218.778731Z-c65bac22`, collected at
+  `2026-08-30T07:38:20.693304+00:00`, with
   `completed_with_absent_harnesses`, zero errors, and publication
-  `blocked_drive_unavailable`. This closes the current supervised collection
-  attempt; it is not a Drive or six-hour pass.
-- A loaded six-hour plist proves persistent scheduling only. The next receipt
-  after approximately 21,600 seconds and a new Drive object remain unproven.
+  `blocked_drive_unavailable`. Its 78 finalized objects were subsequently
+  imported and metadata-verified in Drive, including one bounded retry/re-review
+  for three Codex files.
+- A loaded six-hour plist proves persistent scheduling only. New's elapsed
+  collection cycle is proven; automatic launchd-to-Drive publication remains
+  unproven because the plugin cannot be invoked by launchd.
 
 ### NOT STARTED — explicit gates, not implied completion
 
 - Studio still has no proven local Google Drive File Provider mount. The
-  connector folder and body-free receipt doc exist, but raw object publication
-  and new-chat-in-Drive proof do not.
+  connector folder and body-free receipt doc plus 78 Studio objects exist, but
+  automatic new-chat-in-Drive proof does not.
 - Matt has not approved Mini log compression/cleanup. Mini's real canary and
   production schedule have not run.
 - Old MacBook has not returned online for live deployment or canary proof. Its
@@ -474,7 +490,8 @@ and the body-free evidence receipt is
 - New and Studio production six-hour archive schedules are loaded under launchd.
   New's receipts are 6:19:36 apart with launchd `runs=2→3`, exit 0, proving
   one elapsed collection cycle after the controlling session was gone. Studio's
-  second launchd run remains active at `runs=2`, PID `76865`, PPID 1.
+  second run completed at `runs=2`, exit 0, and its 78-object set is published
+  through the plugin; this still does not prove automatic plugin invocation.
 - OpenClaw host collection is not proven on New or Studio because the source is
   absent there; Mini and Old have no canary proof.
 - No separate tracked ranking, graph, or wiki entry exists in this checkout.
@@ -495,10 +512,11 @@ and the body-free evidence receipt is
 - The Desktop Drive DMG path is superseded. The authenticated Drive plugin test
   write succeeded (body-free canary ID `1kFQrT2pFI2qSZl2A1Fovv-qyagvod47l`,
   `text/plain`, 125 bytes, exact target parent), followed by exactly seven
-  New-host redacted object imports. The `AI Chat Archive` folder moved from
-  five to twelve items, and every new file's parent, MIME, and byte size was
-  read back. This plugin publication is a verified staged-output receipt, not
-  evidence that launchd can call the plugin.
+  New-host redacted object imports followed by 78 Studio imports. The
+  `AI Chat Archive` folder moved from five to twelve items after New and to 90
+  after Studio; every imported file's parent, MIME, and byte size was read back.
+  This plugin publication is a verified staged-output receipt, not evidence
+  that launchd can call the plugin.
 
 ## 4. Exact file and commit map
 
@@ -520,7 +538,7 @@ and the body-free evidence receipt is
 | Ratified structural enforcement amendment | `8802714639e5d6f1cc4ab383d287ac71cb15e477` | Adds the manager's launchd-only, single-lease-owner, and schema-freeze structures to this handoff; pushed to the owned fork and read back. |
 | Post-amendment live-state reconciliation | `6b5488a3938afa4d4c0b49a906f861d537b5d402` | Records the 21:09:53Z Studio and 21:12:17Z New/Mini/Old readbacks in the handoff, live-state, and receipt docs; superseded by the later readbacks below. |
 | Latest execution readback docs before this amendment | `1e3acf9b48c16d1d501570c52fb4d495f0a7b285` | Records the 21:35:42Z Studio/Mini readback and handoff commit-map alignment; this post-run amendment supersedes it. |
-| Current docs/runtime readback | Local `bb8308ca1d27e5f6959a19300d71076844c3081c`; remote `3e377e92646675db1d70c47036a66dee16ad6ede` | Current five-doc tree. GitHub plugin remote commit has tree `d0ffc52708dd1b28e32be2fdf845f8a47ba5f939` and parent `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`; records the 2026-08-30 New six-hour receipt, Drive plugin publication, Studio in-flight state, Mini gate, and Old retry queue. |
+| Historical docs/runtime readback | Local `bb8308ca1d27e5f6959a19300d71076844c3081c`; remote `3e377e92646675db1d70c47036a66dee16ad6ede` | Historical five-doc tree. The current tracked tree has six documentation files, including this handoff and `SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`; the current 2026-08-30 receipt and plugin ref are recorded in the addendum above and in the final map row added after publication. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub plugin at
@@ -598,8 +616,8 @@ commit, not the historical numbers.
 - The originating checkout is at docs commit
   `182114dd6cff89018761b72f5387dfc6ad6daa89` (runtime `3c732d7`).
 - Production label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded by
-  launchd. `launchctl print` shows the collector as the supervised process; no terminal
-  owns it. The label is idle at `runs=2`, exit 0.
+  launchd. `launchctl print` shows the collector as the supervised process; no
+  terminal owns it. The label is idle at `runs=3`, exit 0.
 - Current follow-up receipt: run ID
   `20260830T022016.788683Z-c11f0266`, collected at
   `2026-08-30T02:39:32.956025Z`, with status
@@ -621,19 +639,17 @@ commit, not the historical numbers.
   `/Users/calstudio/Projects/ai-data-extraction`.
 - Production label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded by
   launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`,
-  `state=running`, PID `76865` (PPID 1), and last exit code 0. The second
-  launchd-owned scan is still active; do not kill, restart, or replace it with
-  a foreground process.
-  `launchctl print` showed the collector as the supervised process; no terminal
-  owned it.
+  `state=not running`, and last exit code 0. The completed long scan was
+  launchd-owned as PID `76865` (PPID 1); no terminal owned it and no foreground
+  fallback was used.
 - The newest persisted receipt is run ID
-  `20260829T184201.313238Z-c87faa38`, collected at
-  `2026-08-29T22:01:36.872837Z`; status/collection_status
+  `20260830T040218.778731Z-c65bac22`, collected at
+  `2026-08-30T07:38:20.693304+00:00`; status/collection_status
   `completed_with_absent_harnesses`, errors empty, and publication
-  `blocked_drive_unavailable`. Claude collected 12 conversations/7 new objects,
-  Codex 51/50, Hermes had no conversations, and OpenClaw is absent. The prior
-  `RunFailure` receipt and 21:35 CPU-bound sample are historical; no restart or
-  foreground fallback was used.
+  `blocked_drive_unavailable`. Claude collected 18 conversations/16 new
+  objects, Codex 71/62, Hermes had no conversations, and OpenClaw is absent.
+  All 78 finalized objects were imported and metadata-verified through the
+  Drive plugin, including one bounded retry/re-review for three Codex files.
 - Hub statuses were New `pulled` (1131/1131), Mini `pending_manifest`, and Old
   `unreachable`. The connector receipt is in Drive folder
   `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; no local File Provider mount is visible.
@@ -673,21 +689,22 @@ commit, not the historical numbers.
   folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`, and the test
   write `1kFQrT2pFI2qSZl2A1Fovv-qyagvod47l` was read back as `text/plain`, 125
   bytes, with the exact target parent. It then imported exactly seven New-host
-  redacted objects; the folder count moved from 5 to 12 and each new file's
-  parent, MIME, and byte size was verified. The Desktop DMG path is superseded;
-  no local File Provider is required for this plugin route.
-- Not started: Studio's second-run object publication and an end-to-end
-  automatic launchd-to-Drive event. The runtime still reports
-  `blocked_drive_unavailable`; plugin imports are separately verified staged
-  output, not a launchd capability.
+  redacted objects; the folder count moved from 5 to 12 after New and to 90
+  after Studio. Every imported file's parent, MIME, and byte size was verified;
+  the 78-object Studio set totals 418,815,569 bytes.
+  The Desktop DMG path is superseded; no local File Provider is required for
+  this plugin route.
+- Not started: an end-to-end automatic launchd-to-Drive event. The runtime still
+  reports `blocked_drive_unavailable`; plugin imports are separately verified
+  staged output, not a launchd capability.
 
 ## 6. Matt gates — surface these first
 
 The original two-gate message was surfaced first and is retained in the
 historical readbacks. The facts changed: the Desktop Google Drive DMG install
 gate is superseded by Matt's activated Codex GitHub/Drive plugins, and the Drive
-plugin test write plus seven-object publication are verified. Do not ask Matt to
-install the DMG or wait on it.
+plugin test write plus seven New-object and 78 Studio-object publications are
+verified. Do not ask Matt to install the DMG or wait on it.
 
 The one open Matt decision is:
 
@@ -713,12 +730,11 @@ must first read the lease and continue only after an owner-committed transfer.
    surface the already-batched Mini closed-log approval once. The Desktop Drive
    install/login gate is superseded by the activated plugin route, so do not
    repeat that request or install the DMG.
-2. **Preserve and read back the current Studio supervisor.** The existing
-   launchd-owned process (`runs=2`, PID `76865`, PPID 1) is the only active long
-   canary. Do not start a foreground replacement, kill it, or start another
-   review wave. When it exits, read the newest body-free receipt, run/exit state,
-   and exact new object paths; then use one bounded Drive-plugin publication
-   action for those objects only.
+2. **Re-read the completed Studio receipt and Drive listing.** Confirm
+   `20260830T040218.778731Z-c65bac22`, launchd `runs=2`, exit 0, and the 78
+   exact-parent `text/plain` objects (90 total folder items). Do not retry the
+   three repaired Codex files or open a second bulk wave; a future long canary
+   must be a new launchd-owned transaction.
 3. **Reconfirm the completed New proof and retry queue.** Verify the two New
    receipts remain 6:19:36 apart (`runs=2→3`, exit 0), the seven Drive-plugin
    IDs remain in `AI Chat Archive`, and Old's launchd retry remains enabled and
@@ -737,12 +753,13 @@ Current execution evidence: New label
 `RunAtLoad=true` and `StartInterval=21600`. New's receipts at
 `20:19:56.940667Z` and `02:39:32.956025Z` are 6:19:36 apart; launchd advanced
 `runs=2→3`, exit 0, and the follow-up has zero errors. Seven newly staged
-redacted objects from that cycle are verified in Drive through the plugin. This
-proves one elapsed six-hour collection cycle plus staged plugin publication.
-Studio's second launchd run is still active at `runs=2`, PID `76865`, PPID 1;
-its latest persisted receipt remains zero-error but
-`publication=blocked_drive_unavailable`. A plugin import is not a launchd
-capability, so end-to-end automatic launchd-to-Drive remains unproven.
+  redacted objects from that cycle are verified in Drive through the plugin. This
+  proves one elapsed six-hour collection cycle plus staged plugin publication.
+Studio's second launchd run completed as receipt
+`20260830T040218.778731Z-c65bac22` with zero errors and 78 finalized objects;
+the plugin import and the one three-file repair/re-review are complete. A plugin
+import is not a launchd capability, so end-to-end automatic launchd-to-Drive
+remains unproven.
 
 ### A. Verify the shipped build and supervisor
 

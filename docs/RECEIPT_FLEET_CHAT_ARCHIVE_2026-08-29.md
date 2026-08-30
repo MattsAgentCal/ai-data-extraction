@@ -13,13 +13,34 @@ had completed with exit 0 and a zero-error receipt whose publication was blocked
 by the absent Drive provider. The 22:03 readback opened no new release or review
 wave.
 
-## Current execution receipt — 2026-08-30T06:04:38Z
+## Current execution receipt — 2026-08-30T08:14:18Z
 
-This addendum supersedes only the live status above; all older sections remain
-historical evidence. The active Drive route is the authenticated Google Drive
+This addendum is the current body-free readback; the 06:04 section below is
+historical. The active Drive route is the authenticated Google Drive plugin,
+not the superseded Desktop DMG. No raw conversation body, index, database, or
+credential was opened or uploaded.
+
+| Check | Current body-free evidence |
+|---|---|
+| Studio launchd receipt | `/Users/calstudio/.local/share/ai-chat-archive/spool/hosts/mac-studio/receipts/20260830T040218.778731Z-c65bac22.json`; collected `2026-08-30T07:38:20.693304+00:00`; `completed_with_absent_harnesses`; errors `[]`; runtime publication `blocked_drive_unavailable`. The launchd label is now idle at `runs=2`, last exit 0, `StartInterval=21600`; the long process was PID `76865`, PPID 1, and was never foreground-owned. |
+| Studio collection | Claude: 18 conversations, 57 indexed, 16 new objects, 319 redactions, 0 quality failures. Codex: 71 conversations, 814 indexed, 62 new objects, 881 redactions, 0 quality failures. Hermes: 0 conversations, 187 indexed, 0 new objects. OpenClaw: absent on host. The finalized object set is exactly 78 files (16 Claude + 62 Codex), total 418,815,569 bytes. |
+| Studio Drive publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; prior New publication left 12 items, then all 78 Studio objects were imported once and moved to the exact target parent, producing 90 items. Every title is unique; every metadata readback is exact parent, `text/plain`, and matching size. |
+| Bounded repair/re-review | The first import wave had three Codex internal errors. One allowed retry, one attempt per file, recovered all three: `2de79d52481e6d99d01cd84a6c1c5f59b2378a74b178450b6a884ecb073f8bd1.json` → Drive `1LebzFHzi7w7jaLBm0bsnIHp8B7cac6l5` (694,936 bytes); `71b6360fca5000ea459b6351da25eab58e09fc809b6fd757eb208daae2adc050.json` → `1Y7MaXw399RPkHWnXFsbkcX9szHlD0C5R` (2,020,806 bytes); `e85139b62736f876f5e455d164328c66a38d19b4cb75e725d3ec1ca8f9e5f2a7.json` → `1ZmLz3ersWITKgsTRLjZXQ-XvRNd_EooO` (2,505,007 bytes). All three were exact-parent/MIME/size verified; no second bulk wave occurred. |
+| New six-hour proof | Receipts `20260829T195959.324876Z-be2608f7` (`20:19:56.940667Z`) and `20260830T022016.788683Z-c11f0266` (`02:39:32.956025Z`) are 6:19:36.015358 apart; launchd advanced `runs=2→3`, exit 0, with zero errors. Seven new redacted objects were imported and metadata-verified through the plugin. |
+| Automatic-publication boundary | The receipt proves launchd collection and separately verified plugin imports. Studio has no File Provider and a plugin call is not a launchd executable, so an automatic launchd-to-Drive event and “new chat appears in Drive” remain unproven. |
+
+The source and owner-only staging copies used for the Studio import remain
+intact after the repair/re-review; the Studio source spool remains host-local.
+Mini's closed-log approval is still open and its export was not touched. Old
+MacBook remains unreachable with the launchd retry queue enabled/non-blocking.
+
+## Historical execution receipt — 2026-08-30T06:04:38Z
+
+This historical section preserves the 06:04 live status; the 08:14 addendum
+above is current. The active Drive route is the authenticated Google Drive
 plugin, not the staged Desktop DMG. After reading the active lease, the GitHub
 plugin used its Git-data workflow (`create_blob → create_tree → create_commit →
-github_update_ref`, `force=false`) to publish the five-doc tree.
+github_update_ref`, `force=false`) to publish the then-current docs tree.
 
 | Check | Current body-free evidence |
 |---|---|
@@ -87,7 +108,7 @@ conversation bytes were opened or copied into this receipt.
   `3c732d7`: one live-schema census, one canonical validator, one review wave,
   one repair, and one re-review. This readback does not create another wave.
 
-## Current execution readback — 2026-08-29T22:03:47Z
+## Historical execution readback — 2026-08-29T22:03:47Z
 
 - Studio's launchd-owned pid `14336` exited before the readback. `launchctl
   print` shows `state=not running`, `runs=1`, and exit 0. Newest receipt

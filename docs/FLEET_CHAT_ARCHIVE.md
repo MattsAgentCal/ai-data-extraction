@@ -117,7 +117,25 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Host state as of 2026-08-30T06:17:38Z
+## Current host state as of 2026-08-30T08:14:18Z
+
+| Host | Verified rollout truth | Scheduler / blocker |
+|---|---|---|
+| New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is idle at `runs=3`, exit 0, `StartInterval=21600`. Receipts `20260829T195959.324876Z-be2608f7` and `20260830T022016.788683Z-c11f0266` are 6:19:36.015358 apart; the latter is zero-error `completed_with_absent_harnesses`, `blocked_no_drive_root`, Claude 1/Codex 6/Hermes 0/OpenClaw absent. Seven new redacted objects were imported once through the Drive plugin and verified. | Six-hour elapsed collection proof and seven-object plugin publication are **DONE**; automatic runtime Drive publication remains **IN-FLIGHT** because no local provider is mounted. |
+| Mac Studio | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.mac-studio` is idle after `runs=2`, last exit 0, `StartInterval=21600`. The long process was launchd-owned (`PID 76865`, `PPID 1`) from `00:02:18` until completion. Receipt `20260830T040218.778731Z-c65bac22` collected at `07:38:20.693304+00:00` reports `completed_with_absent_harnesses`, errors `[]`, and runtime `publication=blocked_drive_unavailable`: Claude 18/16 new objects/319 redactions, Codex 71/62/881, Hermes 0/0, OpenClaw absent. Exactly 78 finalized objects were imported through the Drive plugin; one bounded repair/re-review recovered the three initially absent Codex objects. | Checkout, preflight, schedule, supervised scan, receipt, and 78-object plugin publication are **DONE**; runtime automatic Drive publication and the end-to-end new-chat proof remain **IN-FLIGHT**. |
+| Mac Mini | Runtime `3c732d7`; no production archive label or process is loaded. The latest read-only census found approximately 7.29 GB free, active `CoreSimulator.log` about 5.51 GB, and closed `CoreSimulator.prev.log` 15,403,577,516 bytes. | Storage approval is required before any export, cleanup, canary, or schedule; no log was touched. |
+| Old MacBook | `ssh oldmac` remains unreachable. New's retry label is loaded at `StartInterval=21600`, `runs=2`, exit 0, with `offline_retryable`/`ssh_unreachable` records. | Non-blocking retry queue is **IN-FLIGHT**; online deployment/canary is not started. |
+
+The Drive plugin test write was body-free canary ID
+`1kFQrT2pFI2qSZl2A1Fovv-qyagvod47l` (125 bytes, `text/plain`, exact target
+parent). It was followed by seven New objects and all 78 Studio objects,
+verified by exact parent, MIME, and size; the `AI Chat Archive` folder now has
+90 items, and the Studio set totals 418,815,569 bytes. This is staged plugin
+publication, not evidence that launchd can call the plugin. Studio has no File
+Provider, so automatic launchd-to-Drive and the success criterion “Matt watches
+a new chat appear in Drive” remain unproven.
+
+## Historical host state as of 2026-08-30T06:17:38Z
 
 | Host | Verified rollout truth | Scheduler / blocker |
 |---|---|---|
@@ -163,14 +181,15 @@ helper paths. New and Studio have the production six-hour labels loaded under
 launchd. New's receipts are 6:19:36 apart with launchd `runs=2→3` and exit 0,
 which proves one elapsed collection cycle after the controlling session was
 gone. A loaded plist plus receipt does not by itself prove an automatic
-launchd-to-plugin call; Studio's second launchd attempt is still active and its
-last persisted receipt reports `blocked_drive_unavailable`.
+launchd-to-plugin call; Studio's second launchd attempt completed with receipt
+`20260830T040218.778731Z-c65bac22`, and its runtime publication remains
+`blocked_drive_unavailable`.
 
 The Studio config polls `newmac`, `cals-mac-mini`, and `oldmac` only when its
 scheduler or a reviewed manual run is active. An offline remote is recorded as
 `unreachable`; it does not invalidate a previously verified cached shard.
 
-## Current execution readback — 2026-08-30T06:17:38Z
+## Historical execution readback — 2026-08-30T06:17:38Z
 
 New's launchd-owned receipts are 6:19:36 apart (`20260829T195959.324876Z-be2608f7`
 at `20:19:56.940667Z` and `20260830T022016.788683Z-c11f0266` at
@@ -208,4 +227,5 @@ publication receipt, not proof that launchd can call a plugin. End-to-end
 automatic new-chat-in-Drive remains unproven until a completed scheduled receipt
 and a corresponding Drive object are both observed; the current New six-hour
 proof establishes collection and plugin publication separately, while Studio's
-second run is still in-flight.
+78-object plugin publication is complete but its runtime File Provider route is
+still unavailable.
