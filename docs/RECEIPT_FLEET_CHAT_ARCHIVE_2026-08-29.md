@@ -13,6 +13,38 @@ had completed with exit 0 and a zero-error receipt whose publication was blocked
 by the absent Drive provider. The 22:03 readback opened no new release or review
 wave.
 
+## Current execution receipt — 2026-08-30T05:36:21Z
+
+This addendum supersedes only the live status above; all older sections remain
+historical evidence. The active Drive route is the authenticated Google Drive
+plugin, not the staged Desktop DMG. The GitHub plugin also performed an
+idempotent `github_update_ref` (`force=false`) after reading the active lease.
+
+| Check | Current body-free evidence |
+|---|---|
+| GitHub plugin | `MattsAgentCal/ai-data-extraction:matt/fleet-chat-archive-deployed` read back at `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`; tree `fedd522a329c3091711e3e674c308b748a0a5da3`, parent `1e3acf9b48c16d1d501570c52fb4d495f0a7b285`, `force=false`, success `true`. |
+| New six-hour receipt | Prior receipt `20260829T195959.324876Z-be2608f7` collected `2026-08-29T20:19:56.940667+00:00`; next receipt `20260830T022016.788683Z-c11f0266` collected `2026-08-30T02:39:32.956025+00:00`; gap `6:19:36.015358`; launchd `runs=2→3`, exit 0, status `completed_with_absent_harnesses`, errors `[]`, runtime publication `blocked_no_drive_root`. |
+| New collection | Claude 1 conversation/1 new object; Codex 6 conversations/6 new objects/302 redactions; Hermes 0; OpenClaw `not_present_on_host`; all parse-quality failure counts are zero. |
+| Drive plugin folder | `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; pre-list count 5, final list count 12. Seven imported files were moved into the exact target parent and metadata-read back as `text/plain` with the local byte sizes below. |
+
+| Local object filename | Drive file ID | Bytes |
+|---|---|---:|
+| `0b1daed852258b3b6c475e740c81c7f3159a6be735131defd3e8fec8d43102dc.json` | `1MhsiPa67Oxz4XLA4zi0FZZl-zHjFBscT` | 302,079 |
+| `fc426ba88ab03407a04e1400fbf53214b89db55d9e9b490ac220cf02937d89c4.json` | `16rZngRC9KAOAljVtbLOdBHqQ933gPNoT` | 226,730 |
+| `d425e3ba24f17c495d06dd9f8f47e1d8cc085d9f190320c918c935cbc56be229.json` | `1jkP8vYNpL1sZBD1Ab-Cqu0CI68cAumCa` | 389,083 |
+| `579101d5fe2144efac119e201c2a76d49afb0b65c5bb6ae3668f10ecdf58345e.json` | `1cXraIqJXxMXTyim5jE3EEg7X0dil3oqZ` | 4,218,008 |
+| `f694adde35157e0860bbef6d674736fc78b798765d0772ae67c06197f6e9f203.json` | `1rfPCn42kx_13S7CEGjJP40n-6-C_gu6G` | 5,677,083 |
+| `32d82cac9d3842289db1b3212693b17b5c0ed9f6b5fd4fc1625549fe1ae90f66.json` | `16FBrSVZGBa6sZ4C7BdocM7y0wY6KtCVs` | 58,814,562 |
+| `2c7f3684cf77c2e2799306bffe739d40a7bc458c3fe0bb7ee509d85c1e7191d3.json` | `1L6M8kj4UDEXLTcW8UZES9zUy2yHSTUc_` | 8,823,088 |
+
+The source objects and prior five Drive items were not deleted. This is
+verified plugin publication of staged, redacted output; it is not evidence that
+a launchd process can invoke a Codex plugin. The Studio second launchd scan is
+still active at `runs=2`, PID `76865`, PPID 1; its persisted receipt remains
+`20260829T184201.313238Z-c87faa38`, zero errors, and
+`blocked_drive_unavailable`. Mini is paused pending the closed-log approval;
+Old's retry queue remains enabled and non-blocking.
+
 ## Code and verification
 
 | Check | Result |

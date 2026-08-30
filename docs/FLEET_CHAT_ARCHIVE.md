@@ -7,7 +7,12 @@ This local extension turns the upstream one-shot extractors into a recurring pri
 1. When its reviewed scheduler is enabled, each Mac collects local harness data every six hours into an owner-only spool at `~/.local/share/ai-chat-archive/spool`. Unchanged transcript files are fingerprinted and skipped; changed sessions are streamed one at a time.
 2. Conversations are normalized into the closed archive-object v2 contract, credential-redacted locally, staged until parsing is complete, stored as immutable content-addressed objects, and indexed separately by host and harness. Message content and normalized context/tool/event `payload` values are the only intentionally opaque body-bearing fields; their wrappers remain exact and bounded.
 3. The Mac Studio invokes the same trusted Python pipeline on each source host over authenticated SSH. The source validates one manifest-bound shard under its archive lock and emits a bounded binary stream; the Studio stages and validates that stream before a transactional logical-session merge.
-4. Once Google Drive is signed in on the Studio, the Studio publishes the fleet tree into one private `AI Chat Archive` folder. Until the File Provider is mounted, collection continues locally and receipts say exactly why publication is blocked. The active connector has separately created that private folder and published a body-free receipt doc; this does not bypass the runtime mount gate.
+4. The six-hour launchd collectors stage each host's validated tree locally. The
+   authenticated Google Drive plugin can then import the exact staged,
+   redacted object files into the private `AI Chat Archive` folder; the local
+   Studio File Provider path remains a separate runtime publication route. A
+   plugin import is verified by target-folder parent, MIME, and byte size and
+   must never be described as an automatic launchd-to-plugin call.
 
 The Google Drive account is needed on only the Studio. Host folders never share mutable object files, preventing cross-machine filename collisions.
 
@@ -112,26 +117,25 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Host state as of 2026-08-29T22:03:47Z
+## Host state as of 2026-08-30T05:36:21Z
 
 | Host | Verified rollout truth | Scheduler / blocker |
 |---|---|---|
-| New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, state `not running`, exit 0. Receipt `20260829T195959.324876Z-be2608f7` is `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`; Claude 1, Codex 5, Hermes none, OpenClaw absent. | Two supervised scans are **DONE**; the six-hour elapsed proof and runtime Drive publication remain **IN-FLIGHT**. |
-| Mac Studio | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=1`, `state=not running`, and `last exit code=0`. Receipt `20260829T184201.313238Z-c87faa38` was collected at `2026-08-29T22:01:36.872837Z`, reports `completed_with_absent_harnesses`, zero errors, and `publication=blocked_drive_unavailable`; Claude 12 conversations/7 new objects, Codex 51/50, Hermes no conversations, OpenClaw absent. CloudStorage has zero `GoogleDrive-*` providers. | Successful supervised scan is **DONE**; File Provider mount, raw shard publication, and six-hour proof are **IN-FLIGHT**. |
-| Mac mini | Clean at runtime `3c732d7`; no production archive label is enabled. The 21:59:33Z readback found 7,295,288 KB free; active `CoreSimulator.log` was 5,493,598,617 bytes and `CoreSimulator.prev.log` was 15,403,577,516 bytes. | Storage approval is required before any canary or schedule; no cleanup was performed. |
-| Old MacBook | Offline; `oldmac` timed out at 22:03:47Z. New's retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is enabled/loaded under launchd with one `offline_retryable`/`ssh_unreachable` attempt. | Retry queue is **ACTIVE**; no live deployment or canary proof. |
+| New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=3`, state `not running`, exit 0. Receipt `20260830T022016.788683Z-c11f0266` is `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`; Claude 1, Codex 6, Hermes none, OpenClaw absent. Its prior receipt is 6:19:36 earlier, and seven new redacted objects from the follow-up were imported and verified through the Drive plugin. | Six-hour elapsed collection proof and seven-object plugin publication are **DONE**; automatic runtime Drive publication remains **IN-FLIGHT** because no local provider is mounted. |
+| Mac Studio | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is loaded with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, `state=running`, PID `76865` (PPID 1), and `last exit code=0`. Receipt `20260829T184201.313238Z-c87faa38` was collected at `2026-08-29T22:01:36.872837Z`, reports `completed_with_absent_harnesses`, zero errors, and `publication=blocked_drive_unavailable`; the second scan is still in-flight. CloudStorage has zero `GoogleDrive-*` providers. | Checkout, preflight, schedule, and first supervised scan are **DONE**; second scan, Studio plugin publication, and runtime File Provider publication are **IN-FLIGHT**. |
+| Mac mini | Clean at runtime `3c732d7`; no production archive label is enabled. The latest read-only census found approximately 7.29 GB free; active `CoreSimulator.log` is about 5.51 GB and closed `CoreSimulator.prev.log` is 15,403,577,516 bytes. | Storage approval is required before any canary or schedule; no cleanup or log mutation was performed. |
+| Old MacBook | Offline; `oldmac` remains unreachable. New's retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is enabled/loaded under launchd with `StartInterval=21600`, `runs=2`, exit 0, and `offline_retryable`/`ssh_unreachable` records. | Retry queue is **ACTIVE**; no live deployment or canary proof. |
 
 `configs/old-macbook.pending.json` is a placeholder, not a deployment receipt. It must be checked against the live host before installation.
 
-The Google Drive connector is authenticated. It created and verified the private
-folder `AI Chat Archive` (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and two body-free
-receipt docs (IDs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and
-`1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`) inside it. It also imported and
-verified two redacted text canaries (`1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` and
-`18kklPXiMM2bzF1ZU8tCzlJJ9k-HblbC_`) into that folder. The runtime's File
-Provider is still not installed or mounted on Studio, so raw conversation-object
-publication and the automatic new-chat-in-Drive proof remain unearned; connector
-receipts and canaries are not a substitute for that proof.
+The Google Drive plugin is authenticated. It created and verified the private
+folder `AI Chat Archive` (ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`) and its two
+body-free receipt Docs, then imported the two prior redacted text artifacts and
+exactly seven newly staged New-host objects (folder count 5→12), with each
+file's parent, MIME, and size read back. The runtime File Provider is still not
+installed or mounted on Studio, so the local launchd process cannot invoke the
+plugin automatically; plugin publication and automatic runtime Drive
+publication are separate statuses.
 
 Existing v1 objects, nullable-session rows, and legacy base-format Codex rows
 are not trusted or silently migrated by the new stream.
@@ -156,47 +160,51 @@ python3 fleet_chat_archive.py install-launchd --config configs/new-macbook.json 
 
 The trusted-stream commit is reviewed and deployed to the reachable configured
 helper paths. New and Studio have the production six-hour labels loaded under
-launchd. A loaded plist proves schedule configuration only; the six-hour elapsed
-cycle and a new Drive object still require a completed receipt after 21,600 seconds
-and a mounted provider. New's second RunAtLoad scan has completed; Studio's first
-launchd attempt also completed with exit 0, but its receipt reports
-`blocked_drive_unavailable`.
+launchd. New's receipts are 6:19:36 apart with launchd `runs=2→3` and exit 0,
+which proves one elapsed collection cycle after the controlling session was
+gone. A loaded plist plus receipt does not by itself prove an automatic
+launchd-to-plugin call; Studio's second launchd attempt is still active and its
+last persisted receipt reports `blocked_drive_unavailable`.
 
 The Studio config polls `newmac`, `cals-mac-mini`, and `oldmac` only when its
 scheduler or a reviewed manual run is active. An offline remote is recorded as
 `unreachable`; it does not invalidate a previously verified cached shard.
 
-## Current execution readback — 2026-08-29T22:03:47Z
+## Current execution readback — 2026-08-30T05:36:21Z
 
-Studio's launchd-owned transaction completed at `2026-08-29T22:01:36.872837Z`;
-the 22:03:47Z readback shows `state=not running`, `runs=1`, and exit 0. Its
-body-free receipt is `20260829T184201.313238Z-c87faa38`, with zero errors and
-`publication=blocked_drive_unavailable`. New is idle after its zero-error
-supervised refresh. The Drive connector folder still has exactly four verified
-items and no new approved text artifact was available for import. No release,
-lease, schema checkpoint, or review wave changed.
+New's launchd-owned receipts are 6:19:36 apart (`20260829T195959.324876Z-be2608f7`
+at `20:19:56.940667Z` and `20260830T022016.788683Z-c11f0266` at
+`02:39:32.956025Z`), with launchd `runs=2→3`, exit 0, zero errors, and seven
+new redacted objects. The Drive plugin imported exactly those seven objects and
+the folder count moved from 5 to 12 with metadata/listing verification. Studio's
+second launchd-owned transaction remains active at `runs=2`, PID `76865`, PPID 1;
+its last persisted receipt is `20260829T184201.313238Z-c87faa38`, zero errors,
+`blocked_drive_unavailable`. Mini remains paused and Old remains on its
+non-blocking retry queue. No release, lease, schema checkpoint, or review wave
+changed.
 
-## Google Drive completion gate
+## Google Drive publication route
 
-On the Mac Studio, open the pre-staged installer at
-`/Users/calstudio/Downloads/GoogleDrive-2026-08-28.dmg`, open
-`GoogleDrive.pkg`, and sign in. If that dated file is unavailable, use Google's
-official installer: <https://dl.google.com/drive-file-stream/GoogleDrive.dmg>.
+The Desktop DMG path is superseded. Use the authenticated Google Drive plugin
+for staged, redacted object publication. The target folder is `AI Chat Archive`
+(ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`). Each import must be restricted to
+explicit object paths from a completed, zero-error receipt; move the imported
+file into that folder and read back its exact parent, MIME, and byte size.
+Do not upload raw indexes, databases, receipts, or unreviewed files.
 
-The Studio config uses `drive_root: "auto"`. Once exactly one live Google Drive
-File Provider appears, the pipeline uses this private folder (the connector has
-already reserved the matching Drive folder ID, but that does not create a local
-mount):
+The Studio config still uses `drive_root: "auto"` for the optional local runtime
+route. Once exactly one live Google Drive File Provider appears, that route uses
+this private folder (the plugin has reserved the matching Drive folder ID, but
+that does not create a local mount):
 
 ```text
 /Users/calstudio/Library/CloudStorage/GoogleDrive-<account>/My Drive/AI Chat Archive
 ```
 
 Zero providers remain blocked as unavailable; multiple signed-in Google accounts
-remain blocked as ambiguous instead of guessing. After explicit File Provider
-sign-in, provider discovery, and an authorized production schedule, a Studio run
-can pull current remote shards and publish them. Completion requires a new chat
-object and its body-free receipt to appear in the mounted Drive folder, pass the
-built-in content-hash verification, and report `published`. The connector has
-published only the body-free receipt doc so far; no raw-path upload was attempted,
-and the automatic six-hour new-chat proof is still in-flight.
+remain blocked as ambiguous instead of guessing. A plugin import is a manual
+publication receipt, not proof that launchd can call a plugin. End-to-end
+automatic new-chat-in-Drive remains unproven until a completed scheduled receipt
+and a corresponding Drive object are both observed; the current New six-hour
+proof establishes collection and plugin publication separately, while Studio's
+second run is still in-flight.
