@@ -14,22 +14,23 @@ the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
-### Current successor snapshot — 2026-08-30T05:36:21Z
+### Current successor snapshot — 2026-08-30T06:04:38Z
 
 This section is the current truth and supersedes older dated readbacks below;
 those sections remain historical receipts. The active lease is still
 `codex:macbook` session `01a046f9-9427-7343-9221-4135b50bc30f` on `Mac.lan`,
 expiring `2026-08-30T16:49:17Z`. The branch is clean at
-`bb8308ca1d27e5f6959a19300d71076844c3081c`; the GitHub plugin published the
-same five-doc tree as remote commit
-`3e377e92646675db1d70c47036a66dee16ad6ede` (parent
-`0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`) with `force=false`, then read the
+`47dbcce9afb4aeeb19e6a0265faf198346ce64ed`; the GitHub plugin published the
+content-equivalent five-doc tree as remote commit
+`21f8bca5e92f38033cc9e553df796f9a17c76e6c` (tree
+`27cde313d1e890d82a1b2404b8f61f90989c5e93`, parent
+`3e377e92646675db1d70c47036a66dee16ad6ede`) with `force=false`, then read the
 remote ref back.
 
 | Machine | Current observed state | Honest classification |
 |---|---|---|
 | New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is idle at `runs=3`, exit 0, `StartInterval=21600`. Receipt `20260829T195959.324876Z-be2608f7` at `20:19:56.940667Z` and follow-up `20260830T022016.788683Z-c11f0266` at `02:39:32.956025Z` are 6:19:36 apart; follow-up status `completed_with_absent_harnesses`, errors `[]`, runtime publication `blocked_no_drive_root`, Claude 1/Codex 6/Hermes 0/OpenClaw absent. | **DONE:** six-hour launchd collection proof and seven-object Drive-plugin publication. **IN-FLIGHT:** automatic runtime Drive publication; no local provider exists. |
-| Mac Studio | Runtime `3c732d7`; launchd label is running at `runs=2`, PID `76865`, PPID 1, `StartInterval=21600`; prior receipt `20260829T184201.313238Z-c87faa38` at `22:01:36.872837Z` is zero-error `completed_with_absent_harnesses`/`blocked_drive_unavailable`; second scan has not emitted a receipt. | **DONE:** checkout, preflight, persistent schedule, first supervised scan. **IN-FLIGHT:** second scan and subsequent Studio object publication through the Drive plugin. |
+| Mac Studio | Runtime `3c732d7`; launchd label is running at `runs=2`, PID `76865`, PPID 1, `StartInterval=21600`; process started `00:02:18Z` and remained active at the `06:04:38Z` poll. Prior receipt `20260829T184201.313238Z-c87faa38` at `22:01:36.872837Z` is zero-error `completed_with_absent_harnesses`/`blocked_drive_unavailable`; second scan has not emitted a receipt. | **DONE:** checkout, preflight, persistent schedule, first supervised scan. **IN-FLIGHT:** second scan and subsequent Studio object publication through the Drive plugin. |
 | Mac Mini | SSH is reachable, runtime `3c732d7`; no archive label or process is loaded. Latest read-only census found approximately 7.29 GB free; active `CoreSimulator.log` is about 5.51 GB; closed `CoreSimulator.prev.log` is 15,403,577,516 bytes. | **NOT STARTED:** export, canary, schedule, or cleanup. Matt has not approved touching the closed log; no Mini log was changed. |
 | Old MacBook | `ssh oldmac` remains unreachable. New's retry label is loaded at `StartInterval=21600`, `runs=2`, exit 0; logs report `offline_retryable`/`ssh_unreachable`. | **DONE:** non-blocking retry queue. **NOT STARTED:** online inventory, deployment, or canary. |
 

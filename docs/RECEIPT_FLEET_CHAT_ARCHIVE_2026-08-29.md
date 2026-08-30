@@ -13,7 +13,7 @@ had completed with exit 0 and a zero-error receipt whose publication was blocked
 by the absent Drive provider. The 22:03 readback opened no new release or review
 wave.
 
-## Current execution receipt — 2026-08-30T05:36:21Z
+## Current execution receipt — 2026-08-30T06:04:38Z
 
 This addendum supersedes only the live status above; all older sections remain
 historical evidence. The active Drive route is the authenticated Google Drive
@@ -23,7 +23,7 @@ github_update_ref`, `force=false`) to publish the five-doc tree.
 
 | Check | Current body-free evidence |
 |---|---|
-| GitHub plugin | Local docs commit `bb8308ca1d27e5f6959a19300d71076844c3081c` was published through the Git-data workflow as remote `3e377e92646675db1d70c47036a66dee16ad6ede`; tree `d0ffc52708dd1b28e32be2fdf845f8a47ba5f939`, parent `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`, `force=false`, final ref readback success `true`. |
+| GitHub plugin | Local docs commit `47dbcce9afb4aeeb19e6a0265faf198346ce64ed` was published through the Git-data workflow as content-equivalent remote `21f8bca5e92f38033cc9e553df796f9a17c76e6c`; tree `27cde313d1e890d82a1b2404b8f61f90989c5e93`, parent `3e377e92646675db1d70c47036a66dee16ad6ede`, `force=false`, final ref readback success `true`. |
 | New six-hour receipt | Prior receipt `20260829T195959.324876Z-be2608f7` collected `2026-08-29T20:19:56.940667+00:00`; next receipt `20260830T022016.788683Z-c11f0266` collected `2026-08-30T02:39:32.956025+00:00`; gap `6:19:36.015358`; launchd `runs=2→3`, exit 0, status `completed_with_absent_harnesses`, errors `[]`, runtime publication `blocked_no_drive_root`. |
 | New collection | Claude 1 conversation/1 new object; Codex 6 conversations/6 new objects/302 redactions; Hermes 0; OpenClaw `not_present_on_host`; all parse-quality failure counts are zero. |
 | Drive plugin folder | `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; pre-list count 5, final list count 12. Seven imported files were moved into the exact target parent and metadata-read back as `text/plain` with the local byte sizes below. |
@@ -40,8 +40,9 @@ github_update_ref`, `force=false`) to publish the five-doc tree.
 
 The source objects and prior five Drive items were not deleted. This is
 verified plugin publication of staged, redacted output; it is not evidence that
-a launchd process can invoke a Codex plugin. The Studio second launchd scan is
-still active at `runs=2`, PID `76865`, PPID 1; its persisted receipt remains
+a launchd process can invoke a Codex plugin. At the 06:04:38Z poll, the Studio
+second launchd scan remained active at `runs=2`, PID `76865`, PPID 1 (started
+00:02:18Z); its persisted receipt remains
 `20260829T184201.313238Z-c87faa38`, zero errors, and
 `blocked_drive_unavailable`. Mini is paused pending the closed-log approval;
 Old's retry queue remains enabled and non-blocking.
@@ -50,12 +51,12 @@ Old's retry queue remains enabled and non-blocking.
 
 | Check | Result |
 |---|---|
-| Checkout | `matt/fleet-chat-archive-deployed`, clean after the docs/addendum commit |
+| Checkout | `matt/fleet-chat-archive-deployed`, clean after local docs commit `47dbcce9afb4aeeb19e6a0265faf198346ce64ed` |
 | Reviewed code commit | `3c732d7b1031949bd18db90ae4ac40f667f6cfa7` |
 | Latest readback commit before this receipt update | `1e3acf9b48c16d1d501570c52fb4d495f0a7b285` (pushed/read back on the owned fork) |
 | Test command | `python3.14 -m unittest discover -s tests -p 'test*.py'` |
 | Test result | 263 tests ran, `OK` |
-| GitHub connector | Handoff structural amendment local `9b747927b6217287e035eecbdee8e6309a9e7f4d` was published/read back at owned-fork commit `56e8b7f5f8a7ad47acd36bcd0a901e95339d4f20`, parent `aa9bf992f5a0404dd124e85e20b8b0bce3e0a001` |
+| GitHub connector | Current docs tree was published/read back at owned-fork commit `21f8bca5e92f38033cc9e553df796f9a17c76e6c`, parent `3e377e92646675db1d70c47036a66dee16ad6ede` |
 | Drive connector | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt docs `1ovOGhi7EdwUbbBUbPliQS4DYQ-A7N8ny77xt5u5wElM` and `1Q4FFT1aglyjwRx3olRlmlvtR1MFKbVcCs4R96xLX_r4`; redacted text canary `1pLF5FhnQcMJ5yT28HXsnnHaQuqEJyR-5` (`text/plain`, 654 bytes) moved into the folder and metadata/listing read back |
 | Bundle | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle` |
 | Bundle SHA-256 | `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |

@@ -1,7 +1,7 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-08-30T05:36:21Z
-**State:** active deployment; New's launchd schedule has now completed an observed six-hour cycle (`runs=2→3`, exit 0, 6:19:36 between receipts) and seven newly staged redacted objects were published through the authenticated Drive plugin. The Drive folder now has 12 verified items. Studio's second launchd-owned scan is still running (`runs=2`, PID 76865, PPID 1); its prior receipt is zero-error but runtime publication remains `blocked_drive_unavailable`. Mini remains paused pending Matt's closed-log approval and Old remains on its non-blocking retry queue. No new release or review wave was opened.
+**Last reconciled:** 2026-08-30T06:04:38Z
+**State:** active deployment; New's launchd schedule has now completed an observed six-hour cycle (`runs=2→3`, exit 0, 6:19:36 between receipts) and seven newly staged redacted objects were published through the authenticated Drive plugin. The Drive folder now has 12 verified items. Studio's second launchd-owned scan is still running (`runs=2`, PID 76865, PPID 1; process start 00:02:18Z); its prior receipt is zero-error but runtime publication remains `blocked_drive_unavailable`. Mini remains paused pending Matt's closed-log approval and Old remains on its non-blocking retry queue. No new release or review wave was opened.
 
 This file is the repository's canonical rollout state. It records body-free
 counts, hashes, paths, and lifecycle observations only. Raw conversation
@@ -15,7 +15,7 @@ bodies, indexes, and other private archive data remain outside Git.
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
 | Repository checkout | MacBook docs checkout at `182114d`; Studio runtime checkout at `3c732d7`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub publication | GitHub plugin Git-data workflow (`force=false`) read back owned-fork branch `matt/fleet-chat-archive-deployed` at remote commit `3e377e92646675db1d70c47036a66dee16ad6ede`; tree `d0ffc52708dd1b28e32be2fdf845f8a47ba5f939`, parent `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`. Local equivalent docs commit is `bb8308ca1d27e5f6959a19300d71076844c3081c`. |
+| GitHub publication | GitHub plugin Git-data workflow (`force=false`) read back owned-fork branch `matt/fleet-chat-archive-deployed` at remote commit `21f8bca5e92f38033cc9e553df796f9a17c76e6c`; tree `27cde313d1e890d82a1b2404b8f61f90989c5e93`, parent `3e377e92646675db1d70c47036a66dee16ad6ede`. Local content-equivalent docs commit is `47dbcce9afb4aeeb19e6a0265faf198346ce64ed`. |
 | Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; pre-list count 5, final count 12. The seven New-host object IDs, titles, MIME types, and exact byte sizes are recorded in the 2026-08-30 receipt below; each has the exact target-folder parent and `text/plain` MIME. |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
@@ -35,7 +35,7 @@ The deployed runtime pins are:
 | Host | Observed truth | Classification |
 |---|---|---|
 | New MacBook | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.new-macbook` is idle at `runs=3`, exit 0, `StartInterval=21600`. The prior receipt `20260829T195959.324876Z-be2608f7` was collected at `20:19:56.940667Z`; the next `20260830T022016.788683Z-c11f0266` at `02:39:32.956025Z` reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, Claude 1, Codex 6, Hermes none, OpenClaw absent. Seven new redacted objects from that receipt were imported once through the Drive plugin and verified in the target folder. | **DONE:** checkout, preflight, persistent schedule, six-hour elapsed collection proof, and seven-object plugin publication. **IN-FLIGHT:** automatic runtime Drive publication (the local provider is absent; plugin publication is separately verified). |
-| Mac Studio | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.mac-studio` is loaded under launchd with `runs=2`, `state=running`, PID `76865`, PPID 1, `last exit code=0`, `StartInterval=21600`, and durable owner-only logs. The newest persisted receipt remains `20260829T184201.313238Z-c87faa38`, collected at `2026-08-29T22:01:36.872837Z`, with `completed_with_absent_harnesses`, zero errors, and `blocked_drive_unavailable`; the second scan is still in-flight. CloudStorage has zero `GoogleDrive-*` providers. | **DONE:** checkout, live-shaped preflight, persistent schedule, and one successful supervised scan. **IN-FLIGHT:** second launchd scan, Studio object publication through the Drive plugin after receipt completion, and runtime File Provider publication. |
+| Mac Studio | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.mac-studio` is loaded under launchd with `runs=2`, `state=running`, PID `76865`, PPID 1, `last exit code=0`, `StartInterval=21600`, and durable owner-only logs. The newest persisted receipt remains `20260829T184201.313238Z-c87faa38`, collected at `2026-08-29T22:01:36.872837Z`, with `completed_with_absent_harnesses`, zero errors, and `blocked_drive_unavailable`; the second scan is still in-flight at the 06:04:38Z poll. CloudStorage has zero `GoogleDrive-*` providers. | **DONE:** checkout, live-shaped preflight, persistent schedule, and one successful supervised scan. **IN-FLIGHT:** second launchd scan, Studio object publication through the Drive plugin after receipt completion, and runtime File Provider publication. |
 | Mac mini | Clean at runtime `3c732d7`; no archive label is loaded. The latest read-only census found approximately 7.29 GB free, active `CoreSimulator.log` about 5.51 GB, and closed `CoreSimulator.prev.log` 15,403,577,516 bytes. | **DONE:** read-only disk census. **NOT STARTED:** approved cleanup, canary, schedule; Matt's approval is still required and no log was touched. |
 | Old MacBook | `ssh oldmac` remains unreachable. New's retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is enabled/loaded under launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, and exit 0 after `offline_retryable`/`ssh_unreachable`. | **DONE:** retry behavior proof and active launchd queue. **IN-FLIGHT:** non-blocking offline retry. **NOT STARTED:** online deployment/canary. |
 
@@ -65,7 +65,8 @@ The deployed runtime pins are:
   the active route is the authenticated Google Drive plugin and no Desktop
   install is required for this turn.
 - The GitHub plugin read back the owned-fork ref at
-  `0fa4b4b96fd8a7db1ece075a135c892feaa38cbb`. The Drive plugin imported exactly
+  `21f8bca5e92f38033cc9e553df796f9a17c76e6c` (tree
+  `27cde313d1e890d82a1b2404b8f61f90989c5e93`). The Drive plugin imported exactly
   seven New-host redacted object files once, moved them into `AI Chat Archive`,
   and metadata-read back each exact parent, MIME, and size (folder count 5→12).
   The complete ID/size map is in the dated receipt. Runtime File Provider
