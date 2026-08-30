@@ -1,7 +1,7 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-08-30T08:40:35Z
-**State:** active deployment; New's launchd schedule has completed an observed six-hour cycle (`runs=2→3`, exit 0, 6:19:36 between receipts) and seven newly staged redacted objects were published through the authenticated Drive plugin. Studio's second launchd-owned scan completed under PID 76865/PPID 1 and emitted zero-error receipt `20260830T040218.778731Z-c65bac22`; all 78 finalized Studio objects (16 Claude + 62 Codex) were imported and metadata-verified, bringing the folder to 90 items and 418,815,569 Studio bytes. Runtime automatic launchd-to-Drive publication remains unproven because the plugin is not a launchd executable and Studio has no File Provider. Mini remains paused pending Matt's closed-log approval and Old remains on its non-blocking retry queue. No new release or schema/review wave was opened.
+**Last reconciled:** 2026-08-30T08:44:33Z
+**State:** active deployment; New's launchd schedule has completed an observed six-hour cycle (`runs=2→3`, exit 0, 6:19:36 between receipts) and seven newly staged redacted objects were published through the authenticated Drive plugin. A subsequent scheduled New run is currently launchd-owned (`runs=4`, PID 86900, PPID 1) and has not emitted its receipt yet. Studio's second launchd-owned scan completed under PID 76865/PPID 1 and emitted zero-error receipt `20260830T040218.778731Z-c65bac22`; all 78 finalized Studio objects (16 Claude + 62 Codex) were imported and metadata-verified, bringing the folder to 90 items and 418,815,569 Studio bytes. Runtime automatic launchd-to-Drive publication remains unproven because the plugin is not a launchd executable and Studio has no File Provider. Mini remains paused pending Matt's closed-log approval and Old remains on its non-blocking retry queue. No new release or schema/review wave was opened.
 
 This file is the repository's canonical rollout state. It records body-free
 counts, hashes, paths, and lifecycle observations only. Raw conversation
@@ -34,10 +34,10 @@ The deployed runtime pins are:
 
 | Host | Observed truth | Classification |
 |---|---|---|
-| New MacBook | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.new-macbook` is idle at `runs=3`, exit 0, `StartInterval=21600`. The prior receipt `20260829T195959.324876Z-be2608f7` was collected at `20:19:56.940667Z`; the next `20260830T022016.788683Z-c11f0266` at `02:39:32.956025Z` reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, Claude 1, Codex 6, Hermes none, OpenClaw absent. Seven new redacted objects from that receipt were imported once through the Drive plugin and verified in the target folder. | **DONE:** checkout, preflight, persistent schedule, six-hour elapsed collection proof, and seven-object plugin publication. **IN-FLIGHT:** automatic runtime Drive publication (the local provider is absent; plugin publication is separately verified). |
+| New MacBook | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.new-macbook` is currently running at `runs=4`, PID `86900`, PPID `1`, with prior exit 0 and `StartInterval=21600`. The prior receipt `20260829T195959.324876Z-be2608f7` was collected at `20:19:56.940667Z`; the next `20260830T022016.788683Z-c11f0266` at `02:39:32.956025Z` reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, Claude 1, Codex 6, Hermes none, OpenClaw absent. Seven new redacted objects from that receipt were imported once through the Drive plugin and verified in the target folder. The current interval run began at `2026-08-30T04:39:56Z` and has not emitted a receipt. | **DONE:** checkout, preflight, persistent schedule, six-hour elapsed collection proof, and seven-object plugin publication. **IN-FLIGHT:** current supervised collection run and automatic runtime Drive publication (the local provider is absent; plugin publication is separately verified). |
 | Mac Studio | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.mac-studio` is idle after `runs=2`, last exit 0, `StartInterval=21600`, and durable owner-only logs. The long process was launchd-owned (`PID 76865`, `PPID 1`) from `00:02:18` until completion. Receipt `20260830T040218.778731Z-c65bac22` collected at `2026-08-30T07:38:20.693304+00:00` reports `completed_with_absent_harnesses`, errors `[]`, and runtime `publication=blocked_drive_unavailable`; Claude 18/16 new objects/319 redactions, Codex 71/62/881, Hermes 0/0, OpenClaw absent. Exactly 78 finalized objects were imported through the Drive plugin, with one bounded three-file repair/re-review. | **DONE:** checkout, live-shaped preflight, persistent schedule, supervised scan, receipt, and 78-object plugin publication. **IN-FLIGHT:** runtime automatic Drive publication and the end-to-end “new chat appears in Drive” proof. |
 | Mac mini | Clean at runtime `3c732d7`; no archive label is loaded. The latest read-only census found approximately 7.29 GB free, active `CoreSimulator.log` about 5.51 GB, and closed `CoreSimulator.prev.log` 15,403,577,516 bytes. | **DONE:** read-only disk census. **NOT STARTED:** approved cleanup, canary, schedule; Matt's approval is still required and no log was touched. |
-| Old MacBook | `ssh oldmac` remains unreachable. New's retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is enabled/loaded under launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=2`, and exit 0 after `offline_retryable`/`ssh_unreachable`. | **DONE:** retry behavior proof and active launchd queue. **IN-FLIGHT:** non-blocking offline retry. **NOT STARTED:** online deployment/canary. |
+| Old MacBook | `ssh oldmac` remains unreachable. New's retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is enabled/loaded under launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=3`, and exit 0 after `offline_retryable`/`ssh_unreachable`. | **DONE:** retry behavior proof and active launchd queue. **IN-FLIGHT:** non-blocking offline retry. **NOT STARTED:** online deployment/canary. |
 
 ## DONE
 
@@ -79,8 +79,9 @@ The deployed runtime pins are:
 
 ## IN-FLIGHT
 
-- New's launchd label is idle after `runs=3`, exit 0, and its two receipts are
-  6:19:36 apart; the elapsed six-hour collection proof is **DONE**. Studio's
+- New's launchd label is currently running at `runs=4` under PID `86900`/PPID `1`
+  after the prior exit 0; its two completed receipts are 6:19:36 apart, so the
+  elapsed six-hour collection proof is **DONE**. Studio's
   label is idle after `runs=2`, exit 0; its second receipt and 78-object Drive
   publication are **DONE**.
 - Runtime automatic Drive publication and the success criterion “Matt watches a

@@ -16,7 +16,7 @@ the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
-### Current successor snapshot — 2026-08-30T08:40:35Z
+### Current successor snapshot — 2026-08-30T08:44:33Z
 
 This section is the current truth and supersedes older dated readbacks below;
 those sections remain historical receipts. The active lease is still
@@ -36,10 +36,10 @@ matched all 34 local blobs. Upstream was untouched.
 
 | Machine | Current observed state | Honest classification |
 |---|---|---|
-| New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is idle at `runs=3`, exit 0, `StartInterval=21600`. Receipt `20260829T195959.324876Z-be2608f7` at `20:19:56.940667Z` and follow-up `20260830T022016.788683Z-c11f0266` at `02:39:32.956025Z` are 6:19:36 apart; follow-up status `completed_with_absent_harnesses`, errors `[]`, runtime publication `blocked_no_drive_root`, Claude 1/Codex 6/Hermes 0/OpenClaw absent. | **DONE:** six-hour launchd collection proof and seven-object Drive-plugin publication. **IN-FLIGHT:** automatic runtime Drive publication; no local provider exists. |
+| New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is currently running at `runs=4`, PID `86900`, PPID `1`, with prior exit 0 and `StartInterval=21600`. Receipt `20260829T195959.324876Z-be2608f7` at `20:19:56.940667Z` and follow-up `20260830T022016.788683Z-c11f0266` at `02:39:32.956025Z` are 6:19:36 apart; follow-up status `completed_with_absent_harnesses`, errors `[]`, runtime publication `blocked_no_drive_root`, Claude 1/Codex 6/Hermes 0/OpenClaw absent. The current interval run began at `2026-08-30T04:39:56Z` and has not emitted a receipt. | **DONE:** six-hour launchd collection proof and seven-object Drive-plugin publication. **IN-FLIGHT:** current supervised collection and automatic runtime Drive publication; no local provider exists. |
 | Mac Studio | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is idle after `runs=2`, last exit 0, `StartInterval=21600`; the long process was launchd-owned (`PID 76865`, `PPID 1`) and ran from `00:02:18` until completion. Receipt `20260830T040218.778731Z-c65bac22` was collected at `07:38:20.693304Z`, generated a zero-error `completed_with_absent_harnesses` result, and reports `publication=blocked_drive_unavailable`: Claude 18/16 new objects/319 redactions, Codex 71/62/881, Hermes 0/0, OpenClaw absent. Exactly 78 finalized objects (16 Claude + 62 Codex) were imported through the Drive plugin; one bounded repair/review recovered the three initially absent Codex objects. | **DONE:** checkout, live-shaped preflight, launchd supervision, second scan, receipt, and 78-object plugin publication. **IN-FLIGHT:** runtime automatic Drive publication and the end-to-end “new chat appears in Drive” proof; the plugin is not a launchd executable. |
 | Mac Mini | SSH is reachable, runtime `3c732d7`; no archive label or process is loaded. Latest read-only census found approximately 7.29 GB free; active `CoreSimulator.log` is about 5.51 GB; closed `CoreSimulator.prev.log` is 15,403,577,516 bytes. | **NOT STARTED:** export, canary, schedule, or cleanup. Matt has not approved touching the closed log; no Mini log was changed. |
-| Old MacBook | `ssh oldmac` remains unreachable. New's retry label is loaded at `StartInterval=21600`, `runs=2`, exit 0; logs report `offline_retryable`/`ssh_unreachable`. | **DONE:** non-blocking retry queue. **IN-FLIGHT:** queued retry. **NOT STARTED:** online inventory, deployment, or canary. |
+| Old MacBook | `ssh oldmac` remains unreachable. New's retry label is loaded at `StartInterval=21600`, `runs=3`, exit 0; logs report `offline_retryable`/`ssh_unreachable`. | **DONE:** non-blocking retry queue. **IN-FLIGHT:** queued retry. **NOT STARTED:** online inventory, deployment, or canary. |
 
 The authenticated Drive plugin test write succeeded before publication: body-free
 canary ID `1kFQrT2pFI2qSZl2A1Fovv-qyagvod47l` was imported into `AI Chat Archive`
@@ -412,7 +412,7 @@ or a missing/future schema checkpoint is a hard stop.
 
 ## 3. Honest state during active deployment
 
-The current live reconciliation is 2026-08-30T08:40:35Z. The canonical
+The current live reconciliation is 2026-08-30T08:44:33Z. The canonical
 repository state is [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](../FLEET_CHAT_ARCHIVE_LIVE_STATE.md)
 and the body-free evidence receipt is
 [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](../RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md).
