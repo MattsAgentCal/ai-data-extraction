@@ -117,7 +117,7 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Current host state as of 2026-08-30T08:14:18Z
+## Current host state as of 2026-08-30T08:40:35Z
 
 | Host | Verified rollout truth | Scheduler / blocker |
 |---|---|---|

@@ -1,6 +1,6 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-08-30T08:14:18Z
+**Last reconciled:** 2026-08-30T08:40:35Z
 **State:** active deployment; New's launchd schedule has completed an observed six-hour cycle (`runs=2→3`, exit 0, 6:19:36 between receipts) and seven newly staged redacted objects were published through the authenticated Drive plugin. Studio's second launchd-owned scan completed under PID 76865/PPID 1 and emitted zero-error receipt `20260830T040218.778731Z-c65bac22`; all 78 finalized Studio objects (16 Claude + 62 Codex) were imported and metadata-verified, bringing the folder to 90 items and 418,815,569 Studio bytes. Runtime automatic launchd-to-Drive publication remains unproven because the plugin is not a launchd executable and Studio has no File Provider. Mini remains paused pending Matt's closed-log approval and Old remains on its non-blocking retry queue. No new release or schema/review wave was opened.
 
 This file is the repository's canonical rollout state. It records body-free
@@ -15,7 +15,7 @@ bodies, indexes, and other private archive data remain outside Git.
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
 | Repository checkout | MacBook docs checkout at `182114d`; Studio runtime checkout at `3c732d7`; Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub publication | This final docs ref is local `b17d096b580f8143cf85e2497d2ecff4fcff58a4`, published by the GitHub plugin as owned-fork commit `419df3dbe390fe1a10e4b5171ae8661f9d7c52d2`, tree `6e7c8088a93d17da5c3fa6c68a52ea9d60c99f49`, parent `5fc48e9f07a15cbdf482a212df75b83268a2b7a6`, `force=false`; recursive readback matched all 34 local blobs. |
+| GitHub publication | This final docs ref is local `14d4ea3ab3cb2071fc6001ce37b60821abd643c2`, published by the GitHub plugin as owned-fork commit `819e385306cb3c56099662f27dd55d7ddee3b247`, tree `63a421df9576483967a557605a80692166eccd3f`, parent `419df3dbe390fe1a10e4b5171ae8661f9d7c52d2`, `force=false`; recursive readback matched all 34 local blobs. |
 | Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; New moved the folder 5→12, then Studio moved it 12→90. All 78 Studio object titles are unique, exact-parent, `text/plain`, and total 418,815,569 bytes; the three repaired Codex IDs and Drive IDs are in the dated receipt. |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 

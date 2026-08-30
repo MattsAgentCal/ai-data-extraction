@@ -16,7 +16,7 @@ the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
-### Current successor snapshot — 2026-08-30T08:14:18Z
+### Current successor snapshot — 2026-08-30T08:40:35Z
 
 This section is the current truth and supersedes older dated readbacks below;
 those sections remain historical receipts. The active lease is still
@@ -28,10 +28,10 @@ was `44b65aa`. The content reconciliation commit was local
 `e25458991eac2ccdd6ef7572e186857a7991679f`. The preceding ref-pinning commit
 was local `42457cc8eba6b8cda7a50f597d6670a28089e47d`, published as fork commit
 `5fc48e9f07a15cbdf482a212df75b83268a2b7a6`. The final docs ref is local
-`b17d096b580f8143cf85e2497d2ecff4fcff58a4`, published by the GitHub plugin as
-fork commit `419df3dbe390fe1a10e4b5171ae8661f9d7c52d2` (tree
-`6e7c8088a93d17da5c3fa6c68a52ea9d60c99f49`, parent
-`5fc48e9f07a15cbdf482a212df75b83268a2b7a6`, `force=false`); recursive readback
+`14d4ea3ab3cb2071fc6001ce37b60821abd643c2`, published by the GitHub plugin as
+fork commit `819e385306cb3c56099662f27dd55d7ddee3b247` (tree
+`63a421df9576483967a557605a80692166eccd3f`, parent
+`419df3dbe390fe1a10e4b5171ae8661f9d7c52d2`, `force=false`); recursive readback
 matched all 34 local blobs. Upstream was untouched.
 
 | Machine | Current observed state | Honest classification |
@@ -412,7 +412,7 @@ or a missing/future schema checkpoint is a hard stop.
 
 ## 3. Honest state during active deployment
 
-The current live reconciliation is 2026-08-30T08:14:18Z. The canonical
+The current live reconciliation is 2026-08-30T08:40:35Z. The canonical
 repository state is [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](../FLEET_CHAT_ARCHIVE_LIVE_STATE.md)
 and the body-free evidence receipt is
 [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](../RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md).
@@ -549,7 +549,7 @@ and the body-free evidence receipt is
 | Historical docs/runtime readback | Local `bb8308ca1d27e5f6959a19300d71076844c3081c`; remote `3e377e92646675db1d70c47036a66dee16ad6ede` | Historical five-doc tree. The current tracked tree has six documentation files, including this handoff and `SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`. |
 | Content reconciliation docs | Local `92bc5fcf35212b96484b98e0a6dd54e28d83fb8f`; owned-fork plugin commit `e25458991eac2ccdd6ef7572e186857a7991679f`; tree `3286505a316937204804235f4374423998cddd3d`, parent `3232cab277c9b72904abc9955d2e8edde8bc5f37`, `force=false` | 2026-08-30 Studio receipt/Drive repair reconciliation content; recursive readback matched 34/34 blobs and upstream was untouched. |
 | Ref-pinning docs | Local `42457cc8eba6b8cda7a50f597d6670a28089e47d`; owned-fork plugin commit `5fc48e9f07a15cbdf482a212df75b83268a2b7a6`; tree `a259691e74a7ca2b08efd2e17ca38eca0b6d6f22`, parent `e25458991eac2ccdd6ef7572e186857a7991679f`, `force=false` | Pins the content reconciliation ref; recursive readback matched 34/34 blobs and upstream was untouched. |
-| Current final docs ref | Local `b17d096b580f8143cf85e2497d2ecff4fcff58a4`; owned-fork plugin commit `419df3dbe390fe1a10e4b5171ae8661f9d7c52d2`; tree `6e7c8088a93d17da5c3fa6c68a52ea9d60c99f49`, parent `5fc48e9f07a15cbdf482a212df75b83268a2b7a6`, `force=false` | Metadata-only ref receipt for the final handoff/live-state/README/receipt tree; recursive readback matched 34/34 blobs and upstream was untouched. |
+| Current final docs ref | Local `14d4ea3ab3cb2071fc6001ce37b60821abd643c2`; owned-fork plugin commit `819e385306cb3c56099662f27dd55d7ddee3b247`; tree `63a421df9576483967a557605a80692166eccd3f`, parent `419df3dbe390fe1a10e4b5171ae8661f9d7c52d2`, `force=false` | Metadata-only ref receipt for the final handoff/live-state/README/receipt tree; recursive readback matched 34/34 blobs and upstream was untouched. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub plugin at

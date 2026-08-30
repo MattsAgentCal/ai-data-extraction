@@ -13,7 +13,7 @@ had completed with exit 0 and a zero-error receipt whose publication was blocked
 by the absent Drive provider. The 22:03 readback opened no new release or review
 wave.
 
-## Current execution receipt — 2026-08-30T08:14:18Z
+## Current execution receipt — 2026-08-30T08:40:35Z
 
 This addendum is the current body-free readback; the 06:04 section below is
 historical. The active Drive route is the authenticated Google Drive plugin,
@@ -22,7 +22,7 @@ credential was opened or uploaded.
 
 | Check | Current body-free evidence |
 |---|---|
-| GitHub docs publication | The final docs ref is local `b17d096b580f8143cf85e2497d2ecff4fcff58a4`, published through the Git-data workflow as owned-fork commit `419df3dbe390fe1a10e4b5171ae8661f9d7c52d2`; tree `6e7c8088a93d17da5c3fa6c68a52ea9d60c99f49`, parent `5fc48e9f07a15cbdf482a212df75b83268a2b7a6`, `force=false`. Recursive readback matched all 34 local blobs by path, mode, type, and SHA; upstream was untouched. The preceding ref-pinning commit was `42457cc8eba6b8cda7a50f597d6670a28089e47d`. |
+| GitHub docs publication | The final docs ref is local `14d4ea3ab3cb2071fc6001ce37b60821abd643c2`, published through the Git-data workflow as owned-fork commit `819e385306cb3c56099662f27dd55d7ddee3b247`; tree `63a421df9576483967a557605a80692166eccd3f`, parent `419df3dbe390fe1a10e4b5171ae8661f9d7c52d2`, `force=false`. Recursive readback matched all 34 local blobs by path, mode, type, and SHA; upstream was untouched. The preceding docs ref was local `b17d096b580f8143cf85e2497d2ecff4fcff58a4`. |
 | Studio launchd receipt | `/Users/calstudio/.local/share/ai-chat-archive/spool/hosts/mac-studio/receipts/20260830T040218.778731Z-c65bac22.json`; collected `2026-08-30T07:38:20.693304+00:00`; `completed_with_absent_harnesses`; errors `[]`; runtime publication `blocked_drive_unavailable`. The launchd label is now idle at `runs=2`, last exit 0, `StartInterval=21600`; the long process was PID `76865`, PPID 1, and was never foreground-owned. |
 | Studio collection | Claude: 18 conversations, 57 indexed, 16 new objects, 319 redactions, 0 quality failures. Codex: 71 conversations, 814 indexed, 62 new objects, 881 redactions, 0 quality failures. Hermes: 0 conversations, 187 indexed, 0 new objects. OpenClaw: absent on host. The finalized object set is exactly 78 files (16 Claude + 62 Codex), total 418,815,569 bytes. |
 | Studio Drive publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; prior New publication left 12 items, then all 78 Studio objects were imported once and moved to the exact target parent, producing 90 items. Every title is unique; every metadata readback is exact parent, `text/plain`, and matching size. |
@@ -37,7 +37,7 @@ MacBook remains unreachable with the launchd retry queue enabled/non-blocking.
 
 ## Historical execution receipt — 2026-08-30T06:04:38Z
 
-This historical section preserves the 06:04 live status; the 08:14 addendum
+This historical section preserves the 06:04 live status; the 08:40 addendum
 above is current. The active Drive route is the authenticated Google Drive
 plugin, not the staged Desktop DMG. After reading the active lease, the GitHub
 plugin used its Git-data workflow (`create_blob → create_tree → create_commit →
