@@ -1,9 +1,12 @@
 import contextlib
+import fcntl
 import io
 import json
 import os
 import plistlib
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +16,39 @@ import drive_plugin_publisher as publisher
 
 
 class DrivePluginPublisherTests(unittest.TestCase):
+    def test_publisher_waiter_acquires_after_collector_releases_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spool = Path(directory) / "spool"
+            spool.mkdir()
+            lock_path = spool / ".run.lock"
+            holder = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            acquired = threading.Event()
+            failures = []
+
+            def wait_for_snapshot():
+                try:
+                    with publisher.publisher_snapshot_lock(spool, 5):
+                        acquired.set()
+                except Exception as error:  # pragma: no cover - assertion below
+                    failures.append(error)
+
+            waiter = threading.Thread(target=wait_for_snapshot)
+            waiter.start()
+            time.sleep(0.1)
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            os.close(holder)
+            self.assertTrue(acquired.wait(2))
+            waiter.join(2)
+            self.assertFalse(waiter.is_alive())
+            self.assertEqual(failures, [])
+
+    def test_production_publisher_wait_matches_one_schedule_interval(self):
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "new-macbook-drive-publisher.json"
+        config = json.loads(config_path.read_text())
+        self.assertEqual(config["lock_timeout_seconds"], config["interval_seconds"])
+        self.assertGreaterEqual(config["lock_timeout_seconds"], 21600)
+
     def test_select_candidates_prioritizes_newest_and_caps_batch(self):
         rows = [
             {
