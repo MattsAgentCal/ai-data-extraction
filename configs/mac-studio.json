@@ -21,13 +21,6 @@
   "hub": {
     "remotes": [
       {
-        "host_id": "new-macbook",
-        "ssh_host": "newmac",
-        "remote_spool_root": "/Users/mattrotundo/.local/share/ai-chat-archive/spool",
-        "remote_pipeline_path": "/Users/mattrotundo/Projects/ai-data-extraction/fleet_chat_archive.py",
-        "timeout_seconds": 21600
-      },
-      {
         "host_id": "mac-mini",
         "ssh_host": "cals-mac-mini",
         "remote_spool_root": "/Users/calrotundo/.local/share/ai-chat-archive/spool",
