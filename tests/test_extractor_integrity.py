@@ -435,6 +435,12 @@ class ExtractorIntegrityTests(unittest.TestCase):
                 }
                 for response_type in response_types
             )
+            rows.append(
+                {
+                    "type": "realtime_item",
+                    "payload": {"type": "audio", "text": "live item"},
+                }
+            )
             rows.extend(
                 [
                     {

@@ -44,9 +44,9 @@ RUNTIME_FILES = (
 )
 REVIEWED_RUNTIME_SHA256 = {
     "fleet_chat_archive.py": "625e98c4f33aba2e57864f49c70992924491c78e3561dd2bf1360687da039a0b",
-    "archive_object_contract.py": "f31e840f49fcc9f35dc8223d1d0da3a479ae6da2de7fc62fac73ef6e8521825a",
+    "archive_object_contract.py": "632f94bbb177766286aeb7d772ae4c0c6fd0b0197884317cbfe3687ade0d2007",
     "extract_claude_code.py": "cc09aa37295d98572fdffcf6d8ef465d340e9154c1722f85871991aa9af8512e",
-    "extract_codex.py": "6b7132413ad3dc3042ca4644d9ae30062f2a972da48809cdca376c0f35f377e6",
+    "extract_codex.py": "2e0de82b09d66f98ca9cfca2e0144b5e834c028239c61d95b8b3aae4fac463dc",
     "extract_openclaw.py": "6049a3832abcddb380b9a9845e4cd1ef264467358be8ad8ce000a11da3e1b84b",
     "extract_hermes.py": "c45fb372457d02e1d0df510e96dc9b0592da41b7cea9828ea7636f9000e173cb",
 }

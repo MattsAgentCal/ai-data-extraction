@@ -620,6 +620,7 @@ def extract_codex_session(
                     'turn_context',
                     'compacted',
                     'inter_agent_communication_metadata',
+                    'realtime_item',
                     'world_state',
                 }:
                     recognized_lines += 1

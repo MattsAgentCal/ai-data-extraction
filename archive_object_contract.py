@@ -29,7 +29,7 @@ CODEX_EVENT_TYPES = {
     "tool_use", "tool_result", "diff", "custom_tool_call",
     "custom_tool_call_output", "function_call", "function_call_output",
     "turn_context", "compacted", "inter_agent_communication_metadata",
-    "world_state", "response_item:message_empty", "response_item:reasoning",
+    "realtime_item", "world_state", "response_item:message_empty", "response_item:reasoning",
     "response_item:agent_message", "response_item:image_generation_call",
     "response_item:tool_search_call", "response_item:tool_search_output",
     "response_item:web_search_call",
