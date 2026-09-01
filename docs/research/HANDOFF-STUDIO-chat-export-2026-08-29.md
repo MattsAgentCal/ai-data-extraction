@@ -1,7 +1,7 @@
 # HANDOFF — Studio successor for the fleet chat export
 
 **Handoff date:** 2026-08-29
-**Last verified:** 2026-09-01T11:14Z (MacBook + Studio; body-free live readback)
+**Last verified:** 2026-09-01T11:31Z (MacBook + Drive plugin + Studio/Mini read-only)
 **Origin:** MacBook documentation turn
 **Destination:** successor agent operating on the Mac Studio
 **Current mode:** the deployment goal is resumed by the named lease owner;
@@ -18,8 +18,8 @@ The end-to-end “new chat appears in Drive automatically” proof remains in
 flight. The Mini non-destructive gzip step did not run because both requested
 paths are absent; Old remains offline on its retry queue.
 
-Fresh Mini-only readback at `2026-09-01T11:19:05Z` remains the current disk
-evidence: both requested paths are absent, and the guarded no-op measured
+Historical Mini-only readback at `2026-09-01T11:19:05Z` is retained below the
+current 11:31Z checkpoint: both requested paths were absent, and the guarded no-op measured
 `30,604,537,856` free bytes (`29,887,244 KiB`). No gzip, `gzip -t`,
 spot-decompress, or deletion ran; exact operation delta and net freed space are
 `0` bytes. This does not authorize deletion or change the single outstanding
@@ -30,7 +30,37 @@ the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
-## Current reconciliation — 2026-09-01T11:14Z (supersedes older snapshots)
+## Current reconciliation — 2026-09-01T11:31Z (supersedes the 11:14Z snapshot)
+
+This is the latest body-free handoff checkpoint. Its parent docs ref is the
+GitHub-plugin commit `f23912ffaed783ee5be84b441980f9dc68d818cf`, tree
+`2f68e6c0dcc2193bec6d0ab3128ab0d9c1b24c35`, parent `68c02d1…`; the local
+checkout has the same tree. The activated Drive plugin canary wrote
+`ai-chat-archive-plugin-canary-20260901.txt`, read back exact metadata
+(`text/plain`, `18,167` bytes, target parent), and deleted only that canary.
+The production launchd publisher's previous receipt remains `24/24/0/0`.
+
+### Current per-machine state
+
+| Machine | Evidence | Classification |
+|---|---|---|
+| New MacBook | At `2026-09-01T11:31:12Z`, collector `runs=11` and publisher `runs=3` were idle, last exit `0`, and both six-hour plists remained loaded. The Drive-canary child left ephemeral Codex thread `01a05cb9-bfca-7252-a5c1-cc0e514b5d90` as the new-chat candidate. | **IN-FLIGHT:** preserve the next natural cycle; correlate its new object and Drive metadata without a manual kick. |
+| Mac Studio | At `2026-09-01T11:26:37Z`, free space was `973,732 KiB`; quarantine was `73,136,828 KiB` / `22,501` files and `.work` was empty. The shipped label is idle after launchd `SIGTERM` (`runs=1`, exit `143`). | **DISK-GATED:** do not retry or touch quarantine without explicit authorization. |
+| Mac Mini | At `2026-09-01T11:24:16Z`, the requested source and `.gz` were absent; free space was `29,893,336 KiB` = `30,610,776,064` bytes. Operation delta and net freed bytes are `0`; no log mutation occurred. | **PAUSED:** no export/canary/schedule; deletion gate remains untouched. |
+| Old MacBook | SSH remains unreachable; retry label remains loaded at `StartInterval=21600`. | **IN-FLIGHT:** nonblocking retry; online deployment is unstarted. |
+
+### Current gates and next proof
+
+The two outstanding operational gates are (1) Studio disk restoration/cleanup
+authorization for the existing quarantine and (2) Matt's still-unresolved
+Mini log decision. The Drive Desktop route remains superseded; plugin access is
+verified, but a new chat appearing after a natural six-hour collection and
+publisher cycle is still not proven. The successor must retain the loaded New
+plists, capture the next terminal receipt, match one newly emitted object to a
+Drive metadata readback, then update this handoff. No foreground canary or
+manual kick counts as the automatic proof.
+
+## Historical reconciliation — 2026-09-01T11:14Z
 
 This is the successor's current body-free checkpoint. The repository is clean
 at local commit `88d65a7677dbdb483b36a85ff59b907231727502` / tree

@@ -1,20 +1,41 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-09-01T11:14Z
+**Last reconciled:** 2026-09-01T11:31Z
 **Current truth (supersedes the older one-line state below):** shipped tree
 `5e33dd15…` is local commit `88d65a7…` and GitHub-plugin commit
 `68c02d1…`; New's terminal receipt is clean under launchd; the Drive publisher
-completed one supervised 24-object batch with zero errors; Studio is on the
-shipped tree but its canary was stopped safely at disk pressure and must not be
-retried until the existing quarantine is handled; Mini's requested source is
-absent and no bytes changed; Old remains on its retry queue.
-**Historical state (pre-repair):** the earlier deployment tree was `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local `e167feb0f5997458c2411195a4380b7d316ce72b`, fork `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`). Its New collector was PID 30001/PPID 1 (`runs=9`), and Studio was booted out while that transfer drained. The earlier Drive publisher receipt recorded 8 uploads, 14 verified skips, and 2 connector failures. The Mini filename-only check found no source, so no gzip or deletion occurred. This line is retained only as a historical receipt; the current truth is the 08:45Z block below.
+completed one supervised 24-object batch with zero errors and the active plugin
+canary write/readback/cleanup succeeded; Studio is on the shipped tree but its
+canary was stopped safely at disk pressure and must not be retried until the
+existing quarantine is handled; Mini's requested source is absent and no bytes
+changed; Old remains on its retry queue. The next natural New interval is
+preserved for the automatic new-chat proof.
+**Historical state (pre-repair):** the earlier deployment tree was `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local `e167feb0f5997458c2411195a4380b7d316ce72b`, fork `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`). Its New collector was PID 30001/PPID 1 (`runs=9`), and Studio was booted out while that transfer drained. The earlier Drive publisher receipt recorded 8 uploads, 14 verified skips, and 2 connector failures. The Mini filename-only check found no source, so no gzip or deletion occurred. This line is retained only as a historical receipt; the current truth is the 11:31Z block below.
 
 This file is the repository's canonical rollout state. It records body-free
 counts, hashes, paths, and lifecycle observations only. Raw conversation
 bodies, indexes, and other private archive data remain outside Git.
 
-## Latest live reconciliation — 2026-09-01T11:14Z
+## Latest live reconciliation — 2026-09-01T11:31Z
+
+This body-free checkpoint supersedes the 11:14Z block below. Its parent
+GitHub-plugin documentation ref `f23912ffaed783ee5be84b441980f9dc68d818cf` has tree
+`2f68e6c0dcc2193bec6d0ab3128ab0d9c1b24c35`. The Drive plugin canary wrote
+`ai-chat-archive-plugin-canary-20260901.txt`, read back exact metadata (ID,
+name, `text/plain`, `18,167` bytes, target parent), and deleted only that
+canary. New launchd baselines are collector `runs=11` and publisher `runs=3`;
+both labels remain loaded at `StartInterval=21600`, with no manual kick.
+
+| Check | Body-free evidence |
+|---|---|
+| New natural-cycle baseline | At `2026-09-01T11:31:12Z`, the collector and publisher were idle with last exit `0`. The Drive-canary child created ephemeral Codex thread `01a05cb9-bfca-7252-a5c1-cc0e514b5d90`; its object/Drive correlation is intentionally pending the next natural cycle. |
+| Studio disk gate | At `2026-09-01T11:26:37Z`, free space was `973,732 KiB`; `.work` was `0 KiB`; quarantine was `73,136,828 KiB` across `22,501` files. The launchd label is idle after `runs=1`, exit `143`; no retry is safe. |
+| Mini | At `2026-09-01T11:24:16Z`, the exact requested source and `.gz` were absent. Free space was `29,893,336 KiB` = `30,610,776,064` bytes; operation delta and net freed bytes remain `0`. |
+| Old | SSH remains unreachable; the launchd retry queue is loaded and nonblocking. |
+
+The 11:14Z table below is retained as historical evidence.
+
+## Historical live reconciliation — 2026-09-01T11:14Z
 
 | Check | Body-free evidence |
 |---|---|

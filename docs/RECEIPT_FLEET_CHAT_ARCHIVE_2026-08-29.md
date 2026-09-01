@@ -13,9 +13,30 @@ pre-existing quarantine data and was stopped safely at `SIGTERM`.
 probes to Studio and Mini, launchd readback, GitHub connector readback, and Drive
 connector readback. That historical readback opened no new release or review
 wave. The current body-free reconciliation is recorded below at
-2026-09-01T11:14Z.
+2026-09-01T11:31Z.
 
-## Current execution receipt — 2026-09-01T11:14Z
+## Current execution receipt — 2026-09-01T11:31Z
+
+This body-free receipt supersedes the 11:14Z section below. Its parent
+GitHub-plugin documentation ref is `f23912ffaed783ee5be84b441980f9dc68d818cf` / tree
+`2f68e6c0dcc2193bec6d0ab3128ab0d9c1b24c35`. The activated Google Drive plugin
+successfully uploaded a static canary as
+`ai-chat-archive-plugin-canary-20260901.txt`, read back exact ID/name/MIME/
+size/parent (`text/plain`, `18,167` bytes), and deleted only that canary.
+The production publisher receipt remains `20260901T103707.805024Z-c2f89e5e`
+with `24` uploads, `0` skips, `0` failures, and `errors=[]`.
+
+| Check | Current observed evidence |
+|---|---|
+| New automatic-cycle baseline | At `2026-09-01T11:31:12Z`, collector `runs=11` and publisher `runs=3` were idle with last exit `0`; both loaded plists show `StartInterval=21600`. No manual kick was used for the pending proof. The canary's ephemeral Codex thread ID is `01a05cb9-bfca-7252-a5c1-cc0e514b5d90`; body and transcript content remain outside this receipt. |
+| Studio | At `2026-09-01T11:26:37Z`, free space was `973,732 KiB`, quarantine `73,136,828 KiB` / `22,501` files, and `.work` `0 KiB`. The shipped launchd canary is idle after exit `143`; no retry or cleanup was performed. |
+| Mini | At `2026-09-01T11:24:16Z`, the requested source and `.gz` were absent. Free space was `29,893,336 KiB` = `30,610,776,064` bytes; source/archive/deletion/net-freed bytes are `0`. |
+| Old | SSH remains unreachable; the six-hour launchd retry queue is loaded and nonblocking. |
+
+The natural six-hour new-chat-to-Drive correlation remains **IN-FLIGHT**; the
+staged 24-object batch and separate plugin canary are not that proof.
+
+## Historical execution receipt — 2026-09-01T11:14Z
 
 This body-free snapshot records the shipped code readback, New terminal
 receipt, one launchd-supervised Drive publication run, the Studio disk-pressure

@@ -117,7 +117,28 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Latest live reconciliation — 2026-09-01T11:14Z
+## Latest live reconciliation — 2026-09-01T11:31Z
+
+This body-free checkpoint supersedes the 11:14Z block below. Its parent
+GitHub-plugin documentation ref is `f23912ffaed783ee5be84b441980f9dc68d818cf` (tree
+`2f68e6c0dcc2193bec6d0ab3128ab0d9c1b24c35`), parent `68c02d1…`, and the local
+checkout has the same tree. The authenticated Drive plugin canary wrote and
+read back `ai-chat-archive-plugin-canary-20260901.txt` in the target folder
+(`text/plain`, `18,167` bytes, exact parent), then deleted only that canary;
+the archive batch remains unchanged. New's next natural run is intentionally
+left loaded for the automatic-chat proof; no manual kick was used.
+
+| Host / route | Observed state | Honest classification |
+|---|---|---|
+| New MacBook | Collector label is idle at `runs=11`, exit `0`, `StartInterval=21600`; publisher is idle at `runs=3`, exit `0`, same interval. Baseline readback at `2026-09-01T11:31:12Z` precedes the next natural cycle. The ephemeral Drive-canary Codex thread (`01a05cb9-bfca-7252-a5c1-cc0e514b5d90`) is a body-free new-chat candidate for that cycle. | **IN-FLIGHT:** natural six-hour collection, publisher correlation, and Drive appearance. |
+| Mac Studio | Shipped label remains idle after supervised PID `54195` termination (`runs=1`, exit `143`). At `2026-09-01T11:26:37Z`, free space was `973,732 KiB` and `.work` was empty; quarantine remains `73,136,828 KiB` across `22,501` files. | **DISK-GATED:** no retry or unrelated cleanup. |
+| Mac Mini | The requested `CoreSimulator.prev.log` and `.gz` remain absent; latest free-space sample at `2026-09-01T11:24:16Z` was `29,893,336 KiB` = `30,610,776,064` bytes. No bytes were written or deleted. | **DONE:** guarded no-op; export/schedule remain paused. |
+| Old MacBook | SSH remains unreachable; the loaded retry queue remains the only action. | **IN-FLIGHT:** non-blocking offline retry. |
+| Drive plugin | The prior launchd publisher receipt remains `24` candidates / `24` uploaded / `0` failed; the separate canary write/readback/cleanup succeeded. | **DONE:** route access and staged batch; **IN-FLIGHT:** automatic new-chat proof. |
+
+The 11:14Z reconciliation remains below as a historical receipt.
+
+## Historical live reconciliation — 2026-09-01T11:14Z
 
 This body-free checkpoint is the current rollout truth. The shipped tree is
 local commit `88d65a7677dbdb483b36a85ff59b907231727502` / tree
