@@ -4,15 +4,18 @@ This checkpoint authorizes the first release that adds the launchd-owned Drive
 plugin publisher. It is a release gate: one live-schema census, one canonical
 validator, and one review wave. A later broad release needs a new checkpoint.
 
-## Current reconciliation — 2026-09-01T04:21Z
+## Current reconciliation — 2026-09-01T08:45Z
 
-The frozen code tree is `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local
-`e167feb0f5997458c2411195a4380b7d316ce72b`, fork `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`). The 270-test suite remains the last
-observed green verification. No second census, validator, or review wave was
-opened for the docs/runtime reconciliation. The Mini filename-only check found
-no closed log to compress and changed nothing; the New collector remains under
-launchd while validating the Studio shard. This checkpoint still governs any
-broad release: one census, one canonical validator, one batched review wave.
+The repaired code tree is `300ce290c9d75e4187a240770db7f9793c57d577` (local
+commit `4b665987ad9c06c618a73fc67e7b6004d1bd1881`; GitHub-plugin commit
+`ec96761786196f58b8157de8dc917c85947a09b8`). The one live census found 71
+`realtime_item` rows in the current Codex rollout that the previous contract
+rejected. One narrow repair added that event to the extractor and canonical
+contract, followed by one batched review/re-review; the full suite is 270
+tests, OK. The New collector is still a single launchd-supervised canary under
+PID 84541, so this checkpoint does not claim a terminal runtime receipt or a
+broad host release. The Mini source and `.gz` copy are absent; no disk mutation
+occurred and freed bytes are 0. Any later broad release needs a new checkpoint.
 
 ## Checkpoint record
 
@@ -20,22 +23,22 @@ broad release: one census, one canonical validator, one batched review wave.
 |---|---|
 | Checkpoint ID | `SF-2026-09-01-drive-publisher` |
 | Release under freeze | `drive-plugin-publisher` (local pre-commit) |
-| Status | `satisfied-for-reviewed-release` |
+| Status | `satisfied-for-repaired-release; broad host release still pending terminal canary` |
 | Live census time | `2026-09-01` (MacBook checkout, immediately before this release review) |
-| Evidence | The command output below and the hashes in this file |
+| Evidence | One live-schema census, one canonical validator, one batched repair/re-review, and the hashes in this file |
 
 ## 1. One live-schema census
 
-The checked-out contract was inspected once before the publisher review. The
+The checked-out contract was inspected once before the repair review. The
 observed schema is `archive_schema_version=2`, with four source mappings:
 `claude -> claude-code`, `codex -> codex`, `openclaw -> openclaw`, and
-`hermes -> hermes`. The contract exposes 22 Claude event types and 45 Codex
-event types. The full event-name output is the sorted output of the census
-command; it is intentionally not duplicated here so this gate has one source
-of truth.
+`hermes -> hermes`. The census found 22 Claude event types and 46 Codex event
+types after including the newly observed `realtime_item`; the prior live row
+shape produced 71 unknown-event findings in one rollout. The full event-name
+output is the sorted output of the single census command.
 
 `archive_object_contract.py` SHA-256:
-`f31e840f49fcc9f35dc8223d1d0da3a479ae6da2de7fc62fac73ef6e8521825a`
+`632f94bbb177766286aeb7d772ae4c0c6fd0b0197884317cbfe3687ade0d2007`
 
 ## 2. One canonical validator
 
@@ -43,7 +46,8 @@ The canonical object validator remains
 `archive_object_contract.validate_archive_object`. The publisher uses the
 existing collector boundary validators for the committed manifest and indexes,
 then calls `fleet_chat_archive.validated_object_provenance` for every object in
-the bounded publication batch. No second archive-object schema was introduced.
+the bounded publication batch. No second archive-object schema was introduced;
+the repaired contract is the sole validator input.
 
 The reviewed collector hash is
 `625e98c4f33aba2e57864f49c70992924491c78e3561dd2bf1360687da039a0b`.
@@ -52,12 +56,11 @@ The reviewed publisher hash after the one repair/re-review is
 
 ## 3. One review wave
 
-One review wave inspected the bounded publisher diff, focused tests, and the
-complete unittest suite. Four findings were batched into one repair: absolute
-spool-path enforcement, timezone-aware lease parsing, parent-ID normalization,
-and fixed connector error codes. The same focused tests and full suite were
-re-run once after that repair: `270 tests, OK`. No parallel review wave was
-used or authorized for this checkpoint.
+One review wave inspected the bounded `realtime_item` repair, focused tests,
+and the complete unittest suite. Findings were batched into one repair; the
+same focused tests and full suite were re-run once after that repair:
+`270 tests, OK`. No parallel review wave was used or authorized for this
+checkpoint.
 
 ## Enforcement shape
 

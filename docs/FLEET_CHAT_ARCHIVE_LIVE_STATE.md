@@ -1,13 +1,33 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-09-01T04:21Z
+**Last reconciled:** 2026-09-01T08:45Z
+**Current truth (supersedes the older one-line state below):** repaired tree
+`300ce290…`; GitHub ref `ec967617…`; New PID 84541 is still active under
+launchd; Studio is idle at `bb9a085…`; Drive publication and the new-chat proof
+await the terminal receipt; Mini source/archive are absent and freed bytes are
+0; Old remains on its retry queue.
 **State:** active deployment; the deployed code tree is `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local `e167feb0f5997458c2411195a4380b7d316ce72b`, fork `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`). New's launchd collector is active under PID 30001/PPID 1 (`runs=9`, `StartInterval=21600`) while it validates a 1,160-file, 2,166,120-KiB Studio staging shard. Studio is booted out to prevent reciprocal lock and will be fast-forwarded/reinstalled after New emits its receipt. The authenticated Drive plugin publisher has a launchd receipt with 8 uploads, 14 verified skips, and 2 connector failures; the end-to-end new-chat-to-Drive canary remains in flight. The Mini filename-only check found no `CoreSimulator.prev.log*` anywhere under `/Users/calrotundo`, so no gzip output or deletion was possible (source 0 bytes, archive 0 bytes, freed 0); Old remains on its loaded offline retry queue. No new broad release or review wave was opened.
 
 This file is the repository's canonical rollout state. It records body-free
 counts, hashes, paths, and lifecycle observations only. Raw conversation
 bodies, indexes, and other private archive data remain outside Git.
 
-## Current reconciliation — 2026-09-01T04:21Z
+## Latest live reconciliation — 2026-09-01T08:45Z
+
+| Check | Body-free evidence |
+|---|---|
+| Release identity | Local commit `4b665987ad9c06c618a73fc67e7b6004d1bd1881`, tree `300ce290c9d75e4187a240770db7f9793c57d577`; GitHub-plugin commit `ec96761786196f58b8157de8dc917c85947a09b8` is a non-force fast-forward from `bb9a08570baffc2111e832ac7418bab9d33755af` and has the same tree. Lease owner remains `codex:macbook` on `Mac.lan`. |
+| New MacBook | Launchd label active as PID 84541/PPID 1, `runs=11`, `StartInterval=21600`; receipt count 170 and the post-repair full Codex revalidation has not emitted its terminal receipt. |
+| Mac Studio | Reachable checkout is idle at `bb9a08570baffc2111e832ac7418bab9d33755af` (tree `8f4f0122…`), launchd `runs=1`, last exit 0, `StartInterval=21600`; fast-forward/reinstall waits for New's receipt. |
+| Drive plugin | Target folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; prior publisher receipt `20260901T025751.237727Z-74cdf5d2.json` remains partial (8 uploads, 14 verified skips, 2 connector failures). |
+| Mac Mini | Exact closed-log and `.gz` paths are absent. A single pre/post check measured 29,895,640 KiB = 30,613,135,360 bytes free both times; source/archive/deletion/freed bytes all 0. No gzip, `gzip -t`, spot-decompress, or deletion ran. |
+| Old MacBook | SSH remains unreachable; the loaded 21,600-second retry queue is unchanged and non-blocking. |
+
+Controls remain structural: long canaries are launchd-only; the repo lease names
+one release owner; schema freeze is one live census, one canonical validator,
+and one batched review wave; and findings get one repair and one re-review.
+
+## Historical reconciliation — 2026-09-01T04:21Z
 
 | Check | Body-free evidence |
 |---|---|

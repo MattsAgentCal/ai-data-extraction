@@ -13,7 +13,27 @@ connector readback. That historical readback opened no new release or review
 wave. The current body-free reconciliation is recorded below at
 2026-09-01T04:21Z.
 
-## Current execution receipt — 2026-09-01T04:21Z
+## Current execution receipt — 2026-09-01T08:45Z
+
+This body-free snapshot records the repaired runtime commit, GitHub-plugin
+readback, the still-running launchd canary, and the Mini no-op. Raw chat bodies,
+indexes, databases, and credentials were not opened.
+
+| Check | Current observed evidence |
+|---|---|
+| Code / GitHub | Local `4b665987ad9c06c618a73fc67e7b6004d1bd1881` / tree `300ce290c9d75e4187a240770db7f9793c57d577`; GitHub-plugin commit `ec96761786196f58b8157de8dc917c85947a09b8`, parent `bb9a08570baffc2111e832ac7418bab9d33755af`, non-force update, final tree identical. |
+| Verification | `python3 -m unittest discover -s tests -q` after the `realtime_item` repair: 270 tests, OK. |
+| New collector | `com.mattrotundo.ai-chat-archive.new-macbook` is launchd-owned as PID 84541/PPID 1, `runs=11`, `StartInterval=21600`; receipt count is 170 and the current post-repair Codex rescan has no terminal receipt yet. |
+| Mac Studio | Reachable checkout is idle at `bb9a08570baffc2111e832ac7418bab9d33755af` / tree `8f4f0122…`; fast-forward/reinstall waits for New's terminal receipt. |
+| Drive publisher | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; receipt `20260901T025751.237727Z-74cdf5d2.json` remains partial (8 uploads, 14 verified skips, 2 connector failures). |
+| Mini disk operation | Exact source and `.gz` paths are absent on `Cals-Mac-mini.local`; source/archive/deletion/freed bytes are all 0. A single pre/post check measured 29,895,640 KiB = 30,613,135,360 bytes free both times. No gzip, `gzip -t`, spot-decompress, or deletion ran. |
+| Old MacBook | SSH remains unreachable; loaded 21,600-second retry queue remains non-blocking. |
+
+The binding structure is unchanged: launchd-only long canaries, one deployment
+lease owner, one schema census/validator/review wave, and batched one-repair/
+one-re-review. The Desktop DMG path is superseded by the authenticated plugin.
+
+## Historical execution receipt — 2026-09-01T04:21Z
 
 This is the latest body-free runtime snapshot; the dated sections below are
 historical receipts. The active lease remains with `codex:macbook` on `Mac.lan`.

@@ -117,6 +117,29 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
+## Latest live reconciliation — 2026-09-01T08:45Z
+
+This body-free checkpoint supersedes the older `04:21Z` block below. The
+repaired code is committed locally as `4b665987ad9c06c618a73fc67e7b6004d1bd1881`
+(`300ce290c9d75e4187a240770db7f9793c57d577`) and was published by the GitHub
+plugin as `ec96761786196f58b8157de8dc917c85947a09b8` with the same tree. The
+post-repair suite is 270 tests, OK. The active lease is still owned by
+`codex:macbook`; no other session may deploy or publish.
+
+| Host / route | Observed state | Honest classification |
+|---|---|---|
+| New MacBook | `com.mattrotundo.ai-chat-archive.new-macbook` is launchd-owned as PID 84541/PPID 1, `runs=11`, `StartInterval=21600`, and active. Receipt count is 170; the current run is the one post-repair full Codex revalidation and has not emitted a terminal receipt yet. | **IN-FLIGHT:** one supervised canary; do not kill, foreground, or retry it. |
+| Mac Studio | Live checkout is `bb9a08570baffc2111e832ac7418bab9d33755af` (tree `8f4f0122…`), launchd collector idle at `runs=1`, last exit 0, `StartInterval=21600`, with 51 body-free receipts. | **IN-FLIGHT:** fast-forward to the published repaired tree and run one supervised canary only after New's terminal receipt. |
+| Mac Mini | Exact `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.prev.log` and `.gz` paths are absent. A single pre/post check measured 29,895,640 KiB = 30,613,135,360 bytes free both times; source, archive, deletion, and freed bytes are all 0. | **DONE:** non-destructive check. **GATED / NOT STARTED:** no gzip/test/deletion was possible without a source; never delete the original without Matt's gate. |
+| Old MacBook | SSH is unreachable; `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` remains a loaded 21,600-second launchd retry queue. | **IN-FLIGHT:** non-blocking retry; online deploy/canary is not started. |
+| Drive plugin publisher | Target `AI Chat Archive` is `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`. Receipt `20260901T025751.237727Z-74cdf5d2.json` remains partial (8 uploads, 14 verified skips, 2 connector failures). | **IN-FLIGHT:** kick once after a healthy collector receipt and verify exact Drive metadata; automatic launchd-to-plugin publication is not yet proven. |
+
+Controls are structure: every long canary is launchd-only; `.deployment-lease.json`
+names the sole release owner; schema freeze is one live census, one canonical
+validator, and one batched review wave; and findings are repaired once and
+re-reviewed once. The Drive Desktop DMG route is superseded by the activated
+plugin route. No raw bodies, indexes, databases, or credentials were opened.
+
 ## Current reconciliation — 2026-09-01T04:21Z
 
 This body-free readback supersedes the 2026-08-30 snapshot below. It records

@@ -1,6 +1,7 @@
 # HANDOFF — Studio successor for the fleet chat export
 
 **Handoff date:** 2026-08-29
+**Last verified:** 2026-09-01T08:45Z (MacBook; body-free live readback)
 **Origin:** MacBook documentation turn
 **Destination:** successor agent operating on the Mac Studio
 **Current mode:** the deployment goal is resumed by the named lease owner;
@@ -10,14 +11,18 @@ install gate must not be re-opened. New's current launchd run is still draining
 the Studio shard, Studio is deliberately booted out to prevent reciprocal lock,
 the Mini source check found no `CoreSimulator.prev.log*`, and Old remains
 offline on its retry queue. The end-to-end new-chat-to-Drive proof is still in
-flight.
+flight. The non-destructive Mini gzip step therefore did not run: source and
+archive are both absent, and no bytes were written or deleted.
 
 This is the complete context for a successor that has the repository but none of
 the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
-## Current reconciliation — 2026-09-01T04:21Z (supersedes older snapshots)
+## Current reconciliation — 2026-09-01T08:45Z (supersedes older snapshots)
+
+This is the latest body-free snapshot. It supersedes the dated readbacks below;
+those remain historical receipts and must not be used as current host state.
 
 ### 1. Goal and current intent
 
@@ -36,33 +41,37 @@ activated Codex plugin route.
 
 - The audited adapters, content-addressed objects, redaction, provenance,
   trusted remote stream, lease, schema-freeze checkpoint, and launchd-owned
-  collectors are in the deployed tree. Local commit is
-  `e167feb0f5997458c2411195a4380b7d316ce72b`; fork ref is
-  `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`; both have tree
-  `8914a6e275cf898d84a3ec4ff7f26c6bce149b13`.
-- The full suite previously passed 270 tests (`python3 -m unittest discover
-  -s tests -q`). No new product code was opened in this reconciliation.
+  collectors are in the repaired tree. Local commit is
+  `4b665987ad9c06c618a73fc67e7b6004d1bd1881`; the GitHub-plugin fork ref is
+  `ec96761786196f58b8157de8dc917c85947a09b8`; both have tree
+  `300ce290c9d75e4187a240770db7f9793c57d577`.
+- The post-repair suite passed 270 tests (`python3 -m unittest discover -s
+  tests -q`). The one bounded `realtime_item` repair and one re-review are
+  recorded in `docs/SCHEMA_FREEZE_CHECKPOINT_2026-09-01.md`.
 - The Drive plugin target folder is `AI Chat Archive`, ID
   `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; probe object
   `19kCcCqMlXNNowcXoXsZe9swvPUC95wNF` remains as the small connector test
   write. Publisher receipt `20260901T025751.237727Z-74cdf5d2.json` recorded
-  8 uploads and 14 metadata-verified skips.
+  8 uploads, 14 metadata-verified skips, and 2 connector failures; automatic
+  launchd-to-plugin publication is not yet proven.
 - Old's launchd retry queue is loaded at `StartInterval=21600` and reports
   retryable SSH-offline receipts.
 
 **IN-FLIGHT**
 
 - New's `com.mattrotundo.ai-chat-archive.new-macbook` is launchd-owned,
-  PID `30001`, PPID `1`, `runs=9`, `StartInterval=21600`, and active. It is
-  validating the Studio incoming shard (1,160 files / 2,166,120 KiB); do not
-  kill it or run a foreground replacement. Wait for its next receipt and lock
-  release.
-- After that receipt, fast-forward Studio from `9251ff6` to fetched ref
-  `a3a8ad5`, reinstall `com.mattrotundo.ai-chat-archive.mac-studio` from the
-  corrected pull-only config, and read back PID/PPID, `runs`, exit code, and
-  interval. Studio's stop receipt is
-  `20260901T024039.360623Z-bc4432a1.json` (`RunFailure`, publication not
-  attempted); the last-good manifest is retained.
+  PID `84541`, PPID `1`, `runs=11`, `StartInterval=21600`, and active. It is
+  performing the post-repair full Codex revalidation; receipt count is 170 and
+  no terminal receipt exists yet. Do not kill it or run a foreground
+  replacement. Wait for its receipt and lock release.
+- After that receipt, fast-forward Studio from `bb9a08570baffc2111e832ac7418bab9d33755af`
+  (tree `8f4f0122…`) to the published repaired ref `ec96761786196f58b8157de8dc917c85947a09b8`,
+  reinstall `com.mattrotundo.ai-chat-archive.mac-studio` from the corrected
+  pull-only config, and read back PID/PPID, `runs`, exit code, and interval.
+  Studio is currently idle at `runs=1`, last exit 0, with 51 body-free
+  receipts; its failed stop receipt is
+  `20260901T024039.360623Z-bc4432a1.json` and the last-good manifest is
+  retained.
 - Complete one fresh launchd-owned Codex canary, kick only the supervisors,
   publish its staged object via the Drive plugin worker, and read back exact
   Drive parent/MIME/size. This is the remaining success proof; publisher
@@ -71,12 +80,15 @@ activated Codex plugin route.
 
 **NOT STARTED / GATED**
 
-- Mini export, canary, and schedule are not started. A filename-only search of
-  `/Users/calrotundo` found no `CoreSimulator.prev.log*`; no gzip ran and no
-  file was deleted. At the check, available space was 30,289,448 KiB
-  (31,016,394,752 bytes): source 0, compressed 0, deletion 0, freed 0.
-  `gzip -t` and spot-decompress are impossible until the source exists. The
-  sole deletion gate remains untouched; never touch the active Mini log.
+- Mini export, canary, and schedule are not started. The exact requested source
+  `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.prev.log` and
+  output `.gz` are absent on `Cals-Mac-mini.local`; a filename-only search
+  under its Logs tree also found no rotated copy. The single pre/post disk
+  check measured 29,895,640 KiB = 30,613,135,360 bytes free both before and
+  after. Therefore source 0 bytes + archive 0 bytes + deletion 0 bytes =
+  operation delta/freed 0 bytes. No gzip, `gzip -t`, spot-decompress, or
+  deletion ran. The sole deletion gate remains untouched; never touch the
+  active Mini log.
 - Old online deployment/canary is not started while SSH is unreachable.
 - OpenClaw collection is not proven on New or Studio because it is absent on
   those hosts; Hermes reports no conversations on Studio. Do not inflate
@@ -86,13 +98,13 @@ activated Codex plugin route.
 
 | Item | New MacBook path / commit | Studio translation / state |
 |---|---|---|
-| Repo | `/Users/mattrotundo/Projects/ai-data-extraction`, `e167feb0…`, tree `8914a6e…` | `/Users/calstudio/Projects/ai-data-extraction`, currently `9251ff6…`; fetched `a3a8ad5…` is the exact tree to fast-forward |
+| Repo | `/Users/mattrotundo/Projects/ai-data-extraction`, `4b665987…`, tree `300ce290…`; GitHub ref `ec967617…` | `/Users/calstudio/Projects/ai-data-extraction`, currently `bb9a085…` / tree `8f4f0122…`; fast-forward to `ec967617…` only after New's terminal receipt |
 | Collector spool | `/Users/mattrotundo/.local/share/ai-chat-archive/spool` | `/Users/calstudio/.local/share/ai-chat-archive/spool` |
 | New collector plist | `/Users/mattrotundo/Library/LaunchAgents/com.mattrotundo.ai-chat-archive.new-macbook.plist` | N/A |
 | Studio collector plist | N/A | `/Users/calstudio/Library/LaunchAgents/com.mattrotundo.ai-chat-archive.mac-studio.plist` (currently booted out) |
 | Drive publisher | `/Users/mattrotundo/Library/LaunchAgents/com.mattrotundo.ai-chat-archive.drive-publisher.plist`; config `configs/new-macbook-drive-publisher.json` | Drive plugin account is used through the worker; no Desktop File Provider is required |
 | Lease | Repo-root `.deployment-lease.json`, owner `codex:macbook`, host `Mac.lan`, active through `2026-09-02T02:26:04Z` | A Studio successor must read and stand down unless the owner commits a transfer |
-| Current Studio receipt | N/A | `20260901T024039.360623Z-bc4432a1.json` (honest failed stop); last-good manifest has 1,155 objects |
+| Current Studio receipt | N/A | No new receipt since the idle stop; `20260901T024039.360623Z-bc4432a1.json` is the honest failed stop, with 51 body-free receipts and the last-good manifest retained |
 
 These MacBook paths are host-local and do not imply that private spool data is
 in Git. Only code, configs, receipts' body-free facts, and this handoff are
@@ -102,12 +114,12 @@ tracked.
 
 The two original gates were surfaced first: (1) Google Drive install/login on
 Studio, and (2) Mini closed-log compression/deletion approval. Gate (1) is now
-superseded by Matt's activated GitHub and Google Docs/Drive plugins; verify the
-plugin with the existing small probe and publish through it, without asking for
+superseded by Matt's activated GitHub and Google Docs/Drive plugins; the existing
+small probe is the plugin test write and publication must use that route, not
 the Desktop DMG. Gate (2) remains open only for deletion of a closed log; the
-non-destructive gzip attempt found no source and touched nothing. Do not
-re-ask either gate. If Matt sends a one-word Mini approval later, handle only
-the explicitly approved deletion after a fresh source/path check.
+non-destructive gzip check found no source and touched nothing. Do not re-ask
+either gate or send a new prompt. If Matt later sends a one-word Mini approval,
+handle only the explicitly approved deletion after a fresh source/path check.
 
 ### 5. Binding execution structure
 
@@ -130,10 +142,10 @@ These are controls, not advice:
 
 ### 6. First three successor actions
 
-1. Read `.deployment-lease.json`, record the owner/expiry, and re-surface the
-   already-batched Mini deletion gate once while explicitly noting that the
-   Drive Desktop gate is superseded. Do not mutate the Mini.
-2. Wait for the New launchd receipt, then fast-forward Studio to `a3a8ad5…`,
+1. Read `.deployment-lease.json`, record the owner/expiry, and record the
+   already-batched Mini deletion gate without asking Matt again; explicitly
+   note that the Drive Desktop gate is superseded. Do not mutate the Mini.
+2. Wait for the New launchd receipt, then fast-forward Studio to `ec967617…`,
    reinstall its launchd collector from `configs/mac-studio.json`, and verify
    the loaded job. Do not run a foreground collector or open another review
    wave.
