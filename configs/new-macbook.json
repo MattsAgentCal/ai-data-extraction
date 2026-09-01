@@ -13,5 +13,16 @@
         "binary": "/Users/mattrotundo/.local/bin/hermes"
       }
     ]
+  },
+  "hub": {
+    "remotes": [
+      {
+        "host_id": "mac-studio",
+        "ssh_host": "calstudio",
+        "remote_spool_root": "/Users/calstudio/.local/share/ai-chat-archive/spool",
+        "remote_pipeline_path": "/Users/calstudio/Projects/ai-data-extraction/fleet_chat_archive.py",
+        "timeout_seconds": 21600
+      }
+    ]
   }
 }

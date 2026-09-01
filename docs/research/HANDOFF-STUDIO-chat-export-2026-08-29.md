@@ -4,8 +4,9 @@
 **Origin:** MacBook documentation turn
 **Destination:** successor agent operating on the Mac Studio
 **Current mode:** the deployment goal is resumed by the named lease owner;
-this document is the durable handoff and does not transfer the lease. GitHub and
-Drive plugins are active. New's three six-hour collection cycles and eleven-object
+this document is the durable handoff and does not transfer the lease. Plugin
+management reports Drive enabled/installed and `codex mcp list` shows GitHub
+enabled, but this Codex session exposes no callable connector tool. New's three six-hour collection cycles and eleven-object
 publication are complete; Studio's second launchd scan and all 78 staged Studio
 objects are now collected/imported/metadata-verified. Runtime automatic
 launchd-to-Drive publication is still unproven, Mini's closed-log approval is
@@ -16,22 +17,21 @@ the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
-### Current successor snapshot — 2026-08-30T09:40:49Z
+### Current successor snapshot — 2026-08-30T11:05:59Z
 
 This section is the current truth and supersedes older dated readbacks below;
 those sections remain historical receipts. The active lease is still
 `codex:macbook` session `01a046f9-9427-7343-9221-4135b50bc30f` on `Mac.lan`,
 expiring `2026-08-30T16:49:17Z`; a Studio successor must read it and stand down
 until an owner-authored transfer. The last clean local tip before this snapshot
-was `fddd676724881b8df84c82085efb911f0e8e7a65`, published as fork commit
-`8a2977841af815d01ba80df9297b1861597c9671` (tree
-`ff8c665a8317a4dbe99897e1e23b33c62e9f4860`, parent
-`2669391e9f41683f6231a519deae4346c9fde6bb`, `force=false`); recursive readback
-matched all 34 local blobs. The content reconciliation commit was local
+was `754af13bbcf62b3c2a1d87c4801f1773ceed6002`; the latest fork branch ref
+seen by `git ls-remote` was `2f466bd9d6041b8494eb23377b737d9f49c867d8`.
+This session had no callable GitHub connector tool, so it did not push or
+perform a new recursive readback. The content reconciliation commit was local
 `92bc5fcf35212b96484b98e0a6dd54e28d83fb8f`, published as fork commit
 `e25458991eac2ccdd6ef7572e186857a7991679f`. The preceding ref-pinning commit
 was local `42457cc8eba6b8cda7a50f597d6670a28089e47d`, published as fork commit
-`5fc48e9f07a15cbdf482a212df75b83268a2b7a6`. The final docs ref is local
+`5fc48e9f07a15cbdf482a212df75b83268a2b7a6`. The previous final docs ref was local
 `14d4ea3ab3cb2071fc6001ce37b60821abd643c2`, published by the GitHub plugin as
 fork commit `819e385306cb3c56099662f27dd55d7ddee3b247` (tree
 `63a421df9576483967a557605a80692166eccd3f`, parent
@@ -40,9 +40,9 @@ matched all 34 local blobs. Upstream was untouched.
 
 | Machine | Current observed state | Honest classification |
 |---|---|---|
-| New MacBook | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is idle after `runs=4`, last exit 0, `StartInterval=21600`. Receipts `20260829T195959.324876Z-be2608f7` (`20:19:56.940667Z`), `20260830T022016.788683Z-c11f0266` (`02:39:32.956025Z`), and `20260830T083957.226400Z-280640fe` (`09:08:58.239553Z`) have gaps 6:19:36.015358 and 6:29:25.283528; all are zero-error `completed_with_absent_harnesses`. The latest has four new Codex objects, all four imported and exact-parent/MIME/size verified in Drive. | **DONE:** repeated six-hour launchd collection proof and eleven-object Drive-plugin publication. **IN-FLIGHT:** automatic runtime Drive publication; no launchd-callable plugin bridge exists. |
-| Mac Studio | Runtime `3c732d7`; launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is idle after `runs=2`, last exit 0, `StartInterval=21600`; the long process was launchd-owned (`PID 76865`, `PPID 1`) and ran from `00:02:18` until completion. Receipt `20260830T040218.778731Z-c65bac22` was collected at `07:38:20.693304Z`, generated a zero-error `completed_with_absent_harnesses` result, and reports `publication=blocked_drive_unavailable`: Claude 18/16 new objects/319 redactions, Codex 71/62/881, Hermes 0/0, OpenClaw absent. Exactly 78 finalized objects (16 Claude + 62 Codex) were imported through the Drive plugin; one bounded repair/review recovered the three initially absent Codex objects. | **DONE:** checkout, live-shaped preflight, launchd supervision, second scan, receipt, and 78-object plugin publication. **IN-FLIGHT:** runtime automatic Drive publication and the end-to-end “new chat appears in Drive” proof; the plugin is not a launchd executable. |
-| Mac Mini | SSH is reachable, runtime `3c732d7`; no archive label or process is loaded. Latest read-only census found approximately 7.29 GB free; active `CoreSimulator.log` is about 5.51 GB; closed `CoreSimulator.prev.log` is 15,403,577,516 bytes. | **NOT STARTED:** export, canary, schedule, or cleanup. Matt has not approved touching the closed log; no Mini log was changed. |
+| New MacBook | Runtime `3c732d7`; docs baseline `754af13`, reconciliation committed locally as `021a4e0`; launchd label `com.mattrotundo.ai-chat-archive.new-macbook` is idle after `runs=4`, last exit 0, `StartInterval=21600`. Receipts `20260829T195959.324876Z-be2608f7` (`20:19:56.940667Z`), `20260830T022016.788683Z-c11f0266` (`02:39:32.956025Z`), and `20260830T083957.226400Z-280640fe` (`09:08:58.239553Z`) have gaps 6:19:36.015358 and 6:29:25.283528; all are zero-error `completed_with_absent_harnesses`. The latest has four new Codex objects, all four imported and exact-parent/MIME/size verified in Drive. | **DONE:** repeated six-hour launchd collection proof and eleven-object Drive-plugin publication. **IN-FLIGHT:** automatic runtime Drive publication; no launchd-callable plugin bridge exists. |
+| Mac Studio | Runtime `3c732d7`; clean checkout HEAD `5cd62da` (runtime file hashes match the reviewed pin); launchd label `com.mattrotundo.ai-chat-archive.mac-studio` is idle after `runs=2`, last exit 0, `StartInterval=21600`; the long process was launchd-owned (`PID 76865`, `PPID 1`) and ran from `00:02:18` until completion. Receipt `20260830T040218.778731Z-c65bac22` was collected at `07:38:20.693304Z`, generated a zero-error `completed_with_absent_harnesses` result, and reports `publication=blocked_drive_unavailable`: Claude 18/16 new objects/319 redactions, Codex 71/62/881, Hermes 0/0, OpenClaw absent. Exactly 78 finalized objects (16 Claude + 62 Codex) were imported through the Drive plugin; one bounded repair/review recovered the three initially absent Codex objects. | **DONE:** checkout, live-shaped preflight, launchd supervision, second scan, receipt, and 78-object plugin publication. **IN-FLIGHT:** runtime automatic Drive publication and the end-to-end “new chat appears in Drive” proof; the plugin is not a launchd executable. |
+| Mac Mini | SSH is reachable, runtime `3c732d7`; no archive label or process is loaded. A read-only SSH census at approximately `2026-08-30T11:05Z` found `6,458,476 KiB` available on `/System/Volumes/Data` (~6.16 GiB, 97% full). Mini logs were not read or touched; the older log-size figures below are historical, not a current census. | **NOT STARTED:** export, canary, schedule, or cleanup. Matt has not approved touching the closed log; no Mini log was changed. |
 | Old MacBook | `ssh oldmac` remains unreachable. New's retry label is loaded at `StartInterval=21600`, `runs=3`, exit 0; logs report `offline_retryable`/`ssh_unreachable`. | **DONE:** non-blocking retry queue. **IN-FLIGHT:** queued retry. **NOT STARTED:** online inventory, deployment, or canary. |
 
 The authenticated Drive plugin test write succeeded before publication: body-free
@@ -66,6 +66,11 @@ No raw DB/index/state files were uploaded. The plugin is an agent capability,
 not a launchd executable; `codex mcp list` has no Google Drive server and no
 shell `mcp`, `gdrive`, or `rclone` bridge exists. Therefore the plugin
 publication does not by itself prove an automatic launchd-to-Drive event.
+At the 2026-08-30T11:05:59Z reconciliation, plugin management still reported
+Google Drive enabled/installed, but this Codex session had no callable Drive or
+GitHub connector tool. The bounded Drive test-write attempt returned
+`TypeError: tools.mcp__codex_apps__google_drive is not a function`; no shell
+push or substitute bridge was used. Hold only the additional publication step.
 
 **Done with receipts:** reviewed runtime `3c732d7`, 263/263 tests and bundle
 proof, lease/schema/launchd structures, reachable New and Studio supervised
@@ -565,7 +570,7 @@ and the body-free evidence receipt is
 | Historical docs/runtime readback | Local `bb8308ca1d27e5f6959a19300d71076844c3081c`; remote `3e377e92646675db1d70c47036a66dee16ad6ede` | Historical five-doc tree. The current tracked tree has six documentation files, including this handoff and `SCHEMA_FREEZE_CHECKPOINT_2026-08-29.md`. |
 | Content reconciliation docs | Local `92bc5fcf35212b96484b98e0a6dd54e28d83fb8f`; owned-fork plugin commit `e25458991eac2ccdd6ef7572e186857a7991679f`; tree `3286505a316937204804235f4374423998cddd3d`, parent `3232cab277c9b72904abc9955d2e8edde8bc5f37`, `force=false` | 2026-08-30 Studio receipt/Drive repair reconciliation content; recursive readback matched 34/34 blobs and upstream was untouched. |
 | Ref-pinning docs | Local `42457cc8eba6b8cda7a50f597d6670a28089e47d`; owned-fork plugin commit `5fc48e9f07a15cbdf482a212df75b83268a2b7a6`; tree `a259691e74a7ca2b08efd2e17ca38eca0b6d6f22`, parent `e25458991eac2ccdd6ef7572e186857a7991679f`, `force=false` | Pins the content reconciliation ref; recursive readback matched 34/34 blobs and upstream was untouched. |
-| Current final docs ref | Local `14d4ea3ab3cb2071fc6001ce37b60821abd643c2`; owned-fork plugin commit `819e385306cb3c56099662f27dd55d7ddee3b247`; tree `63a421df9576483967a557605a80692166eccd3f`, parent `419df3dbe390fe1a10e4b5171ae8661f9d7c52d2`, `force=false` | Metadata-only ref receipt for the final handoff/live-state/README/receipt tree; recursive readback matched 34/34 blobs and upstream was untouched. |
+| Previous final docs ref | Local `14d4ea3ab3cb2071fc6001ce37b60821abd643c2`; owned-fork plugin commit `819e385306cb3c56099662f27dd55d7ddee3b247`; tree `63a421df9576483967a557605a80692166eccd3f`, parent `419df3dbe390fe1a10e4b5171ae8661f9d7c52d2`, `force=false` | Metadata-only ref receipt for the prior handoff/live-state/README/receipt tree; recursive readback matched 34/34 blobs and upstream was untouched. The current local docs tip is recorded in the snapshot above. |
 | Superseded parent | `0e25987370aa32a93423201dc25d85d913d8c8ac` | Exact Hermes provider-metadata validation; retained in history, superseded by `3c732d7`. |
 
 The owned fork branch is now published and read back through the GitHub plugin at

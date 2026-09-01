@@ -6,14 +6,13 @@ and launchd-only documentation controls, New and Studio six-hour launchd jobs
 are loaded, and the Drive connector folder/receipt doc are verified. Mini
 cleanup and Old MacBook remain gated/offline.
 
-**Observed:** 2026-08-29T22:03:47Z, from the local MacBook plus SSH probes to
-Studio and Mini, launchd readback, GitHub connector readback, and Drive connector
-readback. New's second launchd scan had completed; Studio's first launchd scan
-had completed with exit 0 and a zero-error receipt whose publication was blocked
-by the absent Drive provider. The 22:03 readback opened no new release or review
-wave.
+**Original observed:** 2026-08-29T22:03:47Z, from the local MacBook plus SSH
+probes to Studio and Mini, launchd readback, GitHub connector readback, and Drive
+connector readback. That historical readback opened no new release or review
+wave. The current body-free reconciliation is recorded below at
+2026-08-30T11:05:59Z.
 
-## Current execution receipt — 2026-08-30T09:40:49Z
+## Current execution receipt — 2026-08-30T11:05:59Z
 
 This addendum is the current body-free readback; the 08:44 and 06:04 sections
 below are historical. The active Drive route is the authenticated Google Drive
@@ -22,7 +21,7 @@ database, or credential was opened or uploaded.
 
 | Check | Current body-free evidence |
 |---|---|
-| GitHub docs publication | The final docs ref is local `14d4ea3ab3cb2071fc6001ce37b60821abd643c2`, published through the Git-data workflow as owned-fork commit `819e385306cb3c56099662f27dd55d7ddee3b247`; tree `63a421df9576483967a557605a80692166eccd3f`, parent `419df3dbe390fe1a10e4b5171ae8661f9d7c52d2`, `force=false`. Recursive readback matched all 34 local blobs by path, mode, type, and SHA; upstream was untouched. The preceding docs ref was local `b17d096b580f8143cf85e2497d2ecff4fcff58a4`. |
+| GitHub docs publication | The latest fork branch ref seen by `git ls-remote` is `2f466bd9d6041b8494eb23377b737d9f49c867d8`; the docs baseline was `754af13bbcf62b3c2a1d87c4801f1773ceed6002`, reconciled locally as `021a4e0b1461e7bb542ea918c043e8cea9770fda`. This Codex session exposed no callable GitHub connector tool, so the new commit is not pushed/read back; the prior connector receipts remain the publication evidence. |
 | Studio launchd receipt | `/Users/calstudio/.local/share/ai-chat-archive/spool/hosts/mac-studio/receipts/20260830T040218.778731Z-c65bac22.json`; collected `2026-08-30T07:38:20.693304+00:00`; `completed_with_absent_harnesses`; errors `[]`; runtime publication `blocked_drive_unavailable`. The launchd label is now idle at `runs=2`, last exit 0, `StartInterval=21600`; the long process was PID `76865`, PPID 1, and was never foreground-owned. |
 | Studio collection | Claude: 18 conversations, 57 indexed, 16 new objects, 319 redactions, 0 quality failures. Codex: 71 conversations, 814 indexed, 62 new objects, 881 redactions, 0 quality failures. Hermes: 0 conversations, 187 indexed, 0 new objects. OpenClaw: absent on host. The finalized object set is exactly 78 files (16 Claude + 62 Codex), total 418,815,569 bytes. |
 | Studio Drive publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; prior New publication left 12 items, then all 78 Studio objects were imported once and moved to the exact target parent, producing 90 items. Every title is unique; every metadata readback is exact parent, `text/plain`, and matching size. |
@@ -31,6 +30,8 @@ database, or credential was opened or uploaded.
 | New Drive publication | The four latest New objects were imported exactly once. `d7ff7670b3c118c58c50cb874c85ae62dd11eae9958542419e470c905338340a.json` → `1FapTYnbeOcUOyQyip6CAKCeuYcPD28vU` (2,266,694 bytes); `6bd04a25dba53cd9e801bf06bf5d718f90d061755bbe667f8d915994bb3efecf.json` → `11deTLHv3gQmoAVBb8Kp3xh8P3PfAX3x2` (1,015,906 bytes); `61cec7fda8558ff196bb4b5fdc1f7364ba0fe847732ec30a90a5929774c57d95.json` → `11aFXzqIfRE518nH1WwP_EXJ2XQNHn-5n` (15,926,911 bytes); `8ab7289bcb3c323b536771793693e0f7193daaed60d365c37e27eb712e480181.json` → `1k0uTQ2L7ASy2vMFEjreR_LaJqKbTd9ch` (68,754,228 bytes). Each exact-title search returned one result with the target parent and `text/plain` MIME. |
 | Drive folder readback | `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV` now lists 94 items: 92 `text/plain` files plus two receipt Docs, totaling 634,718,155 listed bytes. The four latest objects add 87,963,739 bytes. |
 | Automatic-publication boundary | The receipt proves repeated launchd collection and separately verified plugin imports. `codex mcp list` has no Google Drive server; no shell `mcp`, `gdrive`, or `rclone` bridge exists; and Studio has no File Provider. Therefore an automatic launchd-to-Drive event and “new chat appears in Drive” remain unproven. |
+| Mini read-only gate | SSH at approximately `2026-08-30T11:05Z` found no archive label/process and `6,458,476 KiB` available on `/System/Volumes/Data` (~6.16 GiB, 97% full). Mini logs were not read or touched; cleanup, export, canary, and schedule remain paused pending Matt's one-word approval. |
+| Connector capability check | Plugin management reported Google Drive enabled/installed, but this Codex session exposed no callable Drive or GitHub connector tool. The bounded Drive test-write attempt returned `TypeError: tools.mcp__codex_apps__google_drive is not a function`; no new connector write or shell GitHub push was attempted. |
 
 The source and owner-only staging copies used for the New and Studio imports
 remain intact; both source spools remain host-local. Mini's closed-log approval

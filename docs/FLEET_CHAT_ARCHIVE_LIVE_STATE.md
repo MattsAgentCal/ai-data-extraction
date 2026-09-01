@@ -1,7 +1,7 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-08-30T09:40:49Z
-**State:** active deployment; New's launchd schedule has completed three successive zero-error collection receipts (`runs=2→3→4`, gaps 6:19:36.015358 and 6:29:25.283528) and the latest four newly staged redacted objects were published through the authenticated Drive plugin. Studio's second launchd-owned scan completed under PID 76865/PPID 1 and emitted zero-error receipt `20260830T040218.778731Z-c65bac22`; all 78 finalized Studio objects (16 Claude + 62 Codex) were imported and metadata-verified. The target folder now has 94 items (92 `text/plain` plus two receipt Docs; 634,718,155 listed bytes). Runtime automatic launchd-to-Drive publication remains unproven because `codex mcp list` has no Google Drive server, no shell `mcp`/`gdrive`/`rclone` bridge exists, and Studio has no File Provider. Mini remains paused pending Matt's closed-log approval and Old remains on its non-blocking retry queue. No new release or schema/review wave was opened.
+**Last reconciled:** 2026-08-30T11:05:59Z
+**State:** active deployment; New's launchd schedule has completed three successive zero-error collection receipts (`runs=2→3→4`, gaps 6:19:36.015358 and 6:29:25.283528) and the latest four newly staged redacted objects were published through the authenticated Drive plugin. Studio's second launchd-owned scan completed under PID 76865/PPID 1 and emitted zero-error receipt `20260830T040218.778731Z-c65bac22`; all 78 finalized Studio objects (16 Claude + 62 Codex) were imported and metadata-verified. The target folder now has 94 items (92 `text/plain` plus two receipt Docs; 634,718,155 listed bytes). Plugin management reports Google Drive enabled/installed, but this Codex session exposes no callable Google Drive or GitHub connector tool; the bounded Drive test-write attempt returned `TypeError: tools.mcp__codex_apps__google_drive is not a function`, so no new connector write or GitHub push was attempted in this turn. Runtime automatic launchd-to-Drive publication remains unproven because `codex mcp list` has no Google Drive server, no shell `mcp`/`gdrive`/`rclone` bridge exists, and Studio has no File Provider. Mini remains paused pending Matt's closed-log approval and Old remains on its non-blocking retry queue. No new release or schema/review wave was opened.
 
 This file is the repository's canonical rollout state. It records body-free
 counts, hashes, paths, and lifecycle observations only. Raw conversation
@@ -13,9 +13,9 @@ bodies, indexes, and other private archive data remain outside Git.
 |---|---|
 | Reviewed release | `3c732d7b1031949bd18db90ae4ac40f667f6cfa7` (`Rollback cleanly on terminal hangup`) |
 | Deployment branch | `matt/fleet-chat-archive-deployed` |
-| Repository checkout | MacBook docs checkout at `fddd676`; Studio runtime checkout at `3c732d7`; Mini clean at runtime `3c732d7` |
+| Repository checkout | New MacBook docs baseline was `754af13`; reconciliation commit is `021a4e0`; Studio checkout at `5cd62da` (runtime file hashes match reviewed `3c732d7`); Mini clean at runtime `3c732d7` |
 | Verification suite | `python3.14 -m unittest discover -s tests -p 'test*.py'` -> **263/263, OK** |
-| GitHub publication | The prior docs ref is local `fddd676724881b8df84c82085efb911f0e8e7a65`, published by the GitHub plugin as owned-fork commit `8a2977841af815d01ba80df9297b1861597c9671`, tree `ff8c665a8317a4dbe99897e1e23b33c62e9f4860`, parent `2669391e9f41683f6231a519deae4346c9fde6bb`, `force=false`; recursive readback matched all 34 local blobs. |
+| GitHub publication | The latest fork branch ref read back with `git ls-remote` is `2f466bd9d6041b8494eb23377b737d9f49c867d8`; the docs baseline before this reconciliation was `754af13bbcf62b3c2a1d87c4801f1773ceed6002`, now committed locally as `021a4e0b1461e7bb542ea918c043e8cea9770fda`. This session has no callable GitHub connector tool, so the new commit is not pushed/read back; prior connector receipts remain the publication evidence. |
 | Drive connector publication | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; New moved the folder 5→12, Studio moved it 12→90, and the latest New wave moved it 90→94. All 78 Studio and four latest New object titles are unique, exact-parent, `text/plain`, and size-verified; the repaired and latest Codex ID/size maps are in the dated receipt. |
 | Fresh bundle proof | `/tmp/ai-data-extraction-3c732d7.prSOXz/ai-data-extraction-3c732d7.bundle`; SHA-256 `4531929ef667087d755dbdffb78054d3a64ec471885e4def7292f34023dcb295` |
 
@@ -34,9 +34,9 @@ The deployed runtime pins are:
 
 | Host | Observed truth | Classification |
 |---|---|---|
-| New MacBook | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.new-macbook` is idle after `runs=4`, last exit 0, `StartInterval=21600`. Receipts `20260829T195959.324876Z-be2608f7`, `20260830T022016.788683Z-c11f0266`, and `20260830T083957.226400Z-280640fe` were collected at `20:19:56.940667Z`, `02:39:32.956025Z`, and `09:08:58.239553Z`, with gaps 6:19:36.015358 and 6:29:25.283528. The latest reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, Claude 1 conversation/0 new objects, Codex 4 conversations/4 new objects, Hermes none, OpenClaw absent. Four latest redacted objects were imported once through the Drive plugin and verified in the target folder. | **DONE:** checkout, preflight, persistent schedule, repeated six-hour elapsed collection proof, and eleven-object plugin publication. **IN-FLIGHT:** automatic runtime Drive publication (the local provider and a launchd-callable plugin bridge are absent; plugin publication is separately verified). |
-| Mac Studio | Runtime `3c732d7`; `com.mattrotundo.ai-chat-archive.mac-studio` is idle after `runs=2`, last exit 0, `StartInterval=21600`, and durable owner-only logs. The long process was launchd-owned (`PID 76865`, `PPID 1`) from `00:02:18` until completion. Receipt `20260830T040218.778731Z-c65bac22` collected at `2026-08-30T07:38:20.693304+00:00` reports `completed_with_absent_harnesses`, errors `[]`, and runtime `publication=blocked_drive_unavailable`; Claude 18/16 new objects/319 redactions, Codex 71/62/881, Hermes 0/0, OpenClaw absent. Exactly 78 finalized objects were imported through the Drive plugin, with one bounded three-file repair/re-review. | **DONE:** checkout, live-shaped preflight, persistent schedule, supervised scan, receipt, and 78-object plugin publication. **IN-FLIGHT:** runtime automatic Drive publication and the end-to-end “new chat appears in Drive” proof. |
-| Mac mini | Clean at runtime `3c732d7`; no archive label is loaded. The latest read-only census found approximately 7.29 GB free, active `CoreSimulator.log` about 5.51 GB, and closed `CoreSimulator.prev.log` 15,403,577,516 bytes. | **DONE:** read-only disk census. **NOT STARTED:** approved cleanup, canary, schedule; Matt's approval is still required and no log was touched. |
+| New MacBook | Runtime `3c732d7`; docs baseline `754af13`, reconciliation committed locally as `021a4e0`; `com.mattrotundo.ai-chat-archive.new-macbook` is idle after `runs=4`, last exit 0, `StartInterval=21600`. Receipts `20260829T195959.324876Z-be2608f7`, `20260830T022016.788683Z-c11f0266`, and `20260830T083957.226400Z-280640fe` were collected at `20:19:56.940667Z`, `02:39:32.956025Z`, and `09:08:58.239553Z`, with gaps 6:19:36.015358 and 6:29:25.283528. The latest reports `completed_with_absent_harnesses`, zero errors, `blocked_no_drive_root`, Claude 1 conversation/0 new objects, Codex 4 conversations/4 new objects, Hermes none, OpenClaw absent. Four latest redacted objects were imported once through the Drive plugin and verified in the target folder. | **DONE:** checkout, preflight, persistent schedule, repeated six-hour elapsed collection proof, and eleven-object plugin publication. **IN-FLIGHT:** automatic runtime Drive publication (the local provider and a launchd-callable plugin bridge are absent; plugin publication is separately verified). |
+| Mac Studio | Runtime `3c732d7`; clean checkout HEAD `5cd62da` (runtime file hashes match the reviewed pin); `com.mattrotundo.ai-chat-archive.mac-studio` is idle after `runs=2`, last exit 0, `StartInterval=21600`, and durable owner-only logs. The long process was launchd-owned (`PID 76865`, `PPID 1`) from `00:02:18` until completion. Receipt `20260830T040218.778731Z-c65bac22` collected at `2026-08-30T07:38:20.693304+00:00` reports `completed_with_absent_harnesses`, errors `[]`, and runtime `publication=blocked_drive_unavailable`; Claude 18/16 new objects/319 redactions, Codex 71/62/881, Hermes 0/0, OpenClaw absent. Exactly 78 finalized objects were imported through the Drive plugin, with one bounded three-file repair/re-review. | **DONE:** checkout, live-shaped preflight, persistent schedule, supervised scan, receipt, and 78-object plugin publication. **IN-FLIGHT:** runtime automatic Drive publication and the end-to-end “new chat appears in Drive” proof. |
+| Mac mini | Clean at runtime `3c732d7`; no archive label is loaded. A read-only SSH census at approximately `2026-08-30T11:05Z` found `6,458,476 KiB` available on `/System/Volumes/Data` (~6.16 GiB, 97% full). Mini logs were not read or touched; the older log-size figures in historical sections are not a current census. | **DONE:** read-only disk census. **NOT STARTED:** approved cleanup, canary, schedule; Matt's approval is still required and no log was touched. |
 | Old MacBook | `ssh oldmac` remains unreachable. New's retry label `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is enabled/loaded under launchd with `RunAtLoad=true`, `StartInterval=21600`, `runs=3`, and exit 0 after `offline_retryable`/`ssh_unreachable`. | **DONE:** retry behavior proof and active launchd queue. **IN-FLIGHT:** non-blocking offline retry. **NOT STARTED:** online deployment/canary. |
 
 ## DONE
@@ -48,8 +48,10 @@ The deployed runtime pins are:
 - The release passed 263/263 tests, compile/diff checks, focused SIGHUP and
   rollback checks, and a fresh bundle-clone verification before deployment.
 - The runtime release is deployed to the reachable New MacBook, Mac Studio, and
-  Mac mini. The docs/addendum commit is published to the owned GitHub fork and
-  pulled to Studio; the Studio and New worktrees are clean at that docs commit.
+  Mac mini. New's docs baseline `754af13` plus the local reconciliation commit
+  `021a4e0` is clean; Studio's checkout is clean at `5cd62da` while its deployed
+  runtime file hashes match `3c732d7`.
+  The latest docs were not pulled to Studio during this readback.
 - Current body-free, zero-error supervised receipts were produced on New and
   Studio. New's three receipts are separated by 6:19:36.015358 and
   6:29:25.283528 with launchd `runs=2→3→4`, proving repeated elapsed six-hour
@@ -81,6 +83,11 @@ The deployed runtime pins are:
   with zero parse failures; the latest four newly emitted objects were published
   through the Drive plugin. This is verified plugin publication of staged
   output, not proof that a local launchd process can invoke a plugin.
+- Plugin management currently reports Google Drive enabled/installed, but this
+  Codex session has no callable Drive or GitHub connector tool. The attempted
+  body-free Drive test call returned
+  `TypeError: tools.mcp__codex_apps__google_drive is not a function`; the prior
+  Drive/GitHub receipts remain the durable publication evidence.
 
 ## IN-FLIGHT
 
@@ -91,7 +98,9 @@ The deployed runtime pins are:
   publication are **DONE**.
 - Runtime automatic Drive publication and the success criterion “Matt watches a
   new chat appear in Drive” remain **IN-FLIGHT**: no local File Provider is
-  present and a plugin call is not a launchd capability.
+  present and a plugin call is not a launchd capability. This reconciliation's
+  GitHub push and any additional Drive write are held solely until the callable
+  connector tools appear; no shell push or substitute bridge was used.
 
 ## NOT STARTED
 
