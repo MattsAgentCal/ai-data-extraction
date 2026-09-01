@@ -140,7 +140,7 @@ validator, and one batched review wave; and findings are repaired once and
 re-reviewed once. The Drive Desktop DMG route is superseded by the activated
 plugin route. No raw bodies, indexes, databases, or credentials were opened.
 
-## Current reconciliation — 2026-09-01T04:21Z
+## Historical reconciliation — 2026-09-01T04:21Z
 
 This body-free readback supersedes the 2026-08-30 snapshot below. It records
 the active deployment lease, launchd ownership, connector publication state,

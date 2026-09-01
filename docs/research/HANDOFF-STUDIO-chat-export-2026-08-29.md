@@ -575,7 +575,14 @@ These structures are binding even when a chat message is unavailable. A loaded
 plist without a supervised process readback, a lease that names another owner,
 or a missing/future schema checkpoint is a hard stop.
 
-## 3. Honest state during active deployment
+## Historical record — pre-2026-09-01 repair
+
+Everything below this marker preserves earlier detailed receipts and path
+translations. The current 08:45Z goal, DONE / IN-FLIGHT / NOT STARTED split,
+lease, gates, file map, and successor actions are the sections above; when an
+older number conflicts with them, use the current snapshot above.
+
+### Historical honest state during active deployment
 
 The current live reconciliation is 2026-08-30T09:40:49Z. The canonical
 repository state is [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](../FLEET_CHAT_ARCHIVE_LIVE_STATE.md)
