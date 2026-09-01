@@ -33,6 +33,16 @@ The binding structure is unchanged: launchd-only long canaries, one deployment
 lease owner, one schema census/validator/review wave, and batched one-repair/
 one-re-review. The Desktop DMG path is superseded by the authenticated plugin.
 
+## Mini-only non-destructive refresh — 2026-09-01T09:16:53Z
+
+This readback touched no log data. On `Cals-Mac-mini.local`, both the requested
+source `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.prev.log`
+and its `.gz` sibling were absent. The guarded operation therefore did not run:
+no gzip output was created, `gzip -t` and spot-decompress were not applicable,
+and the original was not deleted. Two surrounding `df` samples both reported
+`30,620,397,568` free bytes (`29,902,732 KiB`), so the exact operation delta,
+deletion delta, and net freed space are each `0` bytes.
+
 ## Historical execution receipt — 2026-09-01T04:21Z
 
 This is the latest body-free runtime snapshot; the dated sections below are

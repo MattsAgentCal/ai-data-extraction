@@ -14,6 +14,13 @@ offline on its retry queue. The end-to-end new-chat-to-Drive proof is still in
 flight. The non-destructive Mini gzip step therefore did not run: source and
 archive are both absent, and no bytes were written or deleted.
 
+Fresh Mini-only readback at `2026-09-01T09:16:53Z` remains the current disk
+evidence: both requested paths are absent, and the guarded no-op measured
+`30,620,397,568` free bytes (`29,902,732 KiB`) both before and after. No gzip,
+`gzip -t`, spot-decompress, or deletion ran; exact operation delta and net
+freed space are `0` bytes. This does not authorize deletion or change the
+single outstanding Mini gate.
+
 This is the complete context for a successor that has the repository but none of
 the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a

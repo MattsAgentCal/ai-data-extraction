@@ -27,6 +27,14 @@ Controls remain structural: long canaries are launchd-only; the repo lease names
 one release owner; schema freeze is one live census, one canonical validator,
 and one batched review wave; and findings get one repair and one re-review.
 
+### Mini-only refresh — 2026-09-01T09:16:53Z
+
+The latest read-only Mini check again found no
+`/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.prev.log` or `.gz`
+file. No gzip, archive test, spot-decompress, or deletion ran. The two `df`
+samples were exactly `30,620,397,568` bytes free (`29,902,732 KiB`) before and
+after the guarded no-op; operation delta and net freed space are `0` bytes.
+
 ## Historical reconciliation — 2026-09-01T04:21Z
 
 | Check | Body-free evidence |
