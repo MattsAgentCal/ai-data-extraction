@@ -4,18 +4,157 @@
 **Origin:** MacBook documentation turn
 **Destination:** successor agent operating on the Mac Studio
 **Current mode:** the deployment goal is resumed by the named lease owner;
-this document is the durable handoff and does not transfer the lease. Plugin
-management reports Drive enabled/installed and `codex mcp list` shows GitHub
-enabled, but this Codex session exposes no callable connector tool. New's three six-hour collection cycles and eleven-object
-publication are complete; Studio's second launchd scan and all 78 staged Studio
-objects are now collected/imported/metadata-verified. Runtime automatic
-launchd-to-Drive publication is still unproven, Mini's closed-log approval is
-still open, and Old MacBook remains offline.
+this document is the durable handoff and does not transfer the lease. Matt's
+GitHub and Google Docs/Drive plugins are active; the superseded Desktop-DMG
+install gate must not be re-opened. New's current launchd run is still draining
+the Studio shard, Studio is deliberately booted out to prevent reciprocal lock,
+the Mini source check found no `CoreSimulator.prev.log*`, and Old remains
+offline on its retry queue. The end-to-end new-chat-to-Drive proof is still in
+flight.
 
 This is the complete context for a successor that has the repository but none of
 the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
+
+## Current reconciliation — 2026-09-01T04:21Z (supersedes older snapshots)
+
+### 1. Goal and current intent
+
+Matt's goal is to run `https://github.com/0xSero/ai-data-extraction` on every
+machine (new MacBook, old MacBook, Mac mini, Mac Studio) and every approved
+harness (Claude Code, Codex, OpenClaw, Hermes), place redacted exports in the
+private Google Drive `AI Chat Archive` folder, and make new chats appear there
+automatically. The current intent is deploy-first: finish the reachable-host
+pipeline and prove the automatic six-hour path; keep Old retryable and keep
+Mini deletion gated. The Google Drive Desktop route is superseded by Matt's
+activated Codex plugin route.
+
+### 2. Honest state (with receipts)
+
+**DONE**
+
+- The audited adapters, content-addressed objects, redaction, provenance,
+  trusted remote stream, lease, schema-freeze checkpoint, and launchd-owned
+  collectors are in the deployed tree. Local commit is
+  `e167feb0f5997458c2411195a4380b7d316ce72b`; fork ref is
+  `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`; both have tree
+  `8914a6e275cf898d84a3ec4ff7f26c6bce149b13`.
+- The full suite previously passed 270 tests (`python3 -m unittest discover
+  -s tests -q`). No new product code was opened in this reconciliation.
+- The Drive plugin target folder is `AI Chat Archive`, ID
+  `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; probe object
+  `19kCcCqMlXNNowcXoXsZe9swvPUC95wNF` remains as the small connector test
+  write. Publisher receipt `20260901T025751.237727Z-74cdf5d2.json` recorded
+  8 uploads and 14 metadata-verified skips.
+- Old's launchd retry queue is loaded at `StartInterval=21600` and reports
+  retryable SSH-offline receipts.
+
+**IN-FLIGHT**
+
+- New's `com.mattrotundo.ai-chat-archive.new-macbook` is launchd-owned,
+  PID `30001`, PPID `1`, `runs=9`, `StartInterval=21600`, and active. It is
+  validating the Studio incoming shard (1,160 files / 2,166,120 KiB); do not
+  kill it or run a foreground replacement. Wait for its next receipt and lock
+  release.
+- After that receipt, fast-forward Studio from `9251ff6` to fetched ref
+  `a3a8ad5`, reinstall `com.mattrotundo.ai-chat-archive.mac-studio` from the
+  corrected pull-only config, and read back PID/PPID, `runs`, exit code, and
+  interval. Studio's stop receipt is
+  `20260901T024039.360623Z-bc4432a1.json` (`RunFailure`, publication not
+  attempted); the last-good manifest is retained.
+- Complete one fresh launchd-owned Codex canary, kick only the supervisors,
+  publish its staged object via the Drive plugin worker, and read back exact
+  Drive parent/MIME/size. This is the remaining success proof; publisher
+  `connector_error` failures must be retried only in the bounded scheduled
+  batch, not via a second review wave.
+
+**NOT STARTED / GATED**
+
+- Mini export, canary, and schedule are not started. A filename-only search of
+  `/Users/calrotundo` found no `CoreSimulator.prev.log*`; no gzip ran and no
+  file was deleted. At the check, available space was 30,289,448 KiB
+  (31,016,394,752 bytes): source 0, compressed 0, deletion 0, freed 0.
+  `gzip -t` and spot-decompress are impossible until the source exists. The
+  sole deletion gate remains untouched; never touch the active Mini log.
+- Old online deployment/canary is not started while SSH is unreachable.
+- OpenClaw collection is not proven on New or Studio because it is absent on
+  those hosts; Hermes reports no conversations on Studio. Do not inflate
+  absent-harness counts into collection success.
+
+### 3. Exact file / commit / host map
+
+| Item | New MacBook path / commit | Studio translation / state |
+|---|---|---|
+| Repo | `/Users/mattrotundo/Projects/ai-data-extraction`, `e167feb0…`, tree `8914a6e…` | `/Users/calstudio/Projects/ai-data-extraction`, currently `9251ff6…`; fetched `a3a8ad5…` is the exact tree to fast-forward |
+| Collector spool | `/Users/mattrotundo/.local/share/ai-chat-archive/spool` | `/Users/calstudio/.local/share/ai-chat-archive/spool` |
+| New collector plist | `/Users/mattrotundo/Library/LaunchAgents/com.mattrotundo.ai-chat-archive.new-macbook.plist` | N/A |
+| Studio collector plist | N/A | `/Users/calstudio/Library/LaunchAgents/com.mattrotundo.ai-chat-archive.mac-studio.plist` (currently booted out) |
+| Drive publisher | `/Users/mattrotundo/Library/LaunchAgents/com.mattrotundo.ai-chat-archive.drive-publisher.plist`; config `configs/new-macbook-drive-publisher.json` | Drive plugin account is used through the worker; no Desktop File Provider is required |
+| Lease | Repo-root `.deployment-lease.json`, owner `codex:macbook`, host `Mac.lan`, active through `2026-09-02T02:26:04Z` | A Studio successor must read and stand down unless the owner commits a transfer |
+| Current Studio receipt | N/A | `20260901T024039.360623Z-bc4432a1.json` (honest failed stop); last-good manifest has 1,155 objects |
+
+These MacBook paths are host-local and do not imply that private spool data is
+in Git. Only code, configs, receipts' body-free facts, and this handoff are
+tracked.
+
+### 4. Matt gates — surface first, once, batched
+
+The two original gates were surfaced first: (1) Google Drive install/login on
+Studio, and (2) Mini closed-log compression/deletion approval. Gate (1) is now
+superseded by Matt's activated GitHub and Google Docs/Drive plugins; verify the
+plugin with the existing small probe and publish through it, without asking for
+the Desktop DMG. Gate (2) remains open only for deletion of a closed log; the
+non-destructive gzip attempt found no source and touched nothing. Do not
+re-ask either gate. If Matt sends a one-word Mini approval later, handle only
+the explicitly approved deletion after a fresh source/path check.
+
+### 5. Binding execution structure
+
+These are controls, not advice:
+
+1. Every long canary node runs under a persistent `launchd` job; never a
+   foreground terminal or transient controlling session. The two historical
+   canaries died with their controlling sessions, so a successor must not
+   repeat that shape.
+2. `.deployment-lease.json` names the single release owner. Every other session
+   reads it and stands down; the owner holds the deployment lease for GitHub,
+   Drive publication, canaries, and Mini coordination. Transfer requires an
+   owner-authored commit.
+3. Before any broad release, perform exactly one live-schema census and use
+   exactly one canonical validator, then run ONE batched review wave. Batch all
+   findings, make one repair, and do one re-review. The prior run's 17 review
+   waves in 21 hours is a process failure, not a template for the successor.
+4. Surface Matt gates first, once, batched, and pre-stage any action to two
+   clicks. Do not hide a gate until the end of the run.
+
+### 6. First three successor actions
+
+1. Read `.deployment-lease.json`, record the owner/expiry, and re-surface the
+   already-batched Mini deletion gate once while explicitly noting that the
+   Drive Desktop gate is superseded. Do not mutate the Mini.
+2. Wait for the New launchd receipt, then fast-forward Studio to `a3a8ad5…`,
+   reinstall its launchd collector from `configs/mac-studio.json`, and verify
+   the loaded job. Do not run a foreground collector or open another review
+   wave.
+3. Create one fresh non-ephemeral Codex canary, kick New's launchd collector,
+   wait for its body-free receipt/index row, kick the launchd Drive publisher,
+   and read back the canary's exact Drive metadata. Record only session ID,
+   object digest, receipt path, launchd PID/PPID, interval, Drive ID, MIME,
+   parent, and size.
+
+### 7. Automatic six-hour proof on the shipped build
+
+The proof is a new approved chat appearing in Drive after the supervised path,
+not a test count. Require: the New collector `RunAtLoad=true` and
+`StartInterval=21600`; a launchd-owned run with a new body-free receipt and
+index row; the launchd publisher receipt naming the same object and Drive ID;
+and a plugin metadata readback with exact parent, `text/plain` MIME, and byte
+size. Record the pre/post receipt counts, launchd `runs`, PID/PPID, and UTC
+timestamps. A manual plugin upload is not automatic proof. The current
+publisher's first scheduled receipt is the baseline; the fresh canary and
+metadata readback are still required. If any shard is absent/offline, record
+that status and continue reachable hosts without changing the lease or gates.
 
 ### Current successor snapshot — 2026-08-30T11:05:59Z
 

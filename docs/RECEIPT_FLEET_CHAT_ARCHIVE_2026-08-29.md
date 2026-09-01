@@ -1,16 +1,36 @@
 # Fleet chat archive documentation receipt — 2026-08-29
 
-**Receipt scope:** body-free deployment and publication evidence. The reviewed
-runtime remains `3c732d7`; the current branch contains the lease, schema-freeze,
-and launchd-only documentation controls, New and Studio six-hour launchd jobs
-are loaded, and the Drive connector folder/receipt doc are verified. Mini
-cleanup and Old MacBook remain gated/offline.
+**Receipt scope:** body-free deployment and publication evidence. The current
+tree is `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local `e167feb`, fork
+`a3a8ad5`), with launchd-only canary, deployment-lease, and schema-freeze
+controls. The Drive plugin route is active; Mini's non-destructive source check
+found no `CoreSimulator.prev.log*`, so no gzip or deletion occurred. Old remains
+on a non-blocking retry queue.
 
 **Original observed:** 2026-08-29T22:03:47Z, from the local MacBook plus SSH
 probes to Studio and Mini, launchd readback, GitHub connector readback, and Drive
 connector readback. That historical readback opened no new release or review
 wave. The current body-free reconciliation is recorded below at
-2026-08-30T11:05:59Z.
+2026-09-01T04:21Z.
+
+## Current execution receipt — 2026-09-01T04:21Z
+
+This is the latest body-free runtime snapshot; the dated sections below are
+historical receipts. The active lease remains with `codex:macbook` on `Mac.lan`.
+
+| Check | Current observed evidence |
+|---|---|
+| Code / GitHub | Local `e167feb0f5997458c2411195a4380b7d316ce72b`; fork `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`; identical tree `8914a6e275cf898d84a3ec4ff7f26c6bce149b13`. |
+| New collector | `com.mattrotundo.ai-chat-archive.new-macbook` is launchd-owned (PID 30001, PPID 1, `runs=9`, `StartInterval=21600`) and still validating a 1,160-file / 2,166,120-KiB Studio incoming shard. No new receipt exists yet. |
+| Studio collector | Booted out to break the reciprocal lock. Stop receipt `20260901T024039.360623Z-bc4432a1.json` is `failed`/`RunFailure`, publication `not_attempted`; last-good manifest is retained. Reinstall waits for New's transfer receipt. |
+| Drive publisher | Target `AI Chat Archive` folder ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; launchd receipt `20260901T025751.237727Z-74cdf5d2.json` recorded 8 uploads, 14 verified skips, and 2 `connector_error` failures. Automatic new-chat proof is still in flight. |
+| Mini disk operation | Filename-only search under `/Users/calrotundo` found no `CoreSimulator.prev.log*`; no gzip process ran. Available space was 30,289,448 KiB / 31,016,394,752 bytes. Source 0, compressed 0, deleted 0, freed 0 bytes; `gzip -t`/spot-decompress were impossible because the source is absent. |
+| Old MacBook | SSH unreachable; retry launchd queue remains loaded at `StartInterval=21600`. |
+
+No raw conversation body, database, index, or credential was opened or put in
+this receipt. Every long canary remains launchd-only, every other session must
+stand down from the deployment lease, and no broad release/review wave was
+opened.
 
 ## Current execution receipt — 2026-08-30T11:05:59Z
 

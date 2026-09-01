@@ -1,11 +1,27 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-08-30T11:05:59Z
-**State:** active deployment; New's launchd schedule has completed three successive zero-error collection receipts (`runs=2→3→4`, gaps 6:19:36.015358 and 6:29:25.283528) and the latest four newly staged redacted objects were published through the authenticated Drive plugin. Studio's second launchd-owned scan completed under PID 76865/PPID 1 and emitted zero-error receipt `20260830T040218.778731Z-c65bac22`; all 78 finalized Studio objects (16 Claude + 62 Codex) were imported and metadata-verified. The target folder now has 94 items (92 `text/plain` plus two receipt Docs; 634,718,155 listed bytes). Plugin management reports Google Drive enabled/installed, but this Codex session exposes no callable Google Drive or GitHub connector tool; the bounded Drive test-write attempt returned `TypeError: tools.mcp__codex_apps__google_drive is not a function`, so no new connector write or GitHub push was attempted in this turn. Runtime automatic launchd-to-Drive publication remains unproven because `codex mcp list` has no Google Drive server, no shell `mcp`/`gdrive`/`rclone` bridge exists, and Studio has no File Provider. Mini remains paused pending Matt's closed-log approval and Old remains on its non-blocking retry queue. No new release or schema/review wave was opened.
+**Last reconciled:** 2026-09-01T04:21Z
+**State:** active deployment; the deployed code tree is `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local `e167feb0f5997458c2411195a4380b7d316ce72b`, fork `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`). New's launchd collector is active under PID 30001/PPID 1 (`runs=9`, `StartInterval=21600`) while it validates a 1,160-file, 2,166,120-KiB Studio staging shard. Studio is booted out to prevent reciprocal lock and will be fast-forwarded/reinstalled after New emits its receipt. The authenticated Drive plugin publisher has a launchd receipt with 8 uploads, 14 verified skips, and 2 connector failures; the end-to-end new-chat-to-Drive canary remains in flight. The Mini filename-only check found no `CoreSimulator.prev.log*` anywhere under `/Users/calrotundo`, so no gzip output or deletion was possible (source 0 bytes, archive 0 bytes, freed 0); Old remains on its loaded offline retry queue. No new broad release or review wave was opened.
 
 This file is the repository's canonical rollout state. It records body-free
 counts, hashes, paths, and lifecycle observations only. Raw conversation
 bodies, indexes, and other private archive data remain outside Git.
+
+## Current reconciliation — 2026-09-01T04:21Z
+
+| Check | Body-free evidence |
+|---|---|
+| Release identity | Local commit `e167feb0f5997458c2411195a4380b7d316ce72b`; fork ref `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`; both resolve to tree `8914a6e275cf898d84a3ec4ff7f26c6bce149b13`. Active lease remains `codex:macbook` on `Mac.lan`; no transfer occurred. |
+| New MacBook | Launchd label active as PID 30001/PPID 1, `runs=9`, `StartInterval=21600`. Current Studio incoming shard is 1,160 files / 2,166,120 KiB; receipt not yet emitted. |
+| Mac Studio | Launchd collector is intentionally absent after bootout; latest stop receipt is `20260901T024039.360623Z-bc4432a1.json` (`RunFailure`, publication not attempted). Checkout is clean at `9251ff6`; fetched corrected ref is `a3a8ad5e…`; reinstall follows New completion. |
+| Drive plugin | Folder `AI Chat Archive` ID `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`. Publisher receipt `20260901T025751.237727Z-74cdf5d2.json`: 8 uploaded, 14 skipped after metadata verification, 2 `connector_error`; no bodies were sent in the prompt. |
+| Mac Mini | No `CoreSimulator.prev.log*` exists under `/Users/calrotundo`; no gzip ran. Available space was 30,289,448 KiB (31,016,394,752 bytes). Source/archive/deletion/freed bytes are all 0. The sole deletion gate remains untouched. |
+| Old MacBook | SSH unreachable; launchd retry queue remains loaded at 21,600 seconds with retryable offline receipts. |
+
+The controls are enforced as structure: long canaries are launchd-only; the
+repo-root deployment lease names the sole release owner; schema freeze requires
+one live census, one canonical validator, and one review wave before broad
+release; and review findings are batched into one repair and one re-review.
 
 ## Release identity
 

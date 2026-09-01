@@ -4,6 +4,16 @@ This checkpoint authorizes the first release that adds the launchd-owned Drive
 plugin publisher. It is a release gate: one live-schema census, one canonical
 validator, and one review wave. A later broad release needs a new checkpoint.
 
+## Current reconciliation — 2026-09-01T04:21Z
+
+The frozen code tree is `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local
+`e167feb0f5997458c2411195a4380b7d316ce72b`, fork `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`). The 270-test suite remains the last
+observed green verification. No second census, validator, or review wave was
+opened for the docs/runtime reconciliation. The Mini filename-only check found
+no closed log to compress and changed nothing; the New collector remains under
+launchd while validating the Studio shard. This checkpoint still governs any
+broad release: one census, one canonical validator, one batched review wave.
+
 ## Checkpoint record
 
 | Field | Value |

@@ -117,7 +117,28 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Current host state as of 2026-08-30T11:05:59Z
+## Current reconciliation — 2026-09-01T04:21Z
+
+This body-free readback supersedes the 2026-08-30 snapshot below. It records
+the active deployment lease, launchd ownership, connector publication state,
+and the Mini non-destructive disk check. No transcript body, database, index,
+or credential was opened or copied into Git.
+
+| Host / route | Observed state | Honest classification |
+|---|---|---|
+| New MacBook | Local checkout `e167feb0f5997458c2411195a4380b7d316ce72b`; fork ref `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`; both tree `8914a6e275cf898d84a3ec4ff7f26c6bce149b13`. `com.mattrotundo.ai-chat-archive.new-macbook` is launchd-owned (`PID 30001`, `PPID 1`, `runs=9`, `StartInterval=21600`, active) and is validating the pulled Studio shard. Its incoming staging currently contains 1,160 files and 2,166,120 KiB; the next receipt is not yet written. | **IN-FLIGHT:** current supervised transfer/validation; do not kill or foreground it. |
+| Mac Studio | Clean checkout remains `9251ff6de160c8a1c4c4647a61ea9ec7c512f6dd`; fetched remote-tracking ref is `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`. The collector was booted out to release the reciprocal lock; the honest stop receipt is `20260901T024039.360623Z-bc4432a1.json` (`RunFailure`, publication not attempted). The last-good manifest remains 1,155 objects; reinstall waits until New finishes draining the shard. | **IN-FLIGHT:** fast-forward/reinstall the corrected pull-only config after New's receipt; never restart a competing long scan. |
+| Mac Mini | A filename-only search of `/Users/calrotundo` found no `CoreSimulator.prev.log*`; no `gzip` process is present. Available space at the check was 30,289,448 KiB (31,016,394,752 bytes). No gzip output was created and no file was deleted: source bytes 0, archive bytes 0, deletion 0, freed 0. | **DONE:** non-destructive check. **GATED / NOT STARTED:** export, cleanup, canary, and schedule; do not touch the Mini again until the source/gate is clarified. |
+| Old MacBook | SSH remains unreachable; `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` remains a loaded `StartInterval=21600` retry queue with body-free offline receipts. | **IN-FLIGHT:** non-blocking retry; online deployment/canary is not started. |
+| Drive plugin publisher | Target folder is `AI Chat Archive` (`1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`). Launchd publisher receipt `20260901T025751.237727Z-74cdf5d2.json` recorded 8 uploads, 14 verified skips, and 2 `connector_error` failures. | **IN-FLIGHT:** rerun only after the collector receipt and lock release; automatic new-chat proof is not yet complete. |
+
+The binding controls remain structural: every long canary runs under launchd,
+never a foreground session; `.deployment-lease.json` names the single release
+owner and other sessions stand down; a schema-freeze checkpoint precedes any
+broad release (one live-schema census, one canonical validator, one review
+wave); and any review wave batches findings into one repair and one re-review.
+
+## Historical host state as of 2026-08-30T11:05:59Z
 
 | Host | Verified rollout truth | Scheduler / blocker |
 |---|---|---|
