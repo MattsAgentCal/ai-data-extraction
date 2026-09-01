@@ -1,19 +1,43 @@
 # Fleet chat archive documentation receipt — 2026-08-29
 
-**Receipt scope:** body-free deployment and publication evidence. The current
-tree is `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local `e167feb`, fork
-`a3a8ad5`), with launchd-only canary, deployment-lease, and schema-freeze
-controls. The Drive plugin route is active; Mini's non-destructive source check
-found no `CoreSimulator.prev.log*`, so no gzip or deletion occurred. Old remains
-on a non-blocking retry queue.
+**Receipt scope:** body-free deployment and publication evidence. The shipped
+tree is `5e33dd15aeb26ecbe059ac6cf83338442a21c493` (local `88d65a7`, fork
+`68c02d1`), with launchd-only canary, deployment-lease, and schema-freeze
+controls. The authenticated Drive plugin route completed one supervised
+24-object publication batch with zero errors. Mini's non-destructive source
+check found no `CoreSimulator.prev.log*`, so no gzip or deletion occurred. Old
+remains on a non-blocking retry queue; Studio's fresh canary is disk-gated by
+pre-existing quarantine data and was stopped safely at `SIGTERM`.
 
 **Original observed:** 2026-08-29T22:03:47Z, from the local MacBook plus SSH
 probes to Studio and Mini, launchd readback, GitHub connector readback, and Drive
 connector readback. That historical readback opened no new release or review
 wave. The current body-free reconciliation is recorded below at
-2026-09-01T04:21Z.
+2026-09-01T11:14Z.
 
-## Current execution receipt — 2026-09-01T08:45Z
+## Current execution receipt — 2026-09-01T11:14Z
+
+This body-free snapshot records the shipped code readback, New terminal
+receipt, one launchd-supervised Drive publication run, the Studio disk-pressure
+stop, and the Mini no-op. Raw chat bodies, indexes, databases, quarantine
+contents, and credentials were not opened.
+
+| Check | Current observed evidence |
+|---|---|
+| Code / GitHub | Local commit `88d65a7677dbdb483b36a85ff59b907231727502` / tree `5e33dd15aeb26ecbe059ac6cf83338442a21c493`; GitHub-plugin commit `68c02d1953b428b2ecf6443e26a56560bb81f436`, parent `aab362bf718bc4f15aeabae8f4d36ab1caf30f63`, `force=false`, same tree. |
+| Verification | Focused publisher tests `9/9`, full unittest suite `272`, and `git diff --check` passed after the single lock-wait repair. |
+| New collector | `com.mattrotundo.ai-chat-archive.new-macbook` is idle after `runs=11`, exit `0`, `StartInterval=21600`. Receipt `20260901T064318.917191Z-a3e5881a` collected at `2026-09-01T10:22:36.435118Z` is `completed_with_absent_harnesses`, errors `[]`; Claude 31/1 new, Codex 1,224/17 new, Hermes 4/2 new, OpenClaw absent/inventory-only, present-harness quality complete. |
+| Studio collector | Studio fast-forwarded cleanly to `68c02d1…` / tree `5e33dd15…`. Its launchd-owned PID `54195`/PPID `1` was stopped with launchd `SIGTERM` after free space fell below 2 GiB. Receipt `20260901T104451.299032Z-40cc7d40` is `failed`/`RunFailure`, launchd exit `143`; staging and lock are clean. Existing quarantine is `74,892,111,872` bytes (`73,136,828 KiB`) across `22,501` files; it was not deleted or compressed. |
+| Drive publisher | Launchd `com.mattrotundo.ai-chat-archive.drive-publisher` completed `runs=3`, exit `0`, `StartInterval=21600`. Receipt `20260901T103707.805024Z-c2f89e5e.json` reports 24 candidates, 24 uploaded, 0 skipped, 0 failed, and `errors=[]` to folder `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`. Connector metadata readback for file `10C4tI7CAeFTn_rYSFICo_9lpdOQ86a0U` verified exact name, MIME `text/plain`, size `3475`, and parent `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`. |
+| Mini disk operation | On `Cals-Mac-mini.local`, the requested source and `.gz` sibling are absent. Free space was `30,606,172,160` bytes before and after; source/archive/deletion/net-freed bytes are `0`. No gzip, `gzip -t`, spot-decompress, or deletion ran. |
+| Old MacBook | `ssh oldmac` still times out. The loaded retry label is at `runs=9`, exit `0`, `StartInterval=21600`, with `offline_retryable`/`ssh_unreachable` receipts. |
+
+The Drive batch proves launchd-supervised publication of staged redacted
+objects, not yet the success criterion of a brand-new chat appearing after a
+natural six-hour collection interval. The Studio retry is intentionally held
+behind the disk condition; no second canary or review wave was opened.
+
+## Historical execution receipt — 2026-09-01T08:45Z
 
 This body-free snapshot records the repaired runtime commit, GitHub-plugin
 readback, the still-running launchd canary, and the Mini no-op. Raw chat bodies,

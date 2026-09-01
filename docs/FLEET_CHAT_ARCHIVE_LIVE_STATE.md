@@ -1,18 +1,47 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-09-01T08:45Z
-**Current truth (supersedes the older one-line state below):** repaired tree
-`300ce290…`; GitHub ref `ec967617…`; New PID 84541 is still active under
-launchd; Studio is idle at `bb9a085…`; Drive publication and the new-chat proof
-await the terminal receipt; Mini source/archive are absent and freed bytes are
-0; Old remains on its retry queue.
+**Last reconciled:** 2026-09-01T11:14Z
+**Current truth (supersedes the older one-line state below):** shipped tree
+`5e33dd15…` is local commit `88d65a7…` and GitHub-plugin commit
+`68c02d1…`; New's terminal receipt is clean under launchd; the Drive publisher
+completed one supervised 24-object batch with zero errors; Studio is on the
+shipped tree but its canary was stopped safely at disk pressure and must not be
+retried until the existing quarantine is handled; Mini's requested source is
+absent and no bytes changed; Old remains on its retry queue.
 **Historical state (pre-repair):** the earlier deployment tree was `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local `e167feb0f5997458c2411195a4380b7d316ce72b`, fork `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`). Its New collector was PID 30001/PPID 1 (`runs=9`), and Studio was booted out while that transfer drained. The earlier Drive publisher receipt recorded 8 uploads, 14 verified skips, and 2 connector failures. The Mini filename-only check found no source, so no gzip or deletion occurred. This line is retained only as a historical receipt; the current truth is the 08:45Z block below.
 
 This file is the repository's canonical rollout state. It records body-free
 counts, hashes, paths, and lifecycle observations only. Raw conversation
 bodies, indexes, and other private archive data remain outside Git.
 
-## Latest live reconciliation — 2026-09-01T08:45Z
+## Latest live reconciliation — 2026-09-01T11:14Z
+
+| Check | Body-free evidence |
+|---|---|
+| Release identity | Local `88d65a7677dbdb483b36a85ff59b907231727502` / tree `5e33dd15aeb26ecbe059ac6cf83338442a21c493`; GitHub-plugin ref `68c02d1953b428b2ecf6443e26a56560bb81f436` has the same tree and was updated with `force=false`. The active lease still names `codex:macbook` on `Mac.lan`. |
+| Verification | Focused publisher tests `9/9` and full suite `272` tests, OK, after the one lock-wait repair; `git diff --check` passed. |
+| New MacBook | `com.mattrotundo.ai-chat-archive.new-macbook` is idle after `runs=11`, last exit `0`, `StartInterval=21600`. Latest receipt `20260901T064318.917191Z-a3e5881a` collected at `2026-09-01T10:22:36.435118Z` is `completed_with_absent_harnesses`, errors `[]`: Claude 31/1 new object, Codex 1,224/17, Hermes 4/2, OpenClaw absent/inventory-only; all present-harness quality statuses are complete. |
+| Mac Studio | Checkout is clean at `68c02d1953b428b2ecf6443e26a56560bb81f436` / tree `5e33dd15…`. Its single shipped-tree canary ran under launchd as PID `54195`, PPID `1`, then was terminated via launchd `SIGTERM` when free space fell below 2 GiB; receipt `20260901T104451.299032Z-40cc7d40` is honestly `failed`/`RunFailure`, launchd last exit `143`, and the lock/staging directory are clean. Existing quarantine consumes `74,892,111,872` bytes (`73,136,828 KiB`) across `22,501` files; no quarantine data was deleted or compressed. |
+| Drive plugin publisher | Launchd `com.mattrotundo.ai-chat-archive.drive-publisher` completed `runs=3`, last exit `0`, `StartInterval=21600`. Receipt `20260901T103707.805024Z-c2f89e5e.json` reports `24` candidates, `24` uploaded, `0` skipped, `0` failed, and `errors=[]` to folder `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`. Connector readback for file `10C4tI7CAeFTn_rYSFICo_9lpdOQ86a0U` verified its exact name, `text/plain`, size `3475`, and parent folder. |
+| Mac Mini | On `Cals-Mac-mini.local`, `/Users/calrotundo/Library/Logs/CoreSimulator/CoreSimulator.prev.log` and `.gz` are absent. Free space was `30,606,172,160` bytes both before and after the guarded check; source/archive/deletion/net-freed bytes are `0`. No gzip, `gzip -t`, spot-decompress, or deletion ran. |
+| Old MacBook | `ssh oldmac` still times out. `com.mattrotundo.ai-chat-archive.old-macbook-deploy-retry` is loaded under launchd with `runs=9`, last exit `0`, `StartInterval=21600`, and repeated `offline_retryable`/`ssh_unreachable` receipts. |
+
+The Studio disk condition is an operational gate, not permission to delete
+unrelated quarantine data. Keep the job idle until that data is explicitly
+handled; do not create a second canary. The structural controls remain binding:
+every long canary is launchd-only; `.deployment-lease.json` names one release
+owner; schema freeze is one live census, one canonical validator, and one
+batched review wave; and findings receive one repair and one re-review.
+
+### Mini-only non-destructive refresh — 2026-09-01T11:19:05Z
+
+The exact requested source and `.gz` sibling remain absent on
+`Cals-Mac-mini.local`. A fresh read-only `df` sample reported
+`29,887,244 KiB` = `30,604,537,856` free bytes; no write, gzip test, spot
+decompress, or deletion occurred, so operation delta and net freed bytes remain
+`0`.
+
+## Historical reconciliation — 2026-09-01T08:45Z
 
 | Check | Body-free evidence |
 |---|---|

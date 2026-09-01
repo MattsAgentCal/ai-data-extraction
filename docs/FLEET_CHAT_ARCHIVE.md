@@ -117,7 +117,31 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Latest live reconciliation — 2026-09-01T08:45Z
+## Latest live reconciliation — 2026-09-01T11:14Z
+
+This body-free checkpoint is the current rollout truth. The shipped tree is
+local commit `88d65a7677dbdb483b36a85ff59b907231727502` / tree
+`5e33dd15aeb26ecbe059ac6cf83338442a21c493`, and the GitHub-plugin ref is
+`68c02d1953b428b2ecf6443e26a56560bb81f436` with the same tree. The one
+lock-wait repair was tested with `9/9` focused tests and `272` full-suite tests,
+all OK. The active lease remains owned by `codex:macbook`.
+
+| Host / route | Observed state | Honest classification |
+|---|---|---|
+| New MacBook | Launchd label is idle after `runs=11`, exit `0`, `StartInterval=21600`. Receipt `20260901T064318.917191Z-a3e5881a` collected at `2026-09-01T10:22:36.435118Z`; errors `[]`; Claude 31/1 new, Codex 1,224/17 new, Hermes 4/2 new, OpenClaw absent/inventory-only, present-harness quality complete. | **DONE:** shipped-tree terminal collector canary. **IN-FLIGHT:** wait for a second natural interval to strengthen the six-hour proof. |
+| Mac Studio | Fast-forwarded cleanly to `68c02d1…` / tree `5e33dd15…`. The launchd-owned canary ran as PID `54195`/PPID `1`; launchd terminated it with `SIGTERM` (`exit=143`) after free space fell below 2 GiB. Receipt `20260901T104451.299032Z-40cc7d40` is `failed`/`RunFailure`; staging and lock are clean. Existing quarantine is `74,892,111,872` bytes (`73,136,828 KiB`, `22,501` files). | **IN-FLIGHT / DISK-GATED:** do not retry until quarantine cleanup is explicitly authorized; no unrelated data was deleted. |
+| Mac Mini | The requested closed log and `.gz` sibling are absent. Free space was `30,606,172,160` bytes before and after; source/archive/deletion/net-freed bytes are `0`. | **DONE:** bounded no-op. **NOT STARTED:** gzip/test/deletion because no source exists; deletion gate remains untouched. |
+| Old MacBook | SSH still times out. The loaded launchd retry queue is at `runs=9`, exit `0`, `StartInterval=21600`, with `offline_retryable` receipts. | **IN-FLIGHT:** non-blocking retry; online deployment/canary is not started. |
+| Drive plugin publisher | Launchd publisher is idle after `runs=3`, exit `0`, `StartInterval=21600`. Receipt `20260901T103707.805024Z-c2f89e5e.json`: 24 candidates, 24 uploaded, 0 skipped, 0 failed, `errors=[]`, target folder `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`. Connector metadata readback verified file `10C4tI7CAeFTn_rYSFICo_9lpdOQ86a0U` as exact-name `text/plain`, 3,475 bytes, exact parent. | **DONE:** one supervised batch and independent metadata proof. **IN-FLIGHT:** a newly collected chat appearing in Drive automatically. |
+
+Controls are structure: every long canary is launchd-only; `.deployment-lease.json`
+names the sole release owner; schema freeze is one live census, one canonical
+validator, and one batched review wave; and findings are repaired once and
+re-reviewed once. The Drive Desktop DMG route is superseded by the activated
+plugin route. No raw bodies, indexes, databases, credentials, or quarantine
+contents were opened.
+
+## Historical reconciliation — 2026-09-01T08:45Z
 
 This body-free checkpoint supersedes the older `04:21Z` block below. The
 repaired code is committed locally as `4b665987ad9c06c618a73fc67e7b6004d1bd1881`

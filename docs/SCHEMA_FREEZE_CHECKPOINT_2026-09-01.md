@@ -4,26 +4,29 @@ This checkpoint authorizes the first release that adds the launchd-owned Drive
 plugin publisher. It is a release gate: one live-schema census, one canonical
 validator, and one review wave. A later broad release needs a new checkpoint.
 
-## Current reconciliation — 2026-09-01T08:45Z
+## Current reconciliation — 2026-09-01T11:14Z
 
-The repaired code tree is `300ce290c9d75e4187a240770db7f9793c57d577` (local
-commit `4b665987ad9c06c618a73fc67e7b6004d1bd1881`; GitHub-plugin commit
-`ec96761786196f58b8157de8dc917c85947a09b8`). The one live census found 71
-`realtime_item` rows in the current Codex rollout that the previous contract
-rejected. One narrow repair added that event to the extractor and canonical
-contract, followed by one batched review/re-review; the full suite is 270
-tests, OK. The New collector is still a single launchd-supervised canary under
-PID 84541, so this checkpoint does not claim a terminal runtime receipt or a
-broad host release. The Mini source and `.gz` copy are absent; no disk mutation
-occurred and freed bytes are 0. Any later broad release needs a new checkpoint.
+The shipped code tree is `5e33dd15aeb26ecbe059ac6cf83338442a21c493` (local
+commit `88d65a7677dbdb483b36a85ff59b907231727502`; GitHub-plugin commit
+`68c02d1953b428b2ecf6443e26a56560bb81f436`). The one live census still governs
+this checkpoint: it found 71 `realtime_item` rows, one narrow contract repair,
+one canonical-validator review wave, and the post-repair suite now passes 272
+tests. The publisher lock-timeout change is operational configuration only and
+does not introduce a second archive schema or census. New has a terminal
+zero-error launchd receipt; Studio was fast-forwarded to this tree but its
+single canary was safely stopped at disk pressure (`SIGTERM`, receipt
+`20260901T104451.299032Z-40cc7d40`). The Mini source and `.gz` copy remain
+absent; no disk mutation occurred and freed bytes are 0. This record does not
+authorize a retry into Studio's nearly full disk or a broad release beyond the
+reachable evidence.
 
 ## Checkpoint record
 
 | Field | Value |
 |---|---|
 | Checkpoint ID | `SF-2026-09-01-drive-publisher` |
-| Release under freeze | `drive-plugin-publisher` (local pre-commit) |
-| Status | `satisfied-for-repaired-release; broad host release still pending terminal canary` |
+| Release under freeze | `drive-plugin-publisher` plus non-schema lock-wait configuration repair |
+| Status | `satisfied-for-shipped-schema; Studio canary disk-gated; broad fleet completion pending` |
 | Live census time | `2026-09-01` (MacBook checkout, immediately before this release review) |
 | Evidence | One live-schema census, one canonical validator, one batched repair/re-review, and the hashes in this file |
 
@@ -59,8 +62,10 @@ The reviewed publisher hash after the one repair/re-review is
 One review wave inspected the bounded `realtime_item` repair, focused tests,
 and the complete unittest suite. Findings were batched into one repair; the
 same focused tests and full suite were re-run once after that repair:
-`270 tests, OK`. No parallel review wave was used or authorized for this
-checkpoint.
+`270 tests, OK`. The later lock-timeout repair is non-schema configuration and
+test coverage only; its separate bounded verification brought the repository
+suite to `272 tests, OK`. No parallel schema review wave was used or authorized
+for this checkpoint.
 
 ## Enforcement shape
 

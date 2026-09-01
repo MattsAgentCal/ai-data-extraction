@@ -1,32 +1,98 @@
 # HANDOFF — Studio successor for the fleet chat export
 
 **Handoff date:** 2026-08-29
-**Last verified:** 2026-09-01T08:45Z (MacBook; body-free live readback)
+**Last verified:** 2026-09-01T11:14Z (MacBook + Studio; body-free live readback)
 **Origin:** MacBook documentation turn
 **Destination:** successor agent operating on the Mac Studio
 **Current mode:** the deployment goal is resumed by the named lease owner;
 this document is the durable handoff and does not transfer the lease. Matt's
 GitHub and Google Docs/Drive plugins are active; the superseded Desktop-DMG
-install gate must not be re-opened. New's current launchd run is still draining
-the Studio shard, Studio is deliberately booted out to prevent reciprocal lock,
-the Mini source check found no `CoreSimulator.prev.log*`, and Old remains
-offline on its retry queue. The end-to-end new-chat-to-Drive proof is still in
-flight. The non-destructive Mini gzip step therefore did not run: source and
-archive are both absent, and no bytes were written or deleted.
+install gate must not be re-opened. The shipped tree is local `88d65a7…` /
+tree `5e33dd15…`, published as GitHub-plugin commit `68c02d1…`. New's
+launchd canary has a terminal zero-error receipt, and the launchd Drive
+publisher completed a 24/24 zero-error batch with connector metadata readback.
+Studio is on the shipped tree but its one launchd canary was stopped safely
+with `SIGTERM` when disk free space fell below 2 GiB; pre-existing quarantine
+data is the operational gate and no retry is authorized until it is handled.
+The end-to-end “new chat appears in Drive automatically” proof remains in
+flight. The Mini non-destructive gzip step did not run because both requested
+paths are absent; Old remains offline on its retry queue.
 
-Fresh Mini-only readback at `2026-09-01T09:16:53Z` remains the current disk
+Fresh Mini-only readback at `2026-09-01T11:19:05Z` remains the current disk
 evidence: both requested paths are absent, and the guarded no-op measured
-`30,620,397,568` free bytes (`29,902,732 KiB`) both before and after. No gzip,
-`gzip -t`, spot-decompress, or deletion ran; exact operation delta and net
-freed space are `0` bytes. This does not authorize deletion or change the
-single outstanding Mini gate.
+`30,604,537,856` free bytes (`29,887,244 KiB`). No gzip, `gzip -t`,
+spot-decompress, or deletion ran; exact operation delta and net freed space are
+`0` bytes. This does not authorize deletion or change the single outstanding
+Mini gate.
 
 This is the complete context for a successor that has the repository but none of
 the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
-## Current reconciliation — 2026-09-01T08:45Z (supersedes older snapshots)
+## Current reconciliation — 2026-09-01T11:14Z (supersedes older snapshots)
+
+This is the successor's current body-free checkpoint. The repository is clean
+at local commit `88d65a7677dbdb483b36a85ff59b907231727502` / tree
+`5e33dd15aeb26ecbe059ac6cf83338442a21c493`; the owned-fork branch was
+read back at `68c02d1953b428b2ecf6443e26a56560bb81f436` with that same tree,
+using `force=false`. The one operational lock-wait repair is covered by
+focused `9/9` tests and a `272`-test full suite. The lease remains active for
+`codex:macbook`; a Studio successor must stand down unless the owner commits a
+transfer.
+
+### Honest per-machine state
+
+| Machine | Current evidence | Classification |
+|---|---|---|
+| New MacBook | `com.mattrotundo.ai-chat-archive.new-macbook` is idle after `runs=11`, exit `0`, `StartInterval=21600`. Receipt `20260901T064318.917191Z-a3e5881a` at `2026-09-01T10:22:36.435118Z` is zero-error `completed_with_absent_harnesses`: Claude 31/1 new object, Codex 1,224/17, Hermes 4/2, OpenClaw absent/inventory-only; present-harness quality is complete. | **DONE:** terminal shipped-tree canary. **IN-FLIGHT:** wait for a second natural interval to strengthen the six-hour proof. |
+| Mac Studio | `/Users/calstudio/Projects/ai-data-extraction` is clean at `68c02d1…` / tree `5e33dd15…`. The launchd-owned canary (`PID 54195`, `PPID 1`) was stopped through launchd `SIGTERM` after free space fell below 2 GiB; receipt `20260901T104451.299032Z-40cc7d40` is `failed`/`RunFailure`, exit `143`. `.work` staging and `.run.lock` are clean. Existing `/Users/calstudio/.local/share/ai-chat-archive/spool/quarantine` is `74,892,111,872` bytes (`73,136,828 KiB`) across `22,501` files. | **IN-FLIGHT / DISK-GATED:** do not retry until quarantine cleanup is explicitly authorized; do not delete or compress it as part of this handoff. |
+| Mac Mini | `Cals-Mac-mini.local` has no requested `CoreSimulator.prev.log` or `.gz`; current free space before/after the guarded check was `30,606,172,160` bytes. Source/archive/deletion/net-freed bytes are all `0`; no gzip or test ran. | **DONE:** non-destructive no-op. **NOT STARTED/GATED:** no export, canary, or schedule; deletion remains untouched. |
+| Old MacBook | `ssh oldmac` still times out. New's retry label is loaded under launchd with `runs=9`, exit `0`, `StartInterval=21600`, and `offline_retryable` receipts. | **IN-FLIGHT:** non-blocking retry. **NOT STARTED:** online deployment/canary. |
+
+### Drive publication and automatic-cycle proof
+
+The launchd publisher on the MacBook completed one supervised run: receipt
+`20260901T103707.805024Z-c2f89e5e.json` has `24` candidates, `24` uploads,
+`0` skips, `0` failures, and `errors=[]` to `AI Chat Archive`
+(`1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`). Connector readback for file
+`10C4tI7CAeFTn_rYSFICo_9lpdOQ86a0U` verified exact name, `text/plain`, size
+`3475`, and exact parent. This proves staged plugin publication under launchd;
+it does not yet prove that a newly created chat, collected on a natural
+six-hour boundary, appears in Drive. The successor must leave the New job
+loaded at `StartInterval=21600`, capture the next terminal receipt without a
+manual kick, then correlate one new object through the publisher receipt and a
+Drive metadata readback. Studio publication should follow only after its disk
+gate clears.
+
+### Binding execution rules
+
+These are structural requirements, not suggestions:
+
+1. Every long canary node runs under persistent launchd; never a foreground
+   terminal or transient controlling session.
+2. `.deployment-lease.json` names the single release owner. Every other
+   session reads it and stands down; transfer requires an owner-authored commit.
+3. Before any broad release, perform one live-schema census, use one canonical
+   validator, and run ONE batched review wave. Batch findings, make one repair,
+   and do one re-review.
+4. Surface Matt gates first, once, batched, and pre-staged to two clicks. The
+   Drive Desktop route is superseded by the activated plugin. The Mini deletion
+   gate remains untouched; never re-ask it.
+
+### First three actions for the successor
+
+1. Read `.deployment-lease.json`, record the active owner, and leave the
+   Studio job idle while the disk gate is unresolved. Do not delete or compress
+   quarantine data or Mini data.
+2. Preserve the New launchd schedule and wait for the next natural run; record
+   its receipt/run-count transition and calculate the elapsed interval against
+   `20260901T064318.917191Z-a3e5881a`.
+3. After a new object is emitted, let the launchd publisher process its batch,
+   read back one exact Drive metadata record, and then update this handoff and
+   the receipt before any Studio retry.
+
+## Historical reconciliation — 2026-09-01T08:45Z
 
 This is the latest body-free snapshot. It supersedes the dated readbacks below;
 those remain historical receipts and must not be used as current host state.
