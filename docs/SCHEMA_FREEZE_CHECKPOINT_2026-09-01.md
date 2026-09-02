@@ -4,6 +4,20 @@ This checkpoint authorizes the first release that adds the launchd-owned Drive
 plugin publisher. It is a release gate: one live-schema census, one canonical
 validator, and one review wave. A later broad release needs a new checkpoint.
 
+## Current implementation reconciliation — 2026-09-02T05:33Z
+
+The frozen archive schema and one canonical validator remain unchanged. Local
+`HEAD` is `6fdb2751dc39fb856ef472380b248062933409f8` / tree
+`7219dc3b0a638b32911676cb89ebcd02221bb7e6`; GitHub-plugin commit
+`374b53eec092ee00181a542181efdd1f0baec50c` publishes that tree non-force.
+Studio fast-forwarded to the published tree and passed `282/282` tests. The
+Drive model-turn transport is still non-schema and uses the already-approved
+validator/readback path; no second census, validator, or review wave was
+opened. The natural New collector/publisher proof is still pending. Mini's
+requested closed log and `.gz` are absent; available space is
+`27,012,556 KiB` (`27,660,857,344` bytes), with source/archive/deletion/freed
+bytes all `0` and the active log untouched.
+
 ## Current reconciliation — 2026-09-01T11:14Z
 
 The shipped code tree is `5e33dd15aeb26ecbe059ac6cf83338442a21c493` (local

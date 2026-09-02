@@ -1,5 +1,29 @@
 # Fleet chat archive live state
 
+## Current live reconciliation — 2026-09-02T05:33Z
+
+This body-free checkpoint supersedes the 04:50Z block below. Local `HEAD` is
+`6fdb2751dc39fb856ef472380b248062933409f8` with tree
+`7219dc3b0a638b32911676cb89ebcd02221bb7e6`; the GitHub-plugin branch is
+`374b53eec092ee00181a542181efdd1f0baec50c` with that same tree, published
+non-force. Studio fast-forwarded cleanly to that ref and passed `282/282`
+tests. The active lease still names `codex:macbook` on `Mac.lan`; no release
+owner changed.
+
+| Check | Body-free evidence | State |
+|---|---|---|
+| New collector | Launchd-loaded and idle: `runs=13`, exit `0`, `StartInterval=21600`. Persisted Codex canary `01a0607a-97d4-7c70-8386-2c9ca81f2bb1` is `133,692` bytes, mtime `2026-09-02T00:57:29-0400`, SHA-256 `0c90fa63eaa4926de0b9d766e77c7df73d1e943fc8c11147570ab9e2192a8e1f`; no post-canary receipt yet. | **Healthy; natural new-chat proof pending.** |
+| New publisher | Latest launchd receipt `20260902T042550.910403Z-3ad4684c` validated both shards and ended partial with 23 exact skips, one historical metadata failure, and zero uploads. | **Supervised; fresh upload pending.** |
+| Drive plugin | Folder `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; previously verified model-turn write/readback remains the route proof. | **Route proven; automatic appearance pending.** |
+| Studio | Clone is clean at `374b53eec092ee00181a542181efdd1f0baec50c`; collector launchd label idle at `runs=3`, exit `0`, `StartInterval=21600`; latest receipt `20260902T013528.694544Z-bb6f6ea0` remains zero-error. | **Reachable collection healthy; New publishes its shard.** |
+| Mini | Exact requested closed log and `.gz` are absent; available `27,012,556 KiB` = `27,660,857,344` bytes (`25.7611808777 GiB`); source/archive/deletion/freed bytes all `0`; active log untouched. | **Paused; no disk mutation or export.** |
+| Old MacBook | SSH timed out; loaded six-hour retry remains `offline_retryable` / `ssh_unreachable`. | **Nonblocking retry; unverified.** |
+
+The structural controls remain binding: every long canary is launchd-owned; the
+repo lease names one release owner; schema freeze is one census, one canonical
+validator, and one review wave; and no additional review wave is opened for
+this documentation reconciliation.
+
 ## Current live reconciliation — 2026-09-02T04:50Z
 
 This body-free checkpoint supersedes the dated snapshots below. Local `HEAD` is

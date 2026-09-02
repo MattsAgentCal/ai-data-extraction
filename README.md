@@ -1,5 +1,27 @@
 # AI Coding Assistant Training Data Extraction Toolkit
 
+> **Current live checkpoint — 2026-09-02T05:33Z (body-free):** local `HEAD` is
+> `6fdb2751dc39fb856ef472380b248062933409f8` with tree
+> `7219dc3b0a638b32911676cb89ebcd02221bb7e6`; the GitHub-plugin branch is
+> `374b53eec092ee00181a542181efdd1f0baec50c` with that same tree, published
+> non-force. The Studio clone fast-forwarded cleanly to that ref and passed
+> the full `282/282` test suite; its collector remains launchd-loaded, idle,
+> `runs=3`, exit `0`, `StartInterval=21600`. New's collector remains
+> launchd-loaded, idle, `runs=13`, exit `0`; the persisted fresh Codex canary is
+> `01a0607a-97d4-7c70-8386-2c9ca81f2bb1` (source mtime
+> `2026-09-02T00:57:29-0400`, `133,692` bytes, SHA-256
+> `0c90fa63eaa4926de0b9d766e77c7df73d1e943fc8c11147570ab9e2192a8e1f`) and
+> has not yet appeared in a natural collector receipt. The latest publisher
+> receipt remains `20260902T042550.910403Z-3ad4684c` (23 exact metadata-verified
+> skips, one historical metadata failure, zero new uploads); automatic
+> new-chat-to-Drive proof is still **IN-FLIGHT**. On the Mini, the exact
+> `CoreSimulator.prev.log` and `.gz` are both absent; available space is
+> `27,012,556 KiB` = `27,660,857,344` bytes (`25.7611808777 GiB`), so the
+> guarded operation was a no-op: source/archive/deletion/freed bytes are all
+> `0`; the active `CoreSimulator.log` was untouched. Old remains on its loaded
+> six-hour retry queue. The Desktop-DMG route is superseded; the activated
+> Google Drive plugin is the publication route.
+
 > **Current live checkpoint — 2026-09-02T04:50Z (body-free):** local release
 > commits `aff135274f26469012e117c1977a641fd8569999` (supervised app-server
 > Drive publisher) and `963342806620c126ba4a4afdd2a94fa37507033f` (lease-file

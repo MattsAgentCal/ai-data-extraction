@@ -1,17 +1,18 @@
 # HANDOFF — Studio successor for the fleet chat export
 
 **Handoff date:** 2026-08-29
-**Last verified:** 2026-09-02T04:50Z (MacBook + GitHub/Drive plugins + Studio/Mini/Old read-only)
+**Last verified:** 2026-09-02T05:33Z (MacBook + GitHub/Drive plugins + Studio/Mini/Old read-only)
 **Origin:** MacBook documentation turn
 **Destination:** successor agent operating on the Mac Studio
 **Current mode:** the deployment goal is resumed by the named lease owner;
 this document is the durable handoff and does not transfer the lease. Matt's
 GitHub and Google Drive plugins are active; the superseded Desktop-DMG install
 gate must not be re-opened. The current local release is
-`963342806620c126ba4a4afdd2a94fa37507033f` / tree
-`e992d33f0a00d2fc1fa781b7219017eb386df9b5`, published by GitHub-plugin commit
-`1303414310a1193e812dfcd3a7f7e53703f35b30`. New and Studio collectors are
-healthy launchd jobs; the supervised publisher route is live but its latest
+`6fdb2751dc39fb856ef472380b248062933409f8` / tree
+`7219dc3b0a638b32911676cb89ebcd02221bb7e6`, published by GitHub-plugin commit
+`374b53eec092ee00181a542181efdd1f0baec50c`. New and Studio collectors are
+healthy launchd jobs; Studio fast-forwarded cleanly to that published tree and
+passed `282/282` tests. The supervised publisher route is live but its latest
 run had one historical metadata failure, so the end-to-end “new chat appears in
 Drive automatically” proof remains in flight. Mini's requested closed log and
 archive are absent and no disk mutation occurred; Old remains offline on its
@@ -29,7 +30,7 @@ the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
-## Current successor handoff — 2026-09-02T04:50Z
+## Current successor handoff — 2026-09-02T05:33Z
 
 ### 1. Matt's goal and current intent
 
@@ -55,9 +56,11 @@ Codex GitHub and Google Drive plugins are the publication route.
   `commit` field names the runtime. Focused tests pass
   `19/19`; full suite `282/282`.
 - GitHub plugin publication succeeded non-force: remote commit
-  `1303414310a1193e812dfcd3a7f7e53703f35b30`, tree
-  `e992d33f0a00d2fc1fa781b7219017eb386df9b5`, matching local
-  `HEAD^{tree}`. The remote parent was `9aec39fb0f9b12623532cf5c8be922781699901d`.
+  `374b53eec092ee00181a542181efdd1f0baec50c`, tree
+  `7219dc3b0a638b32911676cb89ebcd02221bb7e6`, matching local
+  `HEAD^{tree}`. Studio fast-forwarded cleanly to this ref and passed
+  `282/282` tests. The remote parent for this docs update was the previously
+  published `1303414310a1193e812dfcd3a7f7e53703f35b30`.
 - Drive plugin access and the materialization route are proven by an
   independent exact-folder metadata readback: object
   `8ef66ffab4606d80134252cc4040042d4ab753da58167ec66956c4dbee39f6b1.json` is
@@ -68,8 +71,10 @@ Codex GitHub and Google Drive plugins are the publication route.
   `2026-09-01T23:21:40Z` with Claude `3/2` new, Codex `11/11`, Hermes `4/3`,
   and OpenClaw inventory-only.
 - Studio collector is launchd-owned and healthy: `runs=3`, exit `0`, interval
-  `21600`; receipt `20260902T013528.694544Z-bb6f6ea0` has zero errors with
-  Claude `14/8` new, Codex `463/463`, Hermes `186/1`, and OpenClaw absent.
+  `21600`; its clone is clean at `374b53eec092ee00181a542181efdd1f0baec50c`,
+  and receipt `20260902T013528.694544Z-bb6f6ea0` has zero errors with Claude
+  `14/8` new, Codex `463/463`, Hermes `186/1`, and OpenClaw absent. The shipped
+  tree passes `282/282` tests on Studio.
 
 **IN-FLIGHT**
 
@@ -77,11 +82,12 @@ Codex GitHub and Google Drive plugins are the publication route.
   shards and ended partial with 23 exact metadata-verified skips, one failed
   historical object, and zero new uploads. It was started before the receipt
   transport-field repair; the next run uses the committed model-turn route.
-- A fresh Codex canary source exists at
-  `/Users/mattrotundo/.codex/sessions/2026/09/01/rollout-2026-09-01T23-25-06-01a06026-1f96-7fd1-a036-053d75e35a7f.jsonl`
-  (`124807` bytes, mtime `2026-09-01T23:25:14-0400`), after the latest New
-  collector receipt. The natural six-hour collector receipt, publisher
-  selection, and Drive readback chain are not yet proven.
+- A fresh persisted Codex canary source exists at
+  `/Users/mattrotundo/.codex/sessions/2026/09/02/rollout-2026-09-02T00-57-22-01a0607a-97d4-7c70-8386-2c9ca81f2bb1.jsonl`
+  (`133692` bytes, mtime `2026-09-02T00:57:29-0400`, SHA-256
+  `0c90fa63eaa4926de0b9d766e77c7df73d1e943fc8c11147570ab9e2192a8e1f`), after
+  the latest New collector receipt. The natural six-hour collector receipt,
+  publisher selection, and Drive readback chain are not yet proven.
 - Old MacBook is unreachable; its loaded New-host retry remains
   `offline_retryable` / `ssh_unreachable` at `StartInterval=21600`.
 
@@ -90,8 +96,9 @@ Codex GitHub and Google Drive plugins are the publication route.
 - Mini export, four-harness canary, launchd schedule, and Drive publication
   remain paused by instruction. At the exact expected path,
   `CoreSimulator.prev.log` and `.gz` are absent; active `CoreSimulator.log`
-  was untouched. Free space observed was `27,667,742,720` bytes (`25.767593
-  GiB`), archive bytes `0`, freed bytes `0`. No gzip, `gzip -t`, spot
+  was untouched. The latest readback measured `27,012,556 KiB` =
+  `27,660,857,344` bytes (`25.7611808777 GiB`) available; archive bytes,
+  deletion bytes, and freed bytes are all `0`. No gzip, `gzip -t`, spot
   decompress, or deletion ran. There is no source to delete; do not infer a
   successful compression.
 - Old's online deployment and full four-host/four-harness completion remain
@@ -101,9 +108,11 @@ Codex GitHub and Google Drive plugins are the publication route.
 ### 3. Exact file and commit map
 
 The MacBook-only checkout is `/Users/mattrotundo/Projects/ai-data-extraction`;
-the current branch is `matt/fleet-chat-archive-deployed`. The Studio clone is
-`/Users/calstudio/Projects/ai-data-extraction` and currently has the older
-collector-equivalent checkout `68c02d1953b428b2ecf6443e26a56560bb81f436`;
+the current branch is `matt/fleet-chat-archive-deployed` at
+`6fdb2751dc39fb856ef472380b248062933409f8` / tree
+`7219dc3b0a638b32911676cb89ebcd02221bb7e6`. The Studio clone is
+`/Users/calstudio/Projects/ai-data-extraction` and is clean at the published
+`374b53eec092ee00181a542181efdd1f0baec50c` ref;
 the Mini clone is `/Users/calrotundo/Projects/ai-data-extraction` at
 `3c732d7b1031949bd18db90ae4ac40f667f6cfa7`. The Old path is unknown until SSH
 recovers. The MacBook-only app-server socket is

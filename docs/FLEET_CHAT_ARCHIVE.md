@@ -2,6 +2,27 @@
 
 This local extension turns the upstream one-shot extractors into a recurring private archive for four explicitly approved harnesses: Claude Code, Codex, OpenClaw, and Hermes. No other source kind is accepted; in particular, Messages/iMessage is not supported. The implementation is locally tested; [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](FLEET_CHAT_ARCHIVE_LIVE_STATE.md) is the source of truth for live readiness, and [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md) holds the dated body-free evidence.
 
+## Current live reconciliation — 2026-09-02T05:33Z
+
+This body-free checkpoint supersedes the 04:50Z block below. Local `HEAD` is
+`6fdb2751dc39fb856ef472380b248062933409f8` with tree
+`7219dc3b0a638b32911676cb89ebcd02221bb7e6`; GitHub-plugin commit
+`374b53eec092ee00181a542181efdd1f0baec50c` publishes that tree non-force. The
+Studio clone fast-forwarded cleanly to that commit and its shipped tree passes
+`282/282` tests. New and Studio collectors remain launchd-owned at
+`StartInterval=21600`; New is idle at `runs=13`, exit `0`, and Studio is idle at
+`runs=3`, exit `0`.
+
+| Host / route | Current evidence | Honest state |
+|---|---|---|
+| New MacBook | Persisted Codex canary `01a0607a-97d4-7c70-8386-2c9ca81f2bb1` has source mtime `2026-09-02T00:57:29-0400`, `133,692` bytes, SHA-256 `0c90fa63eaa4926de0b9d766e77c7df73d1e943fc8c11147570ab9e2192a8e1f`; no post-canary collector receipt exists yet. The last publisher receipt `20260902T042550.910403Z-3ad4684c` was partial (23 exact skips, one historical metadata failure, zero uploads). | **IN-FLIGHT:** preserve natural collection/publishing cadence and bind this canary to Drive. |
+| Mac Studio | Clone is clean at `374b53eec092ee00181a542181efdd1f0baec50c`; launchd collector is idle at `runs=3`, exit `0`, and Studio tests are `282/282` OK. Latest receipt remains zero-error `20260902T013528.694544Z-bb6f6ea0`. | **DONE for reachable shipped collection; fresh Drive correlation remains in-flight through New.** |
+| Mac Mini | Exact `CoreSimulator.prev.log` and `.gz` are absent. Available space readback is `27,012,556 KiB` = `27,660,857,344` bytes (`25.7611808777 GiB`); source/archive/deletion/freed bytes are all `0`, and active `CoreSimulator.log` was untouched. | **PAUSED / not started:** no gzip, `gzip -t`, spot-decompress, deletion, export, or canary. |
+| Old MacBook | SSH timed out; the New-host retry label remains loaded at six hours with `offline_retryable` / `ssh_unreachable` receipts. | **IN-FLIGHT:** nonblocking retry; deployment unverified. |
+| Drive plugin | Target folder remains `AI Chat Archive` (`1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`); the previously verified model-turn object/readback remains valid. | **Route DONE; automatic fresh-chat appearance pending.** |
+
+No raw conversation bodies or plugin transcripts are present in this checkpoint.
+
 ## Current live reconciliation — 2026-09-02T04:50Z
 
 This body-free checkpoint supersedes the older dated snapshots below. The

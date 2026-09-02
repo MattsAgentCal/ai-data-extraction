@@ -1,5 +1,26 @@
 # Fleet chat archive documentation receipt — 2026-08-29
 
+## Current execution receipt — 2026-09-02T05:33Z
+
+This body-free receipt records the latest deployment reconciliation. Local
+`HEAD` is `6fdb2751dc39fb856ef472380b248062933409f8` / tree
+`7219dc3b0a638b32911676cb89ebcd02221bb7e6`; GitHub-plugin commit
+`374b53eec092ee00181a542181efdd1f0baec50c` publishes that tree non-force.
+Studio fast-forwarded cleanly to the published ref and passed `282/282`
+tests. New and Studio collectors remain launchd-owned at six-hour intervals.
+
+| Check | Body-free evidence | Classification |
+|---|---|---|
+| New automatic cycle | New collector remains idle at `runs=13`, exit `0`; persisted Codex canary `01a0607a-97d4-7c70-8386-2c9ca81f2bb1` is `133,692` bytes with SHA-256 `0c90fa63eaa4926de0b9d766e77c7df73d1e943fc8c11147570ab9e2192a8e1f`, but no post-canary collector receipt exists. | **IN-FLIGHT.** |
+| Drive publisher | Latest receipt `20260902T042550.910403Z-3ad4684c` is partial: 24 candidates, 23 exact metadata-verified skips, one historical metadata failure, zero uploads. | **IN-FLIGHT; wait for the natural post-collector run.** |
+| Studio | Clone `HEAD=374b53eec092ee00181a542181efdd1f0baec50c`, clean; launchd collector `runs=3`, exit `0`; full suite `282/282` OK. | **DONE for reachable shipped collection.** |
+| Mini | Requested closed log and `.gz` are absent. Readback: `27,012,556 KiB` = `27,660,857,344` bytes (`25.7611808777 GiB`) available; source/archive/deletion/freed bytes are `0`; active log untouched. | **PAUSED / no-op; deletion remains gated.** |
+| Old MacBook | SSH timed out; six-hour retry remains loaded and reports `offline_retryable` / `ssh_unreachable`. | **IN-FLIGHT, nonblocking.** |
+
+The success claim remains deliberately withheld until one natural collector
+receipt and one later launchd publisher receipt/readback bind the fresh canary
+to the exact Drive folder. No raw bodies or plugin transcripts are recorded.
+
 **Receipt scope:** body-free deployment and publication evidence. The shipped
 tree is `5e33dd15aeb26ecbe059ac6cf83338442a21c493` (local `88d65a7`, fork
 `68c02d1`), with launchd-only canary, deployment-lease, and schema-freeze
