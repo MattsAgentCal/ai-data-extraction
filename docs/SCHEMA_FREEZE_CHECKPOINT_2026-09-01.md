@@ -7,9 +7,9 @@ validator, and one review wave. A later broad release needs a new checkpoint.
 ## Current implementation reconciliation — 2026-09-02T05:33Z
 
 The frozen archive schema and one canonical validator remain unchanged. Local
-`HEAD` is `6fdb2751dc39fb856ef472380b248062933409f8` / tree
-`7219dc3b0a638b32911676cb89ebcd02221bb7e6`; GitHub-plugin commit
-`374b53eec092ee00181a542181efdd1f0baec50c` publishes that tree non-force.
+`HEAD` is `858d3aa` / tree `7b3e13c4296b61b7d008a4dd0935d5fc0160aeb9`;
+GitHub-plugin commit `bdd361116860832e076c0f9576b7acde5ca02fc3` publishes that
+tree non-force from remote parent `374b53eec092ee00181a542181efdd1f0baec50c`.
 Studio fast-forwarded to the published tree and passed `282/282` tests. The
 Drive model-turn transport is still non-schema and uses the already-approved
 validator/readback path; no second census, validator, or review wave was

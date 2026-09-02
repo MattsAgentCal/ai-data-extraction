@@ -3,9 +3,9 @@
 ## Current execution receipt — 2026-09-02T05:33Z
 
 This body-free receipt records the latest deployment reconciliation. Local
-`HEAD` is `6fdb2751dc39fb856ef472380b248062933409f8` / tree
-`7219dc3b0a638b32911676cb89ebcd02221bb7e6`; GitHub-plugin commit
-`374b53eec092ee00181a542181efdd1f0baec50c` publishes that tree non-force.
+`HEAD` is `858d3aa` / tree `7b3e13c4296b61b7d008a4dd0935d5fc0160aeb9`;
+GitHub-plugin commit `bdd361116860832e076c0f9576b7acde5ca02fc3` publishes that
+tree non-force from remote parent `374b53eec092ee00181a542181efdd1f0baec50c`.
 Studio fast-forwarded cleanly to the published ref and passed `282/282`
 tests. New and Studio collectors remain launchd-owned at six-hour intervals.
 

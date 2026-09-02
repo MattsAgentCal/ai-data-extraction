@@ -1,10 +1,11 @@
 # AI Coding Assistant Training Data Extraction Toolkit
 
 > **Current live checkpoint — 2026-09-02T05:33Z (body-free):** local `HEAD` is
-> `6fdb2751dc39fb856ef472380b248062933409f8` with tree
-> `7219dc3b0a638b32911676cb89ebcd02221bb7e6`; the GitHub-plugin branch is
-> `374b53eec092ee00181a542181efdd1f0baec50c` with that same tree, published
-> non-force. The Studio clone fast-forwarded cleanly to that ref and passed
+> `858d3aa` with tree `7b3e13c4296b61b7d008a4dd0935d5fc0160aeb9`; the
+> GitHub-plugin publication is `bdd361116860832e076c0f9576b7acde5ca02fc3`
+> with that same tree, published non-force from remote parent
+> `374b53eec092ee00181a542181efdd1f0baec50c`. The Studio clone fast-forwarded
+> cleanly to `374b53eec092ee00181a542181efdd1f0baec50c` and passed
 > the full `282/282` test suite; its collector remains launchd-loaded, idle,
 > `runs=3`, exit `0`, `StartInterval=21600`. New's collector remains
 > launchd-loaded, idle, `runs=13`, exit `0`; the persisted fresh Codex canary is

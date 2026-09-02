@@ -8,10 +8,10 @@
 this document is the durable handoff and does not transfer the lease. Matt's
 GitHub and Google Drive plugins are active; the superseded Desktop-DMG install
 gate must not be re-opened. The current local release is
-`6fdb2751dc39fb856ef472380b248062933409f8` / tree
-`7219dc3b0a638b32911676cb89ebcd02221bb7e6`, published by GitHub-plugin commit
-`374b53eec092ee00181a542181efdd1f0baec50c`. New and Studio collectors are
-healthy launchd jobs; Studio fast-forwarded cleanly to that published tree and
+`858d3aa` / tree `7b3e13c4296b61b7d008a4dd0935d5fc0160aeb9`, published by
+GitHub-plugin commit `bdd361116860832e076c0f9576b7acde5ca02fc3`. New and
+Studio collectors are healthy launchd jobs; Studio fast-forwarded cleanly to
+that published tree and
 passed `282/282` tests. The supervised publisher route is live but its latest
 run had one historical metadata failure, so the end-to-end “new chat appears in
 Drive automatically” proof remains in flight. Mini's requested closed log and
@@ -56,11 +56,11 @@ Codex GitHub and Google Drive plugins are the publication route.
   `commit` field names the runtime. Focused tests pass
   `19/19`; full suite `282/282`.
 - GitHub plugin publication succeeded non-force: remote commit
-  `374b53eec092ee00181a542181efdd1f0baec50c`, tree
-  `7219dc3b0a638b32911676cb89ebcd02221bb7e6`, matching local
-  `HEAD^{tree}`. Studio fast-forwarded cleanly to this ref and passed
-  `282/282` tests. The remote parent for this docs update was the previously
-  published `1303414310a1193e812dfcd3a7f7e53703f35b30`.
+  `bdd361116860832e076c0f9576b7acde5ca02fc3`, tree
+  `7b3e13c4296b61b7d008a4dd0935d5fc0160aeb9`, matching local `HEAD^{tree}`.
+  Studio fast-forwarded cleanly to the prior published ref
+  `374b53eec092ee00181a542181efdd1f0baec50c` and passed `282/282` tests. The
+  remote parent for this docs update was `374b53eec092ee00181a542181efdd1f0baec50c`.
 - Drive plugin access and the materialization route are proven by an
   independent exact-folder metadata readback: object
   `8ef66ffab4606d80134252cc4040042d4ab753da58167ec66956c4dbee39f6b1.json` is

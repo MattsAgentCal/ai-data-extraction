@@ -5,9 +5,9 @@ This local extension turns the upstream one-shot extractors into a recurring pri
 ## Current live reconciliation — 2026-09-02T05:33Z
 
 This body-free checkpoint supersedes the 04:50Z block below. Local `HEAD` is
-`6fdb2751dc39fb856ef472380b248062933409f8` with tree
-`7219dc3b0a638b32911676cb89ebcd02221bb7e6`; GitHub-plugin commit
-`374b53eec092ee00181a542181efdd1f0baec50c` publishes that tree non-force. The
+`858d3aa` with tree `7b3e13c4296b61b7d008a4dd0935d5fc0160aeb9`; GitHub-plugin
+commit `bdd361116860832e076c0f9576b7acde5ca02fc3` publishes that tree
+non-force from remote parent `374b53eec092ee00181a542181efdd1f0baec50c`. The
 Studio clone fast-forwarded cleanly to that commit and its shipped tree passes
 `282/282` tests. New and Studio collectors remain launchd-owned at
 `StartInterval=21600`; New is idle at `runs=13`, exit `0`, and Studio is idle at

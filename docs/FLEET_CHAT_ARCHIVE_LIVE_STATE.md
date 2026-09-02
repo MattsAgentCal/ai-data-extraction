@@ -3,10 +3,11 @@
 ## Current live reconciliation — 2026-09-02T05:33Z
 
 This body-free checkpoint supersedes the 04:50Z block below. Local `HEAD` is
-`6fdb2751dc39fb856ef472380b248062933409f8` with tree
-`7219dc3b0a638b32911676cb89ebcd02221bb7e6`; the GitHub-plugin branch is
-`374b53eec092ee00181a542181efdd1f0baec50c` with that same tree, published
-non-force. Studio fast-forwarded cleanly to that ref and passed `282/282`
+`858d3aa` with tree `7b3e13c4296b61b7d008a4dd0935d5fc0160aeb9`; the
+GitHub-plugin publication is `bdd361116860832e076c0f9576b7acde5ca02fc3` with
+that same tree, published non-force from remote parent
+`374b53eec092ee00181a542181efdd1f0baec50c`. Studio fast-forwarded cleanly to
+that published tree and passed `282/282`
 tests. The active lease still names `codex:macbook` on `Mac.lan`; no release
 owner changed.
 
