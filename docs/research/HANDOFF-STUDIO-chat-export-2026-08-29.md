@@ -1,7 +1,7 @@
 # HANDOFF — Studio successor for the fleet chat export
 
 **Handoff date:** 2026-08-29
-**Last verified:** 2026-09-01T11:31Z (MacBook + Drive plugin + Studio/Mini read-only)
+**Last verified:** 2026-09-01T11:53Z (MacBook + Drive plugin + Studio/Mini read-only)
 **Origin:** MacBook documentation turn
 **Destination:** successor agent operating on the Mac Studio
 **Current mode:** the deployment goal is resumed by the named lease owner;
@@ -15,11 +15,13 @@ Studio is on the shipped tree but its one launchd canary was stopped safely
 with `SIGTERM` when disk free space fell below 2 GiB; pre-existing quarantine
 data is the operational gate and no retry is authorized until it is handled.
 The end-to-end “new chat appears in Drive automatically” proof remains in
-flight. The Mini non-destructive gzip step did not run because both requested
-paths are absent; Old remains offline on its retry queue.
+flight. A persistent Codex canary is now staged in the configured source tree,
+but has not yet crossed a natural six-hour collector/publisher boundary. The
+Mini non-destructive gzip step did not run because both requested paths are
+absent; Old remains offline on its retry queue.
 
-Historical Mini-only readback at `2026-09-01T11:19:05Z` is retained below the
-current 11:31Z checkpoint: both requested paths were absent, and the guarded no-op measured
+Historical Mini-only readback at `2026-09-01T11:19:05Z` is retained above the
+current 11:53Z checkpoint as a prior receipt: both requested paths were absent, and the guarded no-op measured
 `30,604,537,856` free bytes (`29,887,244 KiB`). No gzip, `gzip -t`,
 spot-decompress, or deletion ran; exact operation delta and net freed space are
 `0` bytes. This does not authorize deletion or change the single outstanding
@@ -30,9 +32,30 @@ the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
 
-## Current reconciliation — 2026-09-01T11:31Z (supersedes the 11:14Z snapshot)
+## Current reconciliation — 2026-09-01T11:53Z (supersedes the 11:31Z snapshot)
 
-This is the latest body-free handoff checkpoint. Its parent docs ref is the
+This body-free checkpoint records the persistent canary preflight. At
+`2026-09-01T11:49:53.147944Z`, Codex thread
+`01a05ccd-e6b1-7510-82fa-e2296481b2f1` completed without tools as a real
+persistent session. The source file remains host-local under
+`/Users/mattrotundo/.codex/sessions/2026/09/01`, has `16` JSONL records,
+`134,708` bytes, and SHA-256
+`8a76ae73ad5de14d330e99374ee3553c2206a55bfe98741b37322b161a2ae5e3`. The
+collector and publisher were not manually kicked; their next natural windows
+are approximately `2026-09-01T16:22:36Z` and `2026-09-01T16:37:07Z`.
+
+| Machine | Evidence | Classification |
+|---|---|---|
+| New MacBook | At `2026-09-01T11:53:49Z`, collector `runs=11` and publisher `runs=3` were idle, both exit `0`, `StartInterval=21600`; the post-canary receipt is pending. | **IN-FLIGHT:** preserve the natural cycle and correlate one new object through Drive. |
+| Mac Studio | At `2026-09-01T11:52:53Z`, free space was `127,312 KiB`; the shipped label was idle at `runs=1`, exit `143`. | **DISK-GATED:** no retry or quarantine mutation. |
+| Mac Mini | At `2026-09-01T11:48:38Z`, the requested source and `.gz` were absent; free space was `29,876,336 KiB` = `30,593,368,064` bytes and source/archive/operation bytes were `0`. | **PAUSED:** no export/canary/schedule; deletion gate untouched. |
+| Old MacBook | At `2026-09-01T11:52:53Z`, SSH remained unreachable; retry label `runs=9`, exit `0`, `StartInterval=21600`. | **IN-FLIGHT:** nonblocking retry. |
+
+The 11:31Z reconciliation remains below as historical evidence.
+
+## Historical reconciliation — 2026-09-01T11:31Z (superseded)
+
+This was the latest body-free handoff checkpoint at 11:31Z. Its parent docs ref is the
 GitHub-plugin commit `f23912ffaed783ee5be84b441980f9dc68d818cf`, tree
 `2f68e6c0dcc2193bec6d0ab3128ab0d9c1b24c35`, parent `68c02d1…`; the local
 checkout has the same tree. The activated Drive plugin canary wrote

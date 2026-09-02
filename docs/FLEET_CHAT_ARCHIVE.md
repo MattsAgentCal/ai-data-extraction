@@ -117,7 +117,30 @@ Remote receipt statuses distinguish `pending_manifest`, `legacy_schema`, `unreac
 Successful imports report `pulled`; a valid cached shard can still be published
 when the new remote attempt reports `unreachable`.
 
-## Latest live reconciliation — 2026-09-01T11:31Z
+## Latest live reconciliation — 2026-09-01T11:53Z
+
+This body-free checkpoint supersedes the 11:31Z block below. At
+`2026-09-01T11:49:53.147944Z`, a deliberately tiny **persistent** Codex canary
+completed successfully as thread
+`01a05ccd-e6b1-7510-82fa-e2296481b2f1`. Its session file is under the configured
+`/Users/mattrotundo/.codex/sessions/2026/09/01` source tree, is `134,708` bytes,
+and has SHA-256
+`8a76ae73ad5de14d330e99374ee3553c2206a55bfe98741b37322b161a2ae5e3`. The
+collector and publisher were not manually kicked; the next natural windows are
+approximately `2026-09-01T16:22:36Z` and `2026-09-01T16:37:07Z` based on their
+last completed receipts and six-hour intervals.
+
+| Host / route | Observed state | Honest classification |
+|---|---|---|
+| New MacBook | At `2026-09-01T11:53:49Z`, collector `runs=11` and publisher `runs=3` were idle, both exit `0`, and both `StartInterval=21600`. The persistent canary is present in the configured Codex root; no post-canary receipt exists yet. | **IN-FLIGHT:** leave the natural cycle untouched and correlate the new object through Drive. |
+| Mac Studio | At `2026-09-01T11:52:53Z`, free space was `127,312 KiB`; the shipped label is idle at `runs=1`, exit `143`, `StartInterval=21600`. | **DISK-GATED:** no retry or quarantine mutation. |
+| Mac Mini | At `2026-09-01T11:48:38Z`, the exact requested source and `.gz` were absent; free space was `29,876,336 KiB` = `30,593,368,064` bytes. Direct source/archive sizes were `0`; no bytes changed. | **DONE:** guarded no-op; export and schedule remain paused. |
+| Old MacBook | At `2026-09-01T11:52:53Z`, SSH remains unreachable; the retry label is loaded at `runs=9`, exit `0`, `StartInterval=21600`. | **IN-FLIGHT:** nonblocking offline retry. |
+| Drive plugin | The prior supervised batch remains `24/24/0/0`; no new post-canary publication has occurred yet. | **DONE:** staged route; **IN-FLIGHT:** automatic new-chat proof. |
+
+The 11:31Z reconciliation remains below as historical evidence.
+
+## Historical live reconciliation — 2026-09-01T11:31Z
 
 This body-free checkpoint supersedes the 11:14Z block below. Its parent
 GitHub-plugin documentation ref is `f23912ffaed783ee5be84b441980f9dc68d818cf` (tree

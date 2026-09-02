@@ -1,6 +1,6 @@
 # Fleet chat archive live state
 
-**Last reconciled:** 2026-09-01T11:31Z
+**Last reconciled:** 2026-09-01T11:53Z
 **Current truth (supersedes the older one-line state below):** shipped tree
 `5e33dd15…` is local commit `88d65a7…` and GitHub-plugin commit
 `68c02d1…`; New's terminal receipt is clean under launchd; the Drive publisher
@@ -8,15 +8,35 @@ completed one supervised 24-object batch with zero errors and the active plugin
 canary write/readback/cleanup succeeded; Studio is on the shipped tree but its
 canary was stopped safely at disk pressure and must not be retried until the
 existing quarantine is handled; Mini's requested source is absent and no bytes
-changed; Old remains on its retry queue. The next natural New interval is
-preserved for the automatic new-chat proof.
-**Historical state (pre-repair):** the earlier deployment tree was `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local `e167feb0f5997458c2411195a4380b7d316ce72b`, fork `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`). Its New collector was PID 30001/PPID 1 (`runs=9`), and Studio was booted out while that transfer drained. The earlier Drive publisher receipt recorded 8 uploads, 14 verified skips, and 2 connector failures. The Mini filename-only check found no source, so no gzip or deletion occurred. This line is retained only as a historical receipt; the current truth is the 11:31Z block below.
+changed; Old remains on its retry queue. A persistent Codex canary is now present
+under the configured source root, and the next natural New interval is preserved
+for the automatic new-chat proof.
+**Historical state (pre-repair):** the earlier deployment tree was `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local `e167feb0f5997458c2411195a4380b7d316ce72b`, fork `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`). Its New collector was PID 30001/PPID 1 (`runs=9`), and Studio was booted out while that transfer drained. The earlier Drive publisher receipt recorded 8 uploads, 14 verified skips, and 2 connector failures. The Mini filename-only check found no source, so no gzip or deletion occurred. This line is retained only as a historical receipt; the current truth is the 11:53Z block below.
 
 This file is the repository's canonical rollout state. It records body-free
 counts, hashes, paths, and lifecycle observations only. Raw conversation
 bodies, indexes, and other private archive data remain outside Git.
 
-## Latest live reconciliation — 2026-09-01T11:31Z
+## Latest live reconciliation — 2026-09-01T11:53Z
+
+This body-free checkpoint supersedes the 11:31Z block below. A persistent Codex
+canary completed at `2026-09-01T11:49:53.147944Z` as thread
+`01a05ccd-e6b1-7510-82fa-e2296481b2f1`; its 16-record session file is
+`134,708` bytes with SHA-256
+`8a76ae73ad5de14d330e99374ee3553c2206a55bfe98741b37322b161a2ae5e3`. The
+collector and publisher were not manually kicked; expected natural windows are
+approximately `16:22:36Z` and `16:37:07Z`.
+
+| Check | Body-free evidence |
+|---|---|
+| New natural-cycle preflight | At `2026-09-01T11:53:49Z`, collector `runs=11` and publisher `runs=3` were idle, both last exit `0`, `StartInterval=21600`; no post-canary receipt exists yet. |
+| Studio disk gate | At `2026-09-01T11:52:53Z`, free space was `127,312 KiB`; the shipped label was idle at `runs=1`, exit `143`; no retry or quarantine mutation occurred. |
+| Mini | At `2026-09-01T11:48:38Z`, the exact requested source and `.gz` were absent. Free space was `29,876,336 KiB` = `30,593,368,064` bytes; source/archive/operation bytes were `0`. |
+| Old | At `2026-09-01T11:52:53Z`, SSH remained unreachable; the retry queue was loaded at `runs=9`, exit `0`, `StartInterval=21600`. |
+
+The 11:31Z reconciliation remains below as historical evidence.
+
+## Historical live reconciliation — 2026-09-01T11:31Z
 
 This body-free checkpoint supersedes the 11:14Z block below. Its parent
 GitHub-plugin documentation ref `f23912ffaed783ee5be84b441980f9dc68d818cf` has tree

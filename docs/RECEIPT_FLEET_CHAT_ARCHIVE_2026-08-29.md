@@ -13,9 +13,31 @@ pre-existing quarantine data and was stopped safely at `SIGTERM`.
 probes to Studio and Mini, launchd readback, GitHub connector readback, and Drive
 connector readback. That historical readback opened no new release or review
 wave. The current body-free reconciliation is recorded below at
-2026-09-01T11:31Z.
+2026-09-01T11:53Z.
 
-## Current execution receipt — 2026-09-01T11:31Z
+## Current execution receipt — 2026-09-01T11:53Z
+
+This body-free receipt supersedes the 11:31Z section below. A persistent Codex
+canary completed at `2026-09-01T11:49:53.147944Z` as thread
+`01a05ccd-e6b1-7510-82fa-e2296481b2f1`. Its configured source file is
+`/Users/mattrotundo/.codex/sessions/2026/09/01/rollout-2026-09-01T07-49-52-01a05ccd-e6b1-7510-82fa-e2296481b2f1.jsonl`, with `16` JSONL records,
+`134,708` bytes, and SHA-256
+`8a76ae73ad5de14d330e99374ee3553c2206a55bfe98741b37322b161a2ae5e3`.
+No manual collector or publisher kick was used. Based on the last completed
+receipts and six-hour intervals, the next natural windows are approximately
+`2026-09-01T16:22:36Z` and `2026-09-01T16:37:07Z`.
+
+| Check | Current observed evidence |
+|---|---|
+| New automatic-cycle preflight | At `2026-09-01T11:53:49Z`, collector `runs=11` and publisher `runs=3` were idle, both last exit `0`, and both loaded plists showed `StartInterval=21600`. The canary has not yet produced a post-cycle collector or Drive receipt. |
+| Studio | At `2026-09-01T11:52:53Z`, free space was `127,312 KiB`; the shipped label was idle at `runs=1`, exit `143`; no retry or quarantine mutation occurred. |
+| Mini | At `2026-09-01T11:48:38Z`, the requested source and `.gz` were absent. Free space was `29,876,336 KiB` = `30,593,368,064` bytes; direct source/archive sizes and operation delta were `0`. |
+| Old | At `2026-09-01T11:52:53Z`, SSH remained unreachable; the loaded retry queue was `runs=9`, exit `0`, `StartInterval=21600`. |
+| Drive | The previous launchd publication remains `24` candidates / `24` uploaded / `0` skipped / `0` failed; no new canary-backed upload is claimed. |
+
+The natural six-hour new-chat-to-Drive correlation remains **IN-FLIGHT**.
+
+## Historical execution receipt — 2026-09-01T11:31Z
 
 This body-free receipt supersedes the 11:14Z section below. Its parent
 GitHub-plugin documentation ref is `f23912ffaed783ee5be84b441980f9dc68d818cf` / tree
