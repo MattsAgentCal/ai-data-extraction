@@ -1,5 +1,36 @@
 # AI Coding Assistant Training Data Extraction Toolkit
 
+> **Current live checkpoint — 2026-09-02T04:50Z (body-free):** local release
+> commits `aff135274f26469012e117c1977a641fd8569999` (supervised app-server
+> Drive publisher) and `963342806620c126ba4a4afdd2a94fa37507033f` (lease-file
+> update naming that runtime) pass the focused `19`-test suite and full `282`-
+> test suite.
+> The GitHub-plugin publication is remote commit
+> `1303414310a1193e812dfcd3a7f7e53703f35b30`, tree
+> `e992d33f0a00d2fc1fa781b7219017eb386df9b5`, a non-force update of
+> `matt/fleet-chat-archive-deployed`; the tree matches local `HEAD^{tree}`.
+> New's collector is launchd-owned, idle after `runs=13`, exit `0`,
+> `StartInterval=21600`; its latest terminal receipt is
+> `20260901T211000.917786Z-97b49fd7` (finished `2026-09-01T23:21:40Z`, Claude
+> 3/2 new, Codex 11/11, Hermes 4/3, OpenClaw inventory-only). The supervised
+> Drive publisher run `20260902T042550.910403Z-3ad4684c` validated both New and
+> Studio shards and ended partial with 23 exact metadata-verified skips and one
+> failed historical object; no new upload was proven in that run. A separate
+> live model-turn plugin write/readback verified object
+> `8ef66ffab4606d80134252cc4040042d4ab753da58167ec66956c4dbee39f6b1.json` as
+> Drive file `1-g2pg5Ce498zwWDG2kd0MyUL57FKEoJv`, `text/plain`, `67,687` bytes,
+> and exact parent `AI Chat Archive` (`1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`).
+> The automatic new-chat proof remains **IN-FLIGHT** until a natural collector
+> run emits a fresh object and a later launchd publisher receipt/readback binds
+> it to Drive. Studio's collector is healthy (latest receipt
+> `20260902T013528.694544Z-bb6f6ea0`, zero errors; Claude 14/8 new, Codex
+> 463/463, Hermes 186/1; OpenClaw absent). Mini remains paused: the exact
+> `CoreSimulator.prev.log` and `.gz` are absent, active `CoreSimulator.log` was
+> untouched, current free space was `27,667,742,720` bytes (`25.767593 GiB`),
+> and archive/freed bytes are `0`; no deletion is authorized. Old is still
+> unreachable on its loaded six-hour retry queue. The Desktop-DMG route is
+> superseded by the authenticated plugin route.
+
 > Latest body-free fleet checkpoint (2026-09-01T12:20Z): shipped runtime commit `88d65a7677dbdb483b36a85ff59b907231727502`, tree `5e33dd15aeb26ecbe059ac6cf83338442a21c493`; GitHub-plugin fast-forward `68c02d1953b428b2ecf6443e26a56560bb81f436` has the same tree. Focused publisher tests are 9/9 and the full suite is 272 tests, OK. New's launchd collector is idle after `runs=11`, exit 0, `StartInterval=21600`; terminal receipt `20260901T064318.917191Z-a3e5881a` is zero-error across present Claude/Codex/Hermes sources and OpenClaw is inventory-only. The Drive plugin publisher is idle after `runs=3`, exit 0, `StartInterval=21600`; receipt `20260901T103707.805024Z-c2f89e5e.json` uploaded 24/24 candidates with zero failures to `AI Chat Archive` (`1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`), and a connector readback verified file `10C4tI7CAeFTn_rYSFICo_9lpdOQ86a0U` as exact-parent `text/plain`, 3,475 bytes. The persistent Codex canary remains queued for the next natural collector/publisher windows (approximately `16:22:36Z` and `16:37:07Z`); no manual kick has been used, so automatic new-chat appearance is still unproven. Studio is on the shipped tree but its single launchd canary was stopped with SIGTERM at disk pressure; its receipt `20260901T104451.299032Z-40cc7d40` is honestly failed, staging is clean, and pre-existing quarantine consumes 73,136,828 KiB across 22,501 files. On the Mini, both `CoreSimulator.prev.log` and `.gz` are absent; the latest readback at `12:18:34Z` measured 29,872,256 KiB (`30,589,190,144` bytes) free, with source 0 bytes, archive 0 bytes, deletion 0 bytes, and freed 0 bytes. Old remains on its loaded 21,600-second offline retry queue. Every long canary is launchd-owned; `.deployment-lease.json` names the sole release owner; schema freeze is one census/one canonical validator/one review wave; the Desktop DMG path is superseded.
 
 > Historical fleet reconciliation (pre-repair, 2026-09-01): see [`docs/FLEET_CHAT_ARCHIVE.md`](docs/FLEET_CHAT_ARCHIVE.md) and [`docs/FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](docs/FLEET_CHAT_ARCHIVE_LIVE_STATE.md) for the body-free rollout record. The deployed tree was `8914a6e275cf898d84a3ec4ff7f26c6bce149b13` (local commit `e167feb0f5997458c2411195a4380b7d316ce72b`; fork ref `a3a8ad5e9da7eb0aa44cb03b5c2440f3d3b7530f`). The full suite had 270 tests passing before the realtime-item repair. New's earlier launchd collector was PID 30001/PPID 1 (`runs=9`, `StartInterval=21600`) while it validated a Studio staging shard; its receipt was still in flight. Studio was intentionally booted out while New drained that transfer; its stop receipt was the honest `20260901T024039.360623Z-bc4432a1.json` failure. The authenticated Drive plugin route was active: target folder `AI Chat Archive` was `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`, and the launchd publisher's first receipt (`20260901T025751.237727Z-74cdf5d2.json`) recorded 8 uploads, 14 metadata-verified skips, and 2 connector failures. The end-to-end new-chat-to-Drive canary remained in flight. On the Mini, the earlier filename-only check found no source; no gzip or deletion occurred. Old remained on its loaded 21,600-second offline retry queue. Every long canary was launchd-owned; `.deployment-lease.json` named the sole release owner; schema freeze required one live census, one canonical validator, and one review wave; the Desktop DMG path was superseded and `extract_all.sh` was not the fleet pipeline.

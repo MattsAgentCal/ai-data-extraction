@@ -20,6 +20,25 @@ absent; no disk mutation occurred and freed bytes are 0. This record does not
 authorize a retry into Studio's nearly full disk or a broad release beyond the
 reachable evidence.
 
+## Current implementation reconciliation — 2026-09-02T04:50Z
+
+The Drive transport repair is non-schema and follows this checkpoint's single
+census/validator/review-wave decision. Local runtime commit
+`aff135274f26469012e117c1977a641fd8569999` routes publication through an
+ephemeral authenticated app-server model turn, then performs an independent
+exact-folder metadata readback. Lease binding is commit
+`aff135274f26469012e117c1977a641fd8569999` (the lease-file update itself is
+`963342806620c126ba4a4afdd2a94fa37507033f`). Focused tests pass `19/19` and the
+full suite passes `282/282`. The GitHub-plugin publication is
+`1303414310a1193e812dfcd3a7f7e53703f35b30` with tree
+`e992d33f0a00d2fc1fa781b7219017eb386df9b5`, matching local `HEAD^{tree}`;
+`force=false` was used. The current launchd publisher receipt
+`20260902T042550.910403Z-3ad4684c` was produced by the pre-repair process and
+is partial (23 verified skips, one historical metadata failure); it is not
+treated as a new-chat success. The next natural collector/publisher cycle must
+be read back before claiming automatic Drive appearance. Mini remains paused
+and untouched; its requested closed log is absent and no bytes were changed.
+
 ## Checkpoint record
 
 | Field | Value |

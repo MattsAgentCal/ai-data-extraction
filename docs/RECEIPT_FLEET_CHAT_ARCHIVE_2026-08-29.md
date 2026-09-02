@@ -9,6 +9,31 @@ check found no `CoreSimulator.prev.log*`, so no gzip or deletion occurred. Old
 remains on a non-blocking retry queue; Studio's fresh canary is disk-gated by
 pre-existing quarantine data and was stopped safely at `SIGTERM`.
 
+## Current execution receipt — 2026-09-02T04:50Z
+
+This body-free receipt records the current shipped state. Local commits
+`aff135274f26469012e117c1977a641fd8569999` and
+`963342806620c126ba4a4afdd2a94fa37507033f` pass focused `19/19` and full
+`282/282` tests. GitHub-plugin commit
+`1303414310a1193e812dfcd3a7f7e53703f35b30` is a non-force update of the owned
+fork branch and has tree `e992d33f0a00d2fc1fa781b7219017eb386df9b5`, identical
+to local `HEAD^{tree}`.
+
+| Check | Body-free evidence | Classification |
+|---|---|---|
+| New collector | Launchd idle, `runs=13`, exit `0`, `StartInterval=21600`; receipt `20260901T211000.917786Z-97b49fd7` finished `2026-09-01T23:21:40Z` with Claude 3/2 new, Codex 11/11, Hermes 4/3, OpenClaw inventory-only. | **Healthy; natural proof pending.** |
+| New publisher | Launchd run `20260902T042550.910403Z-3ad4684c` ended `partial`: 24 candidates, 23 exact metadata-verified skips, one `metadata_verification_failed` historical object, zero new uploads; both New and Studio shards validated. | **Supervised; next committed model-turn run pending.** |
+| Drive plugin | Folder `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; independent readback of `8ef66ffab4606d80134252cc4040042d4ab753da58167ec66956c4dbee39f6b1.json` returned file `1-g2pg5Ce498zwWDG2kd0MyUL57FKEoJv`, `text/plain`, `67687` bytes, exact parent. | **Route proven; automatic fresh-chat appearance pending.** |
+| Studio | Launchd collector idle, `runs=3`, exit `0`, `StartInterval=21600`; latest receipt `20260902T013528.694544Z-bb6f6ea0` zero-error with Claude 14/8 new, Codex 463/463, Hermes 186/1, OpenClaw absent. | **Reachable collection healthy.** |
+| Mini | Exact `CoreSimulator.prev.log` and `.gz` absent; active log untouched; free `27,667,742,720` bytes (`25.767593 GiB`); output/freed bytes `0`. | **Paused; no gzip/deletion/export/canary.** |
+| Old MacBook | SSH timed out; loaded retry is `offline_retryable` / `ssh_unreachable`. | **Nonblocking retry; unverified.** |
+
+The automatic proof is deliberately not claimed: a fresh Codex source file
+exists after the latest New collector receipt, but its natural six-hour
+collector and subsequent publisher/readback chain is still pending. Raw chat
+bodies and tool transcripts remain outside Git and this receipt. Mini deletion
+is still Matt-gated; the former Drive Desktop gate is superseded by the plugin.
+
 **Original observed:** 2026-08-29T22:03:47Z, from the local MacBook plus SSH
 probes to Studio and Mini, launchd readback, GitHub connector readback, and Drive
 connector readback. That historical readback opened no new release or review

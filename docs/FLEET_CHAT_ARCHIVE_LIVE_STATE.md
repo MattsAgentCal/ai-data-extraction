@@ -1,5 +1,30 @@
 # Fleet chat archive live state
 
+## Current live reconciliation — 2026-09-02T04:50Z
+
+This body-free checkpoint supersedes the dated snapshots below. Local `HEAD` is
+`963342806620c126ba4a4afdd2a94fa37507033f` with tree
+`e992d33f0a00d2fc1fa781b7219017eb386df9b5`; the GitHub-plugin branch is
+`1303414310a1193e812dfcd3a7f7e53703f35b30` with the same tree, published
+non-force from remote parent `9aec39fb0f9b12623532cf5c8be922781699901d`.
+The publisher implementation is `aff135274f26469012e117c1977a641fd8569999`;
+focused tests are `19/19`, full suite `282/282`.
+
+| Check | Body-free evidence | State |
+|---|---|---|
+| New collector | Launchd-loaded and idle: `runs=13`, exit `0`, `StartInterval=21600`. Receipt `20260901T211000.917786Z-97b49fd7` finished `2026-09-01T23:21:40Z` with Claude 3/2 new, Codex 11/11, Hermes 4/3, OpenClaw inventory-only. | **Healthy; natural new-chat proof pending.** |
+| New publisher | Launchd run `20260902T042550.910403Z-3ad4684c` validated both shards and ended partial with 23 exact metadata-verified skips and one failed historical object. The committed route now records `drive_transport` and `app_server_mode` in receipts. | **Supervised; fresh upload pending.** |
+| Drive plugin | Folder `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`; object `8ef66ffab4606d80134252cc4040042d4ab753da58167ec66956c4dbee39f6b1.json` read back as file `1-g2pg5Ce498zwWDG2kd0MyUL57FKEoJv`, `text/plain`, `67687` bytes, exact parent. | **Route proven; automatic appearance not proven.** |
+| Studio | Collector launchd label idle after `runs=3`, exit `0`, `StartInterval=21600`. Receipt `20260902T013528.694544Z-bb6f6ea0` is zero-error: Claude 14/8 new, Codex 463/463, Hermes 186/1, OpenClaw absent. | **Reachable collection healthy; New publishes its shard.** |
+| Mini | Exact requested closed log and `.gz` are absent; active `CoreSimulator.log` untouched. Free space observed `27,667,742,720` bytes (`25.767593 GiB`); archive/freed bytes `0`. | **Paused; no export, gzip, deletion, or canary.** |
+| Old MacBook | SSH timed out; loaded six-hour retry reports `offline_retryable` / `ssh_unreachable`. | **Nonblocking retry; unverified.** |
+
+The lease owner is still `codex:macbook` on `Mac.lan`; any other session must
+stand down. Every long canary is launchd-owned. Schema freeze remains one live
+census, one canonical validator, and one review wave. The Desktop-DMG route is
+superseded by the activated plugin; Mini deletion is the only outstanding
+Matt-controlled destructive gate.
+
 **Last reconciled:** 2026-09-01T11:53Z
 **Current truth (supersedes the older one-line state below):** shipped tree
 `5e33dd15…` is local commit `88d65a7…` and GitHub-plugin commit

@@ -2,6 +2,31 @@
 
 This local extension turns the upstream one-shot extractors into a recurring private archive for four explicitly approved harnesses: Claude Code, Codex, OpenClaw, and Hermes. No other source kind is accepted; in particular, Messages/iMessage is not supported. The implementation is locally tested; [`FLEET_CHAT_ARCHIVE_LIVE_STATE.md`](FLEET_CHAT_ARCHIVE_LIVE_STATE.md) is the source of truth for live readiness, and [`RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`](RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md) holds the dated body-free evidence.
 
+## Current live reconciliation — 2026-09-02T04:50Z
+
+This body-free checkpoint supersedes the older dated snapshots below. The
+MacBook checkout is local `963342806620c126ba4a4afdd2a94fa37507033f` (tree
+`e992d33f0a00d2fc1fa781b7219017eb386df9b5`) and the same tree is published on
+the owned fork by GitHub-plugin commit
+`1303414310a1193e812dfcd3a7f7e53703f35b30`, using `force=false`. The runtime
+change is `aff135274f26469012e117c1977a641fd8569999`; it routes Drive uploads
+through an ephemeral authenticated Codex app-server model turn and independently
+re-verifies Drive metadata. Focused tests are `19/19`; the full suite is
+`282/282`.
+
+| Host / route | Current evidence | Honest state |
+|---|---|---|
+| New MacBook | Collector label is loaded under launchd (`runs=13`, exit `0`, `StartInterval=21600`). Receipt `20260901T211000.917786Z-97b49fd7` finished `2026-09-01T23:21:40Z` with Claude 3/2 new, Codex 11/11, Hermes 4/3, and OpenClaw inventory-only. Publisher receipt `20260902T042550.910403Z-3ad4684c` ran under launchd against New + Studio shards and ended partial: 23 exact metadata-verified skips, one failed historical object; its process exited before the receipt-field repair. | **IN-FLIGHT:** preserve natural six-hour collection and publisher cadence; correlate a fresh chat through object, receipt, and Drive. |
+| Mac Studio | Collector is loaded and idle (`runs=3`, exit `0`, `StartInterval=21600`). Receipt `20260902T013528.694544Z-bb6f6ea0` is zero-error: Claude 14/8 new, Codex 463/463, Hermes 186/1, OpenClaw absent. Free space was `417,574,804 KiB`. New's publisher validates this shard; Studio has no separate Drive publisher. | **DONE for reachable collection; Drive correlation remains in-flight through New.** |
+| Mac Mini | SSH is reachable, but export/canary/schedule remains paused by instruction. Exact `CoreSimulator.prev.log` and `.gz` are absent; active `CoreSimulator.log` was not touched. Current free space was `27,667,742,720` bytes (`25.767593 GiB`); archive and freed bytes are `0`. | **PAUSED / not started:** no gzip, verification, deletion, or four-harness canary. |
+| Old MacBook | SSH timed out; the New-host retry label remains loaded at six hours and latest evidence is `offline_retryable` / `ssh_unreachable`. | **IN-FLIGHT:** nonblocking retry; deployment remains unverified. |
+| Drive plugin | Folder `AI Chat Archive` is `1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`. A live model-turn write/readback verified `8ef66ffab4606d80134252cc4040042d4ab753da58167ec66956c4dbee39f6b1.json` as file `1-g2pg5Ce498zwWDG2kd0MyUL57FKEoJv`, `text/plain`, 67,687 bytes, exact parent. | **DONE:** plugin route and metadata gate; **IN-FLIGHT:** natural new-chat proof. |
+
+The only remaining Matt-controlled data gate is Mini deletion (and any future
+decision to start its paused export). The former Drive Desktop install/login
+gate is superseded by the activated Codex plugin. Raw bodies remain host-local
+and are not present in this checkpoint.
+
 ## Data path
 
 1. When its reviewed scheduler is enabled, each Mac collects local harness data every six hours into an owner-only spool at `~/.local/share/ai-chat-archive/spool`. Unchanged transcript files are fingerprinted and skipped; changed sessions are streamed one at a time.

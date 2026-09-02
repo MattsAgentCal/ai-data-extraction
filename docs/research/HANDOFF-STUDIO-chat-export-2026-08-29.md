@@ -1,27 +1,24 @@
 # HANDOFF — Studio successor for the fleet chat export
 
 **Handoff date:** 2026-08-29
-**Last verified:** 2026-09-01T11:53Z (MacBook + Drive plugin + Studio/Mini read-only)
+**Last verified:** 2026-09-02T04:50Z (MacBook + GitHub/Drive plugins + Studio/Mini/Old read-only)
 **Origin:** MacBook documentation turn
 **Destination:** successor agent operating on the Mac Studio
 **Current mode:** the deployment goal is resumed by the named lease owner;
 this document is the durable handoff and does not transfer the lease. Matt's
-GitHub and Google Docs/Drive plugins are active; the superseded Desktop-DMG
-install gate must not be re-opened. The shipped tree is local `88d65a7…` /
-tree `5e33dd15…`, published as GitHub-plugin commit `68c02d1…`. New's
-launchd canary has a terminal zero-error receipt, and the launchd Drive
-publisher completed a 24/24 zero-error batch with connector metadata readback.
-Studio is on the shipped tree but its one launchd canary was stopped safely
-with `SIGTERM` when disk free space fell below 2 GiB; pre-existing quarantine
-data is the operational gate and no retry is authorized until it is handled.
-The end-to-end “new chat appears in Drive automatically” proof remains in
-flight. A persistent Codex canary is now staged in the configured source tree,
-but has not yet crossed a natural six-hour collector/publisher boundary. The
-Mini non-destructive gzip step did not run because both requested paths are
-absent; Old remains offline on its retry queue.
+GitHub and Google Drive plugins are active; the superseded Desktop-DMG install
+gate must not be re-opened. The current local release is
+`963342806620c126ba4a4afdd2a94fa37507033f` / tree
+`e992d33f0a00d2fc1fa781b7219017eb386df9b5`, published by GitHub-plugin commit
+`1303414310a1193e812dfcd3a7f7e53703f35b30`. New and Studio collectors are
+healthy launchd jobs; the supervised publisher route is live but its latest
+run had one historical metadata failure, so the end-to-end “new chat appears in
+Drive automatically” proof remains in flight. Mini's requested closed log and
+archive are absent and no disk mutation occurred; Old remains offline on its
+retry queue.
 
-Historical Mini-only readback at `2026-09-01T11:19:05Z` is retained above the
-current 11:53Z checkpoint as a prior receipt: both requested paths were absent, and the guarded no-op measured
+Historical Mini-only readback at `2026-09-01T11:19:05Z` is retained below the
+current checkpoint as a prior receipt: both requested paths were absent, and the guarded no-op measured
 `30,604,537,856` free bytes (`29,887,244 KiB`). No gzip, `gzip -t`,
 spot-decompress, or deletion ran; exact operation delta and net freed space are
 `0` bytes. This does not authorize deletion or change the single outstanding
@@ -31,6 +28,146 @@ This is the complete context for a successor that has the repository but none of
 the originating agent's conversation history. Treat the timestamps and host
 observations below as the last verified snapshot, not as a substitute for a
 fresh read-only check before any mutation.
+
+## Current successor handoff — 2026-09-02T04:50Z
+
+### 1. Matt's goal and current intent
+
+Matt's goal, in his words, is to run
+`https://github.com/0xSero/ai-data-extraction` on the new MacBook, old MacBook,
+Mac Mini, and Mac Studio across Claude Code, Codex, OpenClaw, and Hermes; put
+privacy-safe exports in Google Drive; automate new-chat ingestion; and prove a
+new chat appears in Drive automatically. Current intent is deploy-first:
+reachable hosts and the six-hour launchd path must be real and observed; Old is
+queued without blocking; Mini stays paused and destructive deletion remains
+Matt-gated. Google Drive Desktop installation is superseded: Matt's activated
+Codex GitHub and Google Drive plugins are the publication route.
+
+### 2. Honest state
+
+**DONE with receipts**
+
+- Prior adapter/pipeline work, content-addressed dedupe, credential redaction,
+  provenance manifests, trusted remote stream, lease, schema-freeze controls,
+  and launchd collectors are in the checkout. The new supervised publisher
+  runtime is local commit `aff135274f26469012e117c1977a641fd8569999`; the lease
+  file update is commit `963342806620c126ba4a4afdd2a94fa37507033f` and its
+  `commit` field names the runtime. Focused tests pass
+  `19/19`; full suite `282/282`.
+- GitHub plugin publication succeeded non-force: remote commit
+  `1303414310a1193e812dfcd3a7f7e53703f35b30`, tree
+  `e992d33f0a00d2fc1fa781b7219017eb386df9b5`, matching local
+  `HEAD^{tree}`. The remote parent was `9aec39fb0f9b12623532cf5c8be922781699901d`.
+- Drive plugin access and the materialization route are proven by an
+  independent exact-folder metadata readback: object
+  `8ef66ffab4606d80134252cc4040042d4ab753da58167ec66956c4dbee39f6b1.json` is
+  Drive file `1-g2pg5Ce498zwWDG2kd0MyUL57FKEoJv`, `text/plain`, `67687` bytes,
+  parent `AI Chat Archive` (`1V7Ir654dXlGUcpmR6A0IYCB7FOSwEETV`).
+- New collector is launchd-owned and healthy: `runs=13`, exit `0`, interval
+  `21600`; receipt `20260901T211000.917786Z-97b49fd7` finished at
+  `2026-09-01T23:21:40Z` with Claude `3/2` new, Codex `11/11`, Hermes `4/3`,
+  and OpenClaw inventory-only.
+- Studio collector is launchd-owned and healthy: `runs=3`, exit `0`, interval
+  `21600`; receipt `20260902T013528.694544Z-bb6f6ea0` has zero errors with
+  Claude `14/8` new, Codex `463/463`, Hermes `186/1`, and OpenClaw absent.
+
+**IN-FLIGHT**
+
+- New's launchd publisher run `20260902T042550.910403Z-3ad4684c` validated both
+  shards and ended partial with 23 exact metadata-verified skips, one failed
+  historical object, and zero new uploads. It was started before the receipt
+  transport-field repair; the next run uses the committed model-turn route.
+- A fresh Codex canary source exists at
+  `/Users/mattrotundo/.codex/sessions/2026/09/01/rollout-2026-09-01T23-25-06-01a06026-1f96-7fd1-a036-053d75e35a7f.jsonl`
+  (`124807` bytes, mtime `2026-09-01T23:25:14-0400`), after the latest New
+  collector receipt. The natural six-hour collector receipt, publisher
+  selection, and Drive readback chain are not yet proven.
+- Old MacBook is unreachable; its loaded New-host retry remains
+  `offline_retryable` / `ssh_unreachable` at `StartInterval=21600`.
+
+**NOT STARTED / GATED**
+
+- Mini export, four-harness canary, launchd schedule, and Drive publication
+  remain paused by instruction. At the exact expected path,
+  `CoreSimulator.prev.log` and `.gz` are absent; active `CoreSimulator.log`
+  was untouched. Free space observed was `27,667,742,720` bytes (`25.767593
+  GiB`), archive bytes `0`, freed bytes `0`. No gzip, `gzip -t`, spot
+  decompress, or deletion ran. There is no source to delete; do not infer a
+  successful compression.
+- Old's online deployment and full four-host/four-harness completion remain
+  unverified. OpenClaw is inventory-only/absent on the reachable New and Studio
+  hosts, so “every harness” is not yet a completion claim.
+
+### 3. Exact file and commit map
+
+The MacBook-only checkout is `/Users/mattrotundo/Projects/ai-data-extraction`;
+the current branch is `matt/fleet-chat-archive-deployed`. The Studio clone is
+`/Users/calstudio/Projects/ai-data-extraction` and currently has the older
+collector-equivalent checkout `68c02d1953b428b2ecf6443e26a56560bb81f436`;
+the Mini clone is `/Users/calrotundo/Projects/ai-data-extraction` at
+`3c732d7b1031949bd18db90ae4ac40f667f6cfa7`. The Old path is unknown until SSH
+recovers. The MacBook-only app-server socket is
+`/Users/mattrotundo/.codex/app-server-control/app-server-control.sock`; the
+MacBook-only publisher plist is
+`/Users/mattrotundo/Library/LaunchAgents/com.mattrotundo.ai-chat-archive.drive-publisher.plist`.
+Collector plists are host-local under each user's `Library/LaunchAgents`.
+
+The release-owner file is repo-root `.deployment-lease.json`; it names
+`codex:macbook` / `Mac.lan`, branch, scope, expiry, and commit
+`963342806620c126ba4a4afdd2a94fa37507033f`. The main runtime files are
+`drive_plugin_publisher.py`,
+`configs/new-macbook-drive-publisher.json`, and
+`tests/test_drive_plugin_publisher.py`; current docs are this handoff,
+`docs/FLEET_CHAT_ARCHIVE.md`, `docs/FLEET_CHAT_ARCHIVE_LIVE_STATE.md`,
+`docs/RECEIPT_FLEET_CHAT_ARCHIVE_2026-08-29.md`, and
+`docs/SCHEMA_FREEZE_CHECKPOINT_2026-09-01.md`. Raw spool objects, indexes,
+receipts containing local paths, session files, and plugin transcripts are
+host-local and must not be copied into Git or AgentBrain.
+
+### 4. Open Matt gates
+
+- **Mini destructive gate:** deletion of a protected/closed log is still
+  Matt-controlled. The requested source is currently absent, so the safe
+  action is no-op; never re-ask or improvise a substitute. The paused Mini
+  export/canary also remains outside the shipped completion claim.
+- **Drive Desktop gate:** superseded and closed as a path. The activated Codex
+  Google Drive plugin is now the route; its small write and exact readback are
+  already proven. Do not wait for or install a DMG.
+- **Studio disk gate:** current read-only evidence shows ample free space and a
+  healthy collector; do not resurrect historical quarantine cleanup unless a
+  fresh check creates a separate explicit gate.
+
+### 5. Binding execution structure
+
+These are enforced structure, not advice:
+
+1. Canary-first before infrastructure. Run a live-shaped preflight against the
+   exact source/index/manifest/Drive metadata shape before any long run.
+2. Every long canary node runs under persistent launchd, never a foreground
+   session. The plist must be read back with owner-only logs, absolute paths,
+   `Umask=077`, and a visible run/exit transition.
+3. `.deployment-lease.json` names the single release owner for this repo. Any
+   other session reads it and stands down. Transfer requires an owner commit;
+   only the lease owner may release, restart, merge, or publish.
+4. Before a broad release, perform one live-schema census and use one canonical
+   validator, then ONE review wave. Batch findings, make one repair, and do one
+   re-review; do not open another wave for the same checkpoint.
+5. Surface Matt gates first, once, batched, and pre-staged to two clicks. Do not
+   let a gate silently become the last item.
+
+### 6. Successor's first three actions
+
+1. Read `.deployment-lease.json`, confirm the owner is still `codex:macbook`
+   / `Mac.lan`, and stand down if it differs. Read the current New launchd
+   labels and latest body-free receipts; do not touch Mini or start a duplicate
+   publisher.
+2. Preserve the New collector and publisher schedules. Let a fresh chat be
+   collected on a natural six-hour transition; record the run-count/receipt
+   delta and object digest, then let the next launchd publisher run select it.
+3. Independently search the exact Drive folder and read metadata for that digest
+   (name, ID, `text/plain`, byte size, exact parent), then update this handoff
+   and receipts. Only after that proof should any Studio/Mini/Old deployment
+   decision be surfaced; Mini remains paused.
 
 ## Current reconciliation — 2026-09-01T11:53Z (supersedes the 11:31Z snapshot)
 
